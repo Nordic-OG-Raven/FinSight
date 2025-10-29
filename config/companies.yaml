@@ -1,0 +1,59 @@
+# FinSight Company Configuration
+# List of companies to extract financial data from
+
+companies:
+  - name: "Novo Nordisk"
+    ticker: "NVO"
+    ticker_dk: "NOVO-B.CO"  # Copenhagen Exchange
+    cik: "0000353278"  # SEC CIK number
+    exchange: "NYSE"
+    sector: "Healthcare"
+    industry: "Pharmaceuticals"
+    fiscal_year_end: "12-31"
+    taxonomy: "IFRS"  # or US-GAAP
+    
+  - name: "Eli Lilly"
+    ticker: "LLY"
+    cik: "0000059478"
+    exchange: "NYSE"
+    sector: "Healthcare"
+    industry: "Pharmaceuticals"
+    fiscal_year_end: "12-31"
+    taxonomy: "US-GAAP"
+    
+  - name: "Sanofi"
+    ticker: "SNY"
+    cik: "0001121404"
+    exchange: "NASDAQ"
+    sector: "Healthcare"
+    industry: "Pharmaceuticals"
+    fiscal_year_end: "12-31"
+    taxonomy: "IFRS"
+    
+  - name: "Pfizer"
+    ticker: "PFE"
+    cik: "0000078003"
+    exchange: "NYSE"
+    sector: "Healthcare"
+    industry: "Pharmaceuticals"
+    fiscal_year_end: "12-31"
+    taxonomy: "US-GAAP"
+    
+  - name: "Moderna"
+    ticker: "MRNA"
+    cik: "0001682852"
+    exchange: "NASDAQ"
+    sector: "Healthcare"
+    industry: "Biotechnology"
+    fiscal_year_end: "12-31"
+    taxonomy: "US-GAAP"
+    
+  - name: "AstraZeneca"
+    ticker: "AZN"
+    cik: "0000901832"
+    exchange: "NASDAQ"
+    sector: "Healthcare"
+    industry: "Pharmaceuticals"
+    fiscal_year_end: "12-31"
+    taxonomy: "IFRS"
+

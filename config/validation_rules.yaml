@@ -1,0 +1,56 @@
+# FinSight Validation Rules Configuration
+
+validation_rules:
+  # Balance Sheet Check: Assets = Liabilities + Equity
+  balance_check:
+    enabled: true
+    tolerance: 0.01  # 1% tolerance
+    
+  # EPS Check: EPS ≈ Net Income / Weighted Avg Shares
+  eps_check:
+    enabled: true
+    tolerance: 0.005  # 0.5% tolerance
+    
+  # Cash Flow Tie: End Cash = Start Cash + Net Cash Flow
+  cashflow_tie:
+    enabled: true
+    tolerance: 0.01  # 1% tolerance
+    
+  # Income Flow Check: Net Income ≈ Operating Income - Tax
+  income_flow_check:
+    enabled: true
+    tolerance: 0.02  # 2% tolerance
+    
+  # Currency Consistency Check
+  currency_check:
+    enabled: true
+    
+  # Negative Value Check (flag unexpected negatives)
+  negative_value_check:
+    enabled: true
+    critical_fields:
+      - revenue
+      - total_assets
+      - total_equity
+      
+  # Missing Field Check
+  missing_field_check:
+    enabled: true
+    required_fields:
+      - revenue
+      - net_income
+      - total_assets
+      - total_liabilities
+      - total_equity
+
+# Data Quality Scoring
+quality_scoring:
+  completeness_weight: 0.4  # 40%
+  accuracy_weight: 0.3      # 30%
+  consistency_weight: 0.2   # 20%
+  provenance_weight: 0.1    # 10%
+  
+  # Minimum scores
+  min_passing_score: 0.85
+  min_completeness: 0.90
+
