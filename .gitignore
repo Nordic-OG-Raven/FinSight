@@ -38,12 +38,11 @@ env/
 .env
 .env.local
 
-# Data files (keep raw data cached, but not processed)
-data/processed/*.parquet
-data/processed/*.json
-data/reports/
+# Data files (too large for GitHub, keep local only)
+data/
 logs/
 *.log
+api/data/
 
 # Testing
 .pytest_cache/
