@@ -16,28 +16,38 @@ DATA_REPORTS = PROJECT_ROOT / "data" / "reports"
 SRC_DIR = PROJECT_ROOT / "src"
 CONFIG_DIR = PROJECT_ROOT / "config"
 
-# Database configuration - PostgreSQL (Docker)
+# Database configuration - PostgreSQL
 #
-# IMPORTANT: Superset runs in Docker, so we use Docker's PostgreSQL (superset_db container)
-# 
-# For loading data FROM YOUR MAC (scripts):
-#   - Use host: localhost (connects from Mac to Docker port mapping)
-#   - Use credentials: superset/superset
-# 
-# For Superset TO CONNECT (within Docker):
-#   - Use host: superset_db (Docker internal network)
-#   - Use credentials: superset/superset
+# Supports three environments:
+# 1. Railway (production): Uses RAILWAY_POSTGRES_* env vars
+# 2. Local Docker (dev): Uses localhost with superset credentials
+# 3. Superset (analytics): Uses superset_db internal hostname
 #
-POSTGRES_USER = os.getenv('POSTGRES_USER', 'superset')
-POSTGRES_PASSWORD = os.getenv('POSTGRES_PASSWORD', 'superset')
-POSTGRES_HOST = os.getenv('POSTGRES_HOST', 'localhost')  # localhost for Mac, superset_db for Superset
-POSTGRES_PORT = os.getenv('POSTGRES_PORT', '5432')
-POSTGRES_DB = os.getenv('POSTGRES_DB', 'finsight')
 
-DATABASE_URI = f'postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}'
+# Check if we're on Railway (Railway provides these specific env vars)
+if os.getenv('RAILWAY_POSTGRES_HOST'):
+    # Railway PostgreSQL
+    POSTGRES_USER = os.getenv('RAILWAY_POSTGRES_USER')
+    POSTGRES_PASSWORD = os.getenv('RAILWAY_POSTGRES_PASSWORD')
+    POSTGRES_HOST = os.getenv('RAILWAY_POSTGRES_HOST')
+    POSTGRES_PORT = os.getenv('RAILWAY_POSTGRES_PORT', '5432')
+    POSTGRES_DB = os.getenv('RAILWAY_POSTGRES_DB', 'railway')
+else:
+    # Local or Docker
+    POSTGRES_USER = os.getenv('POSTGRES_USER', 'superset')
+    POSTGRES_PASSWORD = os.getenv('POSTGRES_PASSWORD', 'superset')
+    POSTGRES_HOST = os.getenv('POSTGRES_HOST', '127.0.0.1')
+    POSTGRES_PORT = os.getenv('POSTGRES_PORT', '5432')
+    POSTGRES_DB = os.getenv('POSTGRES_DB', 'finsight_dev')
 
-# Note: This URI is for loading data from your Mac. 
-# In Superset, use: postgresql://superset:superset@superset_db:5432/finsight
+# Build connection string
+if POSTGRES_PASSWORD:
+    DATABASE_URI = f'postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}'
+else:
+    DATABASE_URI = f'postgresql://{POSTGRES_USER}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}'
+
+# Alias for compatibility
+DATABASE_URL = DATABASE_URI
 
 # API Keys (optional)
 SEC_API_KEY = os.getenv('SEC_API_KEY', '')
