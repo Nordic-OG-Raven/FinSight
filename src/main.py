@@ -28,6 +28,73 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def run_pipeline(ticker: str, year: int, filing_type: str = '10-K') -> bool:
+    """
+    Run the ETL pipeline for a given ticker/year.
+    Used by the Flask API for programmatic access.
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        logger.info(f"Starting pipeline for {ticker} {year}")
+        
+        # Step 1: Download filing
+        downloader = SECFilingDownloader(output_dir=DATA_RAW)
+        filing_path = downloader.download_filing(ticker, year, filing_type)
+        
+        if not filing_path:
+            logger.error(f"Failed to download filing for {ticker} {year}")
+            return False
+        
+        logger.info(f"Downloaded: {filing_path}")
+        
+        # Step 2: Parse XBRL
+        parser_obj = ComprehensiveXBRLParser()
+        result = parser_obj.parse_filing(filing_path)
+        
+        if not result:
+            logger.error(f"Failed to parse XBRL for {ticker} {year}")
+            return False
+        
+        facts = result['facts']
+        metadata = result['metadata']
+        logger.info(f"Extracted {len(facts)} facts")
+        
+        # Step 3: Validate
+        validator = FinancialValidator(tolerance_pct=1.0)
+        validation_report = validator.validate_filing(
+            facts=facts,
+            company=ticker,
+            filing_type=filing_type,
+            fiscal_year_end=metadata.get('fiscal_year_end', f'{year}-12-31')
+        )
+        
+        logger.info(f"Validation score: {validation_report.overall_score:.1%}")
+        
+        # Step 4: Completeness check
+        tracker = CompletenessTracker()
+        completeness_report = tracker.analyze_completeness(facts)
+        
+        logger.info(f"Completeness: {completeness_report.overall_completeness:.1%}")
+        
+        # Step 5: Save to database (using storage module)
+        from src.storage.load_to_db import load_facts_to_db
+        load_facts_to_db(
+            facts=facts,
+            ticker=ticker,
+            filing_type=filing_type,
+            metadata=metadata
+        )
+        
+        logger.info(f"Pipeline completed successfully for {ticker} {year}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Pipeline failed for {ticker} {year}: {e}", exc_info=True)
+        return False
+
+
 def main():
     """Main CLI entry point"""
     parser = argparse.ArgumentParser(
