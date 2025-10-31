@@ -393,16 +393,32 @@ XBRL inline documents often contain the same fact multiple times (e.g., in main 
 
 ### XBRL Relationship Tables (Hybrid System)
 
-**Hybrid Approach: XBRL + Data-Verified Only**
+**Relationship System: XBRL Only + Dimensional Filtering**
 
-Modern inline XBRL filings (SEC, ESEF) often don't include linkbases. To ensure consistent user experience while maintaining **100% data accuracy**, we use a **two-tier conservative system**:
+Modern inline XBRL filings (SEC, ESEF) often don't include linkbases. We use a **conservative, accuracy-first approach**:
 
-1. **XBRL relationships** (`source='xbrl'`, `is_synthetic=FALSE`, `confidence=1.0`): From filing linkbases when available
-2. **Dimensional relationships** (`source='dimensional'`, `is_synthetic=TRUE`, `confidence≥0.995`): Generated ONLY when dimensional facts mathematically sum to consolidated (within 0.5%)
+1. **XBRL calc relationships** (`source='xbrl'`, `is_synthetic=FALSE`, `confidence=1.0`): From filing linkbases when available
+2. **NO synthetic calc relationships**: We do NOT generate calc relationships from dimensional data
 
-**NO TEMPLATE GUESSING**: We do NOT generate relationships based on assumptions or templates. Every synthetic relationship is mathematically verified against actual reported data.
+**Why No Dimensional Calc Relationships?**
 
-**Priority**: XBRL > Verified Dimensional (deduplicates by parent-child pair)
+Dimensional breakdowns are **same concept, different dimensions** - NOT a calculation relationship:
+```
+❌ WRONG: Revenue (parent) = Revenue+ProductA (child) + Revenue+ProductB (child)
+           ^^^^ Same concept (Revenue), different dimensions
+
+✅ CORRECT: Use dimension filtering for drill-down
+           Parent: SELECT * WHERE dimension_id IS NULL
+           Children: SELECT * WHERE concept_id = X AND dimension_id IS NOT NULL
+```
+
+**Dimensional Drill-Down Without Calc Relationships:**
+- Query consolidated: `WHERE dimension_id IS NULL`
+- Query breakdowns: `WHERE concept_id = X AND dimension_id IS NOT NULL`
+- Join `dim_xbrl_dimensions` to show dimension labels (Geography, Product, etc.)
+- No calc relationships needed - it's just data filtering!
+
+**Result**: ALL companies with dimensional data (60%+ of facts) support drill-down, without needing calc relationships.
 
 **1. Calculation Relationships (`rel_calculation_hierarchy`)**
 

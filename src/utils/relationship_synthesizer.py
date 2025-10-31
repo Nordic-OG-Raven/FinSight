@@ -51,16 +51,22 @@ class RelationshipSynthesizer:
         filing_id: int
     ) -> Tuple[List[Dict], List[Dict]]:
         """
-        Generate calculation relationships from dimensional fact breakdowns
+        Generate calculation relationships from multi-concept aggregations
         
-        Strategy:
-        - Find facts where dimension_id IS NULL (consolidated)
-        - Find facts with same concept/period but dimension_id IS NOT NULL (breakdowns)
-        - If breakdowns sum to consolidated (within tolerance), create calc relationship
+        NOTE: Dimensional breakdowns (same concept, different dimensions) are NOT
+        calculation relationships. They're just filtering. This method looks for
+        cases where DIFFERENT concepts sum to a parent concept.
+        
+        Example:
+          TotalAssets (concept A) = CurrentAssets (concept B) + NoncurrentAssets (concept C)
+          
+        NOT:
+          Revenue (dimension=NULL) = Revenue (GeographyAxis=USA) + Revenue (GeographyAxis=Europe)
+          ^^^^ This is dimensional filtering, not a calc relationship
         
         Args:
-            facts: List of fact dictionaries with concept, period, dimension_id, value
-            filing_id: Filing ID for relationships
+            facts: List of fact dictionaries
+            filing_id: Filing ID
             
         Returns:
             Tuple of (calculation_relationships, presentation_relationships)
@@ -68,56 +74,15 @@ class RelationshipSynthesizer:
         calc_relationships = []
         pres_relationships = []
         
-        # Group facts by (concept, period)
-        fact_groups = defaultdict(lambda: {'consolidated': None, 'dimensional': []})
+        # For now, don't generate calc relationships from dimensional data
+        # Dimensional breakdowns are handled via dimension filtering in queries, not calc hierarchy
         
-        for fact in facts:
-            if not fact.get('value_numeric'):
-                continue
-            
-            key = (fact.get('concept'), fact.get('period_id'))
-            
-            if fact.get('dimension_id') is None:
-                fact_groups[key]['consolidated'] = fact
-            else:
-                fact_groups[key]['dimensional'].append(fact)
+        logger.info("Dimensional drill-down uses dimension filtering, not calc relationships")
+        logger.info("Calc relationships require DIFFERENT concepts that sum to a parent")
+        logger.info("No synthetic calc relationships generated (dimensional data is same-concept breakdowns)")
         
-        # Find groups where dimensional facts sum to consolidated
-        for (concept, period_id), group in fact_groups.items():
-            if not group['consolidated'] or len(group['dimensional']) < 2:
-                continue
-            
-            consolidated_value = group['consolidated']['value_numeric']
-            dimensional_sum = sum(f['value_numeric'] for f in group['dimensional'])
-            
-            # Check if sum matches (within 0.5% tolerance for rounding)
-            # STRICT: We only create relationships we can verify
-            if consolidated_value != 0:
-                diff_pct = abs((dimensional_sum - consolidated_value) / consolidated_value)
-                if diff_pct < 0.005:  # Within 0.5% - very strict
-                    # Create calc relationships (mathematically verified)
-                    parent_concept_id = group['consolidated']['concept_id']
-                    
-                    # Require minimum confidence of 99.5%
-                    relationship_confidence = 1.0 - diff_pct
-                    if relationship_confidence >= 0.995:
-                        for i, child_fact in enumerate(group['dimensional']):
-                            calc_relationships.append({
-                                'filing_id': filing_id,
-                                'parent_concept_id': parent_concept_id,
-                                'child_concept_id': child_fact['concept_id'],
-                                'weight': 1.0,
-                                'order_index': i,
-                                'source': 'dimensional',
-                                'is_synthetic': True,
-                                'confidence': relationship_confidence
-                            })
-                        
-                        logger.debug(f"Generated calc relationship: {concept} = sum of {len(group['dimensional'])} dimensions (confidence={relationship_confidence:.4f})")
-                    else:
-                        logger.debug(f"Skipped {concept}: confidence {relationship_confidence:.4f} < 0.995 threshold")
-        
-        logger.info(f"Generated {len(calc_relationships)} calculation relationships from dimensional data")
+        # Future: Could search for cross-concept summations, but requires more complex analysis
+        # e.g., finding that CurrentAssets + NoncurrentAssets = TotalAssets by verifying values
         
         return calc_relationships, pres_relationships
     

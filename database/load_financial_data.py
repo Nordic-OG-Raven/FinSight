@@ -224,11 +224,13 @@ class StarSchemaLoader:
                     scale_int, xbrl_format,
                     context_id, fact_id_xbrl, source_line, order_index, is_primary
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (filing_id, concept_id, period_id, dimension_id, fact_id_xbrl) 
+                ON CONFLICT (filing_id, concept_id, period_id, dimension_id) 
                 DO UPDATE SET
                     value_numeric = EXCLUDED.value_numeric,
                     value_text = EXCLUDED.value_text,
-                    is_primary = EXCLUDED.is_primary
+                    is_primary = EXCLUDED.is_primary,
+                    fact_id_xbrl = EXCLUDED.fact_id_xbrl,
+                    order_index = EXCLUDED.order_index
             """, (
                 company_id,
                 concept_id,

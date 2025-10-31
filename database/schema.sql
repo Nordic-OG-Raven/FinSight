@@ -124,8 +124,10 @@ CREATE TABLE fact_financial_metrics (
     
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     
-    -- Business key constraint: prevent duplicate facts and duplicate re-loads
-    UNIQUE(filing_id, concept_id, period_id, dimension_id, fact_id_xbrl)
+    -- Business key constraint: prevent duplicate facts
+    -- NULLS NOT DISTINCT treats NULL values as equal (PostgreSQL 15+)
+    -- This prevents multiple consolidated facts with dimension_id=NULL
+    UNIQUE NULLS NOT DISTINCT (filing_id, concept_id, period_id, dimension_id)
 );
 
 -- ============================================================================
