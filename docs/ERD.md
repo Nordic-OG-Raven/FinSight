@@ -391,11 +391,21 @@ XBRL inline documents often contain the same fact multiple times (e.g., in main 
 - Maintains data quality for cross-company comparisons
 - Preserves ability to trace fact to primary financial statement
 
-### XBRL Relationship Tables
+### XBRL Relationship Tables (Hybrid System)
+
+**Hybrid Approach: XBRL + Generated + Standard Template**
+
+Modern inline XBRL filings (SEC, ESEF) often don't include linkbases. To ensure consistent user experience, we use a **three-tier hybrid system**:
+
+1. **XBRL relationships** (`source='xbrl'`, `is_synthetic=FALSE`): From filing linkbases when available
+2. **Dimensional relationships** (`source='dimensional'`, `is_synthetic=TRUE`): Generated from fact breakdowns
+3. **Standard template** (`source='standard'`, `is_synthetic=TRUE`): Common financial statement hierarchy
+
+**Priority**: XBRL > Dimensional > Standard (deduplicates by parent-child pair)
 
 **1. Calculation Relationships (`rel_calculation_hierarchy`)**
 
-Tracks parent-child summation relationships defined in XBRL calculation linkbases.
+Tracks parent-child summation relationships.
 
 **Example:**
 ```
@@ -403,15 +413,23 @@ Revenue (parent) = Product Revenue (child, weight=1.0) + Service Revenue (child,
 Net Income (parent) = Revenue (child, weight=1.0) - Expenses (child, weight=-1.0)
 ```
 
+**New Fields:**
+- `source`: 'xbrl', 'dimensional', 'standard'
+- `is_synthetic`: TRUE if generated, FALSE if from filing
+- `confidence`: 0.0-1.0 (higher = more confident)
+
+**Generation Strategy:**
+- **Dimensional**: If Revenue (dimension=NULL) = $100M and iPhone (ProductAxis) = $60M + Services (ProductAxis) = $40M (within 1%), create relationship
+- **Standard**: Apply template like "operating_income = gross_profit - operating_expenses"
+
 **Use Cases:**
-- **Drill-down navigation**: Click "Revenue" → show Product/Service breakdown
-- **Validation**: Verify children sum to parent (data quality checks)
-- **Missing data detection**: If parent exists but no children, flag incomplete data
-- **Cross-company comparison**: Compare calculation structures across accounting standards
+- **Drill-down navigation**: Click "Revenue" → show Product/Service breakdown (works for ALL companies)
+- **Validation**: Verify children sum to parent
+- **Cross-company comparison**: Consistent drill-down experience
 
 **2. Presentation Hierarchy (`rel_presentation_hierarchy`)**
 
-Tracks how concepts are organized in financial statements (from presentation linkbase).
+Tracks how concepts are organized in financial statements.
 
 **Example:**
 ```
@@ -423,16 +441,23 @@ Balance Sheet (root)
        └─ Property, Plant & Equipment (child, order_index=1)
 ```
 
+**New Fields:**
+- `source`: 'xbrl', 'dimensional', 'standard'
+- `is_synthetic`: TRUE if generated, FALSE if from filing
+
+**Generation Strategy:**
+- **Dimensional**: Similar to calculation, but tracks hierarchical structure
+- **Standard**: Apply statement templates (balance_sheet, income_statement, cash_flow)
+
 **Use Cases:**
-- **Statement reconstruction**: Rebuild exact financial statements as filed
-- **Section filtering**: Show only "Current Assets" section
-- **Better duplicate handling**: Keep facts from primary statement section (`order_index`)
-- **Visualization**: Display statements in correct hierarchical order
-- **Cross-standard alignment**: Map IFRS vs US-GAAP statement structures
+- **Statement reconstruction**: Rebuild financial statements (when XBRL provided) or standard view (generated)
+- **Section filtering**: Show only specific sections
+- **Visualization**: Display statements in hierarchical order
+- **Consistent UX**: All companies get hierarchical views
 
 **3. Footnote References (`rel_footnote_references`)**
 
-Links facts or concepts to detailed footnote disclosures.
+Links facts or concepts to detailed footnote disclosures (XBRL only, not synthesized).
 
 **Example:**
 ```
@@ -440,11 +465,21 @@ DebtInstrument fact → footnote_label='F1', footnote_text='Long-term debt consi
 Revenue concept → footnote_label='Note 2', footnote_text='Revenue recognition policy...'
 ```
 
+**Note:** Footnotes are XBRL-only. When not available, UI shows: "❌ Not made available in filing"
+
 **Use Cases:**
-- **Detailed disclosure access**: Click metric → see explanation
-- **Compliance tracking**: Verify all facts have required disclosures
-- **Audit trail**: Trace where each fact comes from in the filing
-- **Textual analysis**: Analyze footnote content for qualitative insights
+- **Detailed disclosure access**: Click metric → see explanation (when available)
+- **Compliance tracking**: Verify facts have disclosures
+- **Audit trail**: Trace fact origins
+
+**Availability by Source:**
+- **SEC inline XBRL**: Rarely includes footnote linkbases
+- **ESEF (EU)**: May include footnote linkbases
+- **Older XBRL packages**: More likely to have footnotes
+
+**UX Guidance:**
+- Show availability badge: ✅ From filing / ⚠️ Generated / ❌ Not available in filing
+- Don't blame regulator ("Not available in filing" not "Not provided by SEC/ESMA")
 
 ## Example Queries
 

@@ -326,22 +326,67 @@ class StarSchemaLoader:
                 print(f"      ⚠️  Skipped fact {fact.get('concept')}: {e}")
                 continue
         
-        # Load relationships if present
-        relationships = data.get('relationships', {})
+        # Load relationships with synthesis
+        from src.utils.relationship_synthesizer import synthesize_relationships_for_filing
+        
+        # Get XBRL relationships if present
+        xbrl_relationships = data.get('relationships', {})
+        xbrl_calc = xbrl_relationships.get('calculation', [])
+        xbrl_pres = xbrl_relationships.get('presentation', [])
+        
+        # Query loaded facts with database IDs for relationship synthesis
+        print(f"   🔄 Synthesizing relationships...")
+        self.cur.execute("""
+            SELECT 
+                f.fact_id,
+                f.concept_id,
+                f.period_id,
+                f.dimension_id,
+                f.value_numeric,
+                co.concept_name,
+                co.normalized_label
+            FROM fact_financial_metrics f
+            JOIN dim_concepts co ON f.concept_id = co.concept_id
+            WHERE f.filing_id = %s
+        """, (filing_id,))
+        
+        loaded_facts = []
+        for row in self.cur.fetchall():
+            loaded_facts.append({
+                'fact_id': row[0],
+                'concept_id': row[1],
+                'period_id': row[2],
+                'dimension_id': row[3],
+                'value_numeric': row[4],
+                'concept': row[5],
+                'normalized_label': row[6]
+            })
+        
+        # Synthesize complete set of relationships
+        synthesized = synthesize_relationships_for_filing(
+            facts=loaded_facts,
+            filing_id=filing_id,
+            xbrl_calc_rels=xbrl_calc,
+            xbrl_pres_rels=xbrl_pres
+        )
         
         # Load calculation relationships
-        if relationships.get('calculation'):
-            calc_count = self.load_calculation_relationships(filing_id, relationships['calculation'], data.get('metadata', {}))
-            print(f"   ✅ Loaded {calc_count} calculation relationships")
+        if synthesized.get('calculation'):
+            calc_count = self.load_calculation_relationships(filing_id, synthesized['calculation'], data.get('metadata', {}))
+            xbrl_count = len([r for r in synthesized['calculation'] if not r.get('is_synthetic', False)])
+            synth_count = calc_count - xbrl_count
+            print(f"   ✅ Loaded {calc_count} calculation relationships ({xbrl_count} from XBRL, {synth_count} generated)")
         
         # Load presentation hierarchy
-        if relationships.get('presentation'):
-            pres_count = self.load_presentation_hierarchy(filing_id, relationships['presentation'], data.get('metadata', {}))
-            print(f"   ✅ Loaded {pres_count} presentation relationships")
+        if synthesized.get('presentation'):
+            pres_count = self.load_presentation_hierarchy(filing_id, synthesized['presentation'], data.get('metadata', {}))
+            xbrl_count = len([r for r in synthesized['presentation'] if not r.get('is_synthetic', False)])
+            synth_count = pres_count - xbrl_count
+            print(f"   ✅ Loaded {pres_count} presentation relationships ({xbrl_count} from XBRL, {synth_count} generated)")
         
         # Load footnote references
-        if relationships.get('footnotes'):
-            footnote_count = self.load_footnote_references(filing_id, relationships['footnotes'], facts, data.get('metadata', {}))
+        if xbrl_relationships.get('footnotes'):
+            footnote_count = self.load_footnote_references(filing_id, xbrl_relationships['footnotes'], facts, data.get('metadata', {}))
             print(f"   ✅ Loaded {footnote_count} footnote references")
         
         self.conn.commit()
@@ -379,8 +424,9 @@ class StarSchemaLoader:
                 self.cur.execute("""
                     INSERT INTO rel_calculation_hierarchy (
                         filing_id, parent_concept_id, child_concept_id,
-                        weight, order_index, arcrole, priority
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        weight, order_index, arcrole, priority,
+                        source, is_synthetic, confidence
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (filing_id, parent_concept_id, child_concept_id) DO NOTHING
                 """, (
                     filing_id,
@@ -389,7 +435,10 @@ class StarSchemaLoader:
                     rel.get('weight', 1.0),
                     rel.get('order_index'),
                     rel.get('arcrole'),
-                    rel.get('priority', 0)
+                    rel.get('priority', 0),
+                    rel.get('source', 'xbrl'),
+                    rel.get('is_synthetic', False),
+                    rel.get('confidence', 1.0)
                 ))
                 loaded += 1
             except Exception as e:
@@ -434,8 +483,9 @@ class StarSchemaLoader:
                 self.cur.execute("""
                     INSERT INTO rel_presentation_hierarchy (
                         filing_id, parent_concept_id, child_concept_id,
-                        order_index, preferred_label, statement_type, arcrole, priority
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        order_index, preferred_label, statement_type, arcrole, priority,
+                        source, is_synthetic
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (filing_id, parent_concept_id, child_concept_id, order_index) DO NOTHING
                 """, (
                     filing_id,
@@ -445,7 +495,9 @@ class StarSchemaLoader:
                     rel.get('preferred_label'),
                     rel.get('statement_type', 'other'),
                     rel.get('arcrole'),
-                    rel.get('priority', 0)
+                    rel.get('priority', 0),
+                    rel.get('source', 'xbrl'),
+                    rel.get('is_synthetic', False)
                 ))
                 loaded += 1
             except Exception as e:

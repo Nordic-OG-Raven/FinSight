@@ -175,6 +175,10 @@ CREATE TABLE rel_calculation_hierarchy (
     order_index INTEGER, -- Order within calculation tree
     arcrole VARCHAR(200), -- XBRL arcrole URI
     priority INTEGER DEFAULT 0,
+    source VARCHAR(20) DEFAULT 'xbrl', -- 'xbrl', 'dimensional', 'standard'
+    is_synthetic BOOLEAN DEFAULT FALSE, -- TRUE if generated, FALSE if from filing
+    confidence NUMERIC(3,2) DEFAULT 1.0, -- Confidence score for synthetic relationships
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(filing_id, parent_concept_id, child_concept_id)
 );
 
@@ -190,6 +194,9 @@ CREATE TABLE rel_presentation_hierarchy (
     statement_type VARCHAR(50), -- balance_sheet, income_statement, cash_flow, etc.
     arcrole VARCHAR(200), -- XBRL arcrole URI (usually parent-child)
     priority INTEGER DEFAULT 0,
+    source VARCHAR(20) DEFAULT 'xbrl', -- 'xbrl', 'dimensional', 'standard'
+    is_synthetic BOOLEAN DEFAULT FALSE, -- TRUE if generated, FALSE if from filing
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(filing_id, parent_concept_id, child_concept_id, order_index)
 );
 
