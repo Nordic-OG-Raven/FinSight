@@ -16,29 +16,37 @@ DROP VIEW IF EXISTS v_facts_hierarchical CASCADE;
 DROP VIEW IF EXISTS v_facts_comparable CASCADE;
 
 -- ============================================================================
--- v_facts_hierarchical: Facts with hierarchy metadata
+-- v_facts_hierarchical: Facts with hierarchy metadata + deduplication
 -- ============================================================================
+-- Uses v_facts_deduplicated as base to eliminate duplicate facts
+-- Adds hierarchy metadata for granularity filtering
 CREATE OR REPLACE VIEW v_facts_hierarchical AS
 SELECT 
-    f.fact_id,
-    f.company_id,
-    f.concept_id,
-    f.period_id,
-    f.filing_id,
-    f.dimension_id,  -- REQUIRED for segment filtering
-    f.value_numeric,
-    f.value_text,
-    f.unit_measure,
-    f.is_calculated,
-    f.is_primary,
+    dedup.fact_id,
+    dedup.company_id,
+    dedup.concept_id,
+    dedup.period_id,
+    dedup.filing_id,
+    dedup.dimension_id,  -- REQUIRED for segment filtering
+    dedup.value_numeric,
+    dedup.value_text,
+    dedup.unit_measure,
+    dedup.decimals,
+    dedup.scale_int,
+    dedup.xbrl_format,
+    dedup.context_id,
+    dedup.fact_id_xbrl,
+    dedup.source_line,
+    dedup.order_index,
+    dedup.is_primary,
     
-    -- Concept info
-    dc.concept_name,
-    dc.normalized_label,
-    dc.taxonomy,
-    dc.statement_type,
+    -- Concept info (from deduplicated view)
+    dedup.concept_name,
+    dedup.normalized_label,
+    dedup.taxonomy,
+    dedup.statement_type,
     
-    -- Hierarchy info
+    -- Hierarchy info (join to get parent metadata)
     dc.hierarchy_level,
     dc.parent_concept_id,
     dc.calculation_weight,
@@ -48,23 +56,18 @@ SELECT
     dc_parent.normalized_label as parent_normalized_label,
     dc_parent.hierarchy_level as parent_hierarchy_level,
     
-    -- Time period info
-    t.fiscal_year,
-    t.period_type,
-    t.start_date,
-    t.end_date,
-    t.instant_date,
+    -- Time period info (from deduplicated view)
+    dedup.fiscal_year,
     
     -- Company info
     c.ticker,
     c.company_name,
     c.accounting_standard
 
-FROM fact_financial_metrics f
-JOIN dim_concepts dc ON f.concept_id = dc.concept_id
+FROM v_facts_deduplicated dedup
+JOIN dim_concepts dc ON dedup.concept_id = dc.concept_id
 LEFT JOIN dim_concepts dc_parent ON dc.parent_concept_id = dc_parent.concept_id
-JOIN dim_time_periods t ON f.period_id = t.period_id
-JOIN dim_companies c ON f.company_id = c.company_id;
+JOIN dim_companies c ON dedup.company_id = c.company_id;
 
 -- Index for performance
 CREATE INDEX IF NOT EXISTS idx_facts_hier_level ON fact_financial_metrics(concept_id) 
