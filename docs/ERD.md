@@ -38,6 +38,13 @@
 │    data_type             │     │
 │    is_abstract           │     │
 │    statement_type        │     │  -- inferred: balance_sheet, income_statement, cash_flow, equity_statement, notes, other
+│                          │     │
+│    -- HIERARCHICAL STRUCTURE (NEW):
+│    hierarchy_level (INT) │     │  -- 1=detail, 2=subtotal, 3=section_total, 4=statement_total
+│ FK parent_concept_id     │─────┤  -- Self-referencing FK to concept_id (NULL for top-level)
+│    is_calculated (BOOL)  │     │  -- TRUE if value derived from children, FALSE if reported directly
+│    calculation_weight    │     │  -- Multiplier for summation (1.0 for addition, -1.0 for subtraction)
+│                          │     │
 │ UK (concept_name,        │     │
 │     taxonomy)            │     │
 └──────────────────────────┘     │
@@ -390,6 +397,202 @@ XBRL inline documents often contain the same fact multiple times (e.g., in main 
 - Ensures statement-level queries return correct facts
 - Maintains data quality for cross-company comparisons
 - Preserves ability to trace fact to primary financial statement
+
+---
+
+## Hierarchical Normalization Strategy (Parent-Child Relationships)
+
+### The Core Problem
+
+Companies report the **same business item** at **different levels of granularity**:
+
+**Example: Accrued Liabilities**
+- **GOOGL**: Reports 3 separate components ($15B + $22B + $46B = $83B total)
+  - `AccruedLiabilitiesCurrent`: $15B
+  - `EmployeeRelatedLiabilitiesCurrent`: $22B  
+  - `OtherAccruedLiabilitiesCurrent`: $46B
+  
+- **KO**: Reports 1 combined total ($21B)
+  - `AccountsPayableAndAccruedLiabilitiesCurrent`: $21B
+  
+- **LLY**: Reports 2 components ($1.7B + $3.3B = $5B total)
+  - `EmployeeRelatedLiabilitiesCurrent`: $1.7B
+  - `OtherLiabilitiesCurrent`: $3.3B
+
+**Cross-Company Comparison Problem:**
+- User asks: "Compare accrued liabilities across GOOGL, KO, LLY"
+- Naive normalization shows: GOOGL=$46B, KO=$21B, LLY=$3.3B (WRONG - incomplete)
+- Correct totals: GOOGL=$83B, KO=$21B, LLY=$5B
+
+### Solution: Hierarchical Concept Storage
+
+**New `dim_concepts` Fields:**
+
+1. **`hierarchy_level` (INT)**:
+   - `1` = Detail (leaf node): `EmployeeRelatedLiabilitiesCurrent`
+   - `2` = Subtotal: `TotalAccruedLiabilitiesCurrent`  
+   - `3` = Section Total: `CurrentLiabilities`
+   - `4` = Statement Total: `TotalLiabilities`
+
+2. **`parent_concept_id` (FK to dim_concepts)**:
+   - Self-referencing foreign key
+   - Links child concept to parent concept
+   - `NULL` for top-level concepts (statement totals)
+   
+3. **`is_calculated` (BOOLEAN)**:
+   - `FALSE` = Reported directly in XBRL filing
+   - `TRUE` = Calculated by summing children (synthesized)
+   
+4. **`calculation_weight` (DECIMAL)**:
+   - `1.0` = Add to parent (assets, revenues, expenses)
+   - `-1.0` = Subtract from parent (contra-accounts, deductions)
+   - Used for: `parent_value = SUM(child_value * weight)`
+
+### Hierarchy Construction Process
+
+**Step 1: Extract XBRL Calculation Relationships**
+```
+From filing linkbase:
+  CurrentLiabilities (parent)
+    ├─ AccountsPayable (child, weight=1.0)
+    ├─ AccruedLiabilities (child, weight=1.0)  
+    └─ ShortTermDebt (child, weight=1.0)
+```
+
+**Step 2: Populate Hierarchy Metadata**
+```sql
+-- Set parent-child links
+UPDATE dim_concepts 
+SET parent_concept_id = (
+    SELECT parent_concept_id 
+    FROM rel_calculation_hierarchy 
+    WHERE child_concept_id = concept_id
+)
+
+-- Infer hierarchy levels
+UPDATE dim_concepts SET hierarchy_level = 1 WHERE parent_concept_id IS NOT NULL AND concept_id NOT IN (SELECT parent_concept_id FROM rel_calculation_hierarchy);
+UPDATE dim_concepts SET hierarchy_level = 4 WHERE parent_concept_id IS NULL AND concept_name LIKE '%Total%';
+```
+
+**Step 3: Calculate Missing Parent Facts**
+
+If company reports children but not parent:
+```python
+def calculate_parent_facts(filing_id):
+    """Calculate aggregated facts for parents when children exist but parent is missing."""
+    
+    # Find parent concepts that have children but no reported value
+    missing_parents = get_missing_parent_concepts(filing_id)
+    
+    for parent in missing_parents:
+        children = get_child_concepts(parent)
+        
+        for period in get_periods(filing_id):
+            child_values = []
+            for child in children:
+                child_fact = get_fact(child.concept_id, period)
+                if child_fact:
+                    weighted_value = child_fact.value_numeric * child.calculation_weight
+                    child_values.append(weighted_value)
+            
+            if child_values:
+                calculated_value = sum(child_values)
+                
+                # Insert calculated fact
+                insert_fact(
+                    concept_id=parent.concept_id,
+                    period_id=period,
+                    value_numeric=calculated_value,
+                    is_calculated=TRUE,
+                    extraction_method='calculated_from_children'
+                )
+```
+
+**Step 4: Validate Aggregations**
+
+Hard-fail if reported parent ≠ calculated parent (> 1% diff):
+```python
+if reported_parent and calculated_parent:
+    diff_pct = abs(reported_parent - calculated_parent) / reported_parent * 100
+    if diff_pct > 1.0:
+        raise ValidationError(
+            f"{parent.name}: Reported=${reported_parent:,.0f}, "
+            f"Calculated=${calculated_parent:,.0f} ({diff_pct:.2f}% diff)"
+        )
+```
+
+### Cross-Company Querying with Hierarchy
+
+**User Query**: "Compare accrued liabilities across GOOGL, KO, LLY"
+
+**Query Logic**:
+```sql
+WITH concept_hierarchy AS (
+    -- Find the normalized label user requested
+    SELECT concept_id, normalized_label, hierarchy_level
+    FROM dim_concepts
+    WHERE normalized_label = 'accrued_liabilities_current'
+),
+aggregated_values AS (
+    SELECT 
+        f.company_id,
+        f.period_id,
+        -- If company reports at this level, use it
+        -- Otherwise, sum children or use parent
+        COALESCE(
+            -- Direct value
+            (SELECT value_numeric FROM fact_financial_metrics 
+             WHERE company_id = f.company_id AND concept_id IN (SELECT concept_id FROM concept_hierarchy)),
+            
+            -- Or sum children
+            (SELECT SUM(fc.value_numeric * dc.calculation_weight)
+             FROM fact_financial_metrics fc
+             JOIN dim_concepts dc ON fc.concept_id = dc.concept_id
+             WHERE fc.company_id = f.company_id 
+               AND dc.parent_concept_id IN (SELECT concept_id FROM concept_hierarchy)),
+            
+            -- Or use calculated parent fact
+            (SELECT value_numeric FROM fact_financial_metrics 
+             WHERE company_id = f.company_id AND is_calculated = TRUE 
+               AND concept_id IN (SELECT parent_concept_id FROM dim_concepts WHERE concept_id IN (SELECT concept_id FROM concept_hierarchy)))
+        ) as comparable_value
+    FROM fact_financial_metrics f
+    GROUP BY f.company_id, f.period_id
+)
+SELECT company, fiscal_year, comparable_value
+FROM aggregated_values
+```
+
+**Result**: All companies now comparable at same hierarchy level, regardless of reporting granularity.
+
+### UI Integration: Drill-Down/Roll-Up
+
+**Sidebar Filter:**
+```
+Metric Granularity:
+  ○ Detail Level (all line items)
+  ○ Subtotals (section summaries)
+  ● Statement Totals (balance sheet, income statement) [DEFAULT]
+```
+
+**Interactive Drill-Down:**
+```
+User clicks: "Current Liabilities: $83B" (GOOGL FY2024)
+  → Shows children:
+    - Accounts Payable: $15B
+    - Accrued Liabilities: $46B
+    - Employee Liabilities: $22B
+    - Short-term Debt: $0
+```
+
+**Benefits:**
+- ✅ Cross-company comparison at ANY level
+- ✅ Drill-down for detail, roll-up for summary
+- ✅ Data quality validated at ETL (not query time)
+- ✅ Fast queries (pre-calculated aggregations)
+- ✅ Flexible analysis (user chooses granularity)
+
+---
 
 ### XBRL Relationship Tables (Hybrid System)
 
