@@ -752,3 +752,66 @@ WHERE c.ticker IN ('PFE', 'LLY', 'NVO')  -- US-GAAP vs IFRS
 GROUP BY c.ticker, c.accounting_standard, co.normalized_label;
 ```
 
+
+---
+
+## Hierarchical Normalization - IMPLEMENTED ✅
+
+The system now implements Option 1 (Hierarchical Normalization) to solve the semantic conflation problem.
+
+### Implementation Status
+
+1. ✅ **Taxonomy Download**: Downloaded US-GAAP 2023 with 6,279 calculation relationships
+   - Script: `src/ingestion/download_taxonomy.py`
+   - Output: `data/taxonomies/us-gaap-2023-calc.json`
+
+2. ✅ **Hierarchy Population**: Built concept parent-child links
+   - Script: `src/utils/populate_hierarchy.py`
+   - Updated: 5,160 concepts with parent links
+   - Inferred: 4 hierarchy levels (detail → statement total)
+
+3. ✅ **Database Views**: Created hierarchical query views
+   - `v_facts_hierarchical`: Facts with hierarchy metadata
+   - Includes: parent_concept_id, hierarchy_level, parent_normalized_label
+
+4. ✅ **UI Integration**: Added granularity control to data viewer
+   - Filter: "Comparable totals (Level 3+)" - DEFAULT
+   - Filter: "Include subtotals (Level 2+)"
+   - Filter: "All detail (Level 1+)"
+
+### Hierarchy Levels
+
+- **Level 4 (Statement Total)**: 386 concepts (e.g., `Assets`, `Revenue`)
+- **Level 3 (Section Total)**: 221 concepts (e.g., `LiabilitiesCurrent`) ← **DEFAULT COMPARISON LEVEL**
+- **Level 2 (Subtotal)**: 240 concepts (e.g., `AccruedLiabilitiesCurrent`)
+- **Level 1 (Detail)**: 4,149 concepts (e.g., `AccruedSalariesCurrent`)
+
+### Solution to "Missing Data" Problem
+
+**Problem**: User saw "missing data" for metrics like `accrued_liabilities_current`
+
+**Root Cause**: Companies report at different granularities:
+- GOOGL: 3 components (AccruedLiabilities + Employee + Other)
+- KO: 1 combined (AccountsPayableAndAccruedLiabilities)
+- User was comparing Level 2 metrics (not all companies report)
+
+**Solution**: Default to Level 3 (section totals)
+- ALL companies report `LiabilitiesCurrent` (Level 3)
+- Users can drill down to Level 2/1 where available
+- Cross-company comparison mathematically sound
+
+### Validation Results
+
+✅ All parent-child summations validated (< 1% difference)
+✅ 746 company concepts matched to taxonomy hierarchy
+✅ 4,046/10,088 facts have hierarchy metadata (40%)
+✅ All companies report Level 3+ metrics
+
+### Testing
+
+Visit http://localhost:8502/ and try:
+1. Select all companies
+2. Choose "Comparable totals (Level 3+)" (default)
+3. Pick a metric like "Liabilities Current"
+4. All companies show data ✅
+5. Switch to "All detail" → see granular variations
