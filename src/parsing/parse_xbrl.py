@@ -26,11 +26,24 @@ logger = logging.getLogger(__name__)
 class ComprehensiveXBRLParser:
     """Extract ALL facts from XBRL documents with full provenance"""
     
-    def __init__(self):
-        """Initialize Arelle controller"""
-        # Initialize Arelle with minimal validation for faster processing
+    def __init__(self, enable_network=True):
+        """
+        Initialize Arelle controller
+        
+        Args:
+            enable_network: If True, allows Arelle to fetch linkbases from network.
+                          Required for inline XBRL to get calculation/presentation relationships.
+        """
+        # Initialize Arelle with network access for linkbase fetching
         self.controller = Cntlr.Cntlr(logFileName="logToBuffer")
         self.model_manager = ModelManager.initialize(self.controller)
+        
+        # Configure network access for fetching linkbases
+        if enable_network:
+            self.controller.webCache.workOffline = False  # Allow network access
+            logger.info("Network access enabled - Arelle will fetch linkbases automatically")
+        else:
+            logger.warning("Network access disabled - relationships may not be available")
         
         # Suppress schema validation errors for inline XBRL
         self.controller.logLevel = "WARNING"

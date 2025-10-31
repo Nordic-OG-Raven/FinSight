@@ -128,15 +128,16 @@ class SECFilingDownloader:
             logger.error(f"Error searching filings: {e}")
             return []
     
-    def get_filing_files(self, documents_url: str) -> Optional[str]:
+    def get_filing_files(self, documents_url: str) -> Dict[str, List[Dict[str, str]]]:
         """
-        Get the XBRL instance document URL from a filing's documents page
+        Get ALL XBRL-related files from a filing's documents page
         
         Args:
             documents_url: URL to the filing's documents page
             
         Returns:
-            URL to the XBRL instance document (usually ends with .htm or .xml)
+            Dictionary with 'instance', 'calculation', 'presentation', 'definition', 
+            'label', 'schema' keys, each containing list of file info dicts
         """
         try:
             response = self.session.get(documents_url)
@@ -149,16 +150,22 @@ class SECFilingDownloader:
             table = soup.find('table', {'class': 'tableFile'})
             if not table:
                 logger.warning("Could not find documents table")
-                return None
+                return {}
             
-            # Look for XBRL instance document
-            # Strategy: Find the primary document (usually the first .htm file that's not an exhibit)
-            candidates = []
+            # Categorize XBRL files
+            xbrl_files = {
+                'instance': [],
+                'calculation': [],
+                'presentation': [],
+                'definition': [],
+                'label': [],
+                'schema': []
+            }
             
             for row in table.find_all('tr')[1:]:
                 cols = row.find_all('td')
                 if len(cols) >= 4:
-                    seq = cols[0].text.strip()  # Sequence number
+                    seq = cols[0].text.strip()
                     doc_type = cols[3].text.strip()
                     filename = cols[2].text.strip()
                     
@@ -168,61 +175,87 @@ class SECFilingDownloader:
                     
                     file_url = self.BASE_URL + link['href']
                     
-                    # Skip if it's clearly not an instance document
-                    if any(x in filename.lower() for x in ['_cal', '_def', '_lab', '_pre', '_sch']):
+                    # Skip exhibits
+                    if 'EX-' in doc_type.upper() or 'exhibit' in filename.lower():
                         continue
                     
-                    # Skip exhibits (check doc_type first)
-                    if 'EX-' in doc_type.upper():
-                        continue
-                    if 'exhibit' in filename.lower():
-                        continue
+                    file_info = {
+                        'filename': filename,
+                        'url': file_url,
+                        'doc_type': doc_type,
+                        'sequence': seq
+                    }
                     
-                    # Prioritize files that are clearly instance documents
-                    priority = 0
-                    if filename.endswith('.htm') or filename.endswith('.xml'):
-                        priority += 10
-                    if 'INSTANCE' in doc_type.upper() or '10-K' in doc_type or '20-F' in doc_type:
-                        priority += 50  # Increased from 20
-                    if seq == '1' or seq == '':  # Sequence 1 is usually the main document
-                        priority += 30  # Increased from 5
-                    # Strongly prefer _htm.xml (contains full inline XBRL data)
-                    if filename.endswith('_htm.xml'):
-                        priority += 100
+                    # Categorize by filename pattern
+                    filename_lower = filename.lower()
                     
-                    if priority > 0:
-                        candidates.append((priority, filename, file_url))
+                    if '_cal.xml' in filename_lower or 'calculation' in filename_lower:
+                        xbrl_files['calculation'].append(file_info)
+                        logger.debug(f"Found calculation linkbase: {filename}")
+                    elif '_pre.xml' in filename_lower or 'presentation' in filename_lower:
+                        xbrl_files['presentation'].append(file_info)
+                        logger.debug(f"Found presentation linkbase: {filename}")
+                    elif '_def.xml' in filename_lower or 'definition' in filename_lower:
+                        xbrl_files['definition'].append(file_info)
+                        logger.debug(f"Found definition linkbase: {filename}")
+                    elif '_lab.xml' in filename_lower or 'label' in filename_lower:
+                        xbrl_files['label'].append(file_info)
+                        logger.debug(f"Found label linkbase: {filename}")
+                    elif filename_lower.endswith('.xsd') or 'schema' in filename_lower:
+                        xbrl_files['schema'].append(file_info)
+                        logger.debug(f"Found schema: {filename}")
+                    elif (filename_lower.endswith('.htm') or filename_lower.endswith('.xml')) and \
+                         not any(x in filename_lower for x in ['_cal', '_def', '_lab', '_pre', '_sch']):
+                        # Instance document
+                        priority = 0
+                        if 'INSTANCE' in doc_type.upper() or '10-K' in doc_type or '20-F' in doc_type:
+                            priority += 50
+                        if seq == '1' or seq == '':
+                            priority += 30
+                        if filename_lower.endswith('_htm.xml'):
+                            priority += 100
+                        
+                        file_info['priority'] = priority
+                        xbrl_files['instance'].append(file_info)
+                        logger.debug(f"Found instance document: {filename} (priority: {priority})")
             
-            # Sort by priority and return the best match
-            if candidates:
-                candidates.sort(reverse=True)
-                best_match = candidates[0]
-                logger.info(f"Found XBRL instance document: {best_match[1]} (priority: {best_match[0]})")
-                return best_match[2]
+            # Sort instance documents by priority
+            if xbrl_files['instance']:
+                xbrl_files['instance'].sort(key=lambda x: x.get('priority', 0), reverse=True)
             
-            logger.warning("Could not find XBRL instance document")
-            return None
+            # Log summary
+            logger.info(f"Found XBRL package:")
+            logger.info(f"  Instance documents: {len(xbrl_files['instance'])}")
+            logger.info(f"  Calculation linkbases: {len(xbrl_files['calculation'])}")
+            logger.info(f"  Presentation linkbases: {len(xbrl_files['presentation'])}")
+            logger.info(f"  Definition linkbases: {len(xbrl_files['definition'])}")
+            logger.info(f"  Label linkbases: {len(xbrl_files['label'])}")
+            logger.info(f"  Schema files: {len(xbrl_files['schema'])}")
+            
+            return xbrl_files
             
         except Exception as e:
             logger.error(f"Error getting filing files: {e}")
-            return None
+            return {}
     
     def download_filing(
         self, 
         ticker: str, 
         year: int,
-        filing_type: str = "10-K"
+        filing_type: str = "10-K",
+        download_complete_package: bool = True
     ) -> Optional[Path]:
         """
-        Download the most recent filing for a ticker and year
+        Download XBRL filing package for a ticker and year
         
         Args:
             ticker: Stock ticker symbol
             year: Fiscal year
             filing_type: Type of filing (10-K, 20-F, etc.)
+            download_complete_package: If True, downloads all linkbase files; if False, only instance
             
         Returns:
-            Path to downloaded file, or None if download failed
+            Path to downloaded instance file (main entry point), or None if download failed
         """
         logger.info(f"Downloading {filing_type} for {ticker} - year {year}")
         
@@ -247,42 +280,73 @@ class SECFilingDownloader:
         
         logger.info(f"Found filing dated {target_filing['date']}")
         
-        # Get XBRL instance document URL
-        xbrl_url = self.get_filing_files(target_filing['documents_url'])
+        # Get all XBRL files
+        xbrl_files = self.get_filing_files(target_filing['documents_url'])
         
-        if not xbrl_url:
+        if not xbrl_files.get('instance'):
             logger.error("Could not find XBRL instance document")
             return None
         
-        # Download the file
-        filename = f"{ticker}_{year}_{filing_type.replace('-', '')}_{target_filing['accession_number'].replace('-', '')}.htm"
-        output_path = self.output_dir / filename
+        # Create a subdirectory for this filing
+        accession = target_filing['accession_number'].replace('-', '')
+        filing_dir = self.output_dir / f"{ticker}_{year}_{filing_type.replace('-', '')}_{accession}"
+        filing_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Download instance document (required)
+        instance_file = xbrl_files['instance'][0]
+        instance_filename = instance_file['filename']
+        instance_path = filing_dir / instance_filename
         
         # Check if already downloaded
-        if output_path.exists():
-            logger.info(f"File already exists: {output_path}")
-            return output_path
+        if instance_path.exists() and not download_complete_package:
+            logger.info(f"Instance file already exists: {instance_path}")
+            return instance_path
         
         try:
-            # Handle SEC inline XBRL viewer URLs (they start with /ix?doc=)
-            if '/ix?doc=' in xbrl_url:
-                # Extract the actual document URL from the viewer URL
-                xbrl_url = xbrl_url.split('/ix?doc=')[1]
-                if not xbrl_url.startswith('http'):
-                    xbrl_url = self.BASE_URL + '/' + xbrl_url.lstrip('/')
+            # Download instance document
+            instance_url = instance_file['url']
             
-            logger.info(f"Downloading from {xbrl_url}")
-            response = self.session.get(xbrl_url)
-            response.raise_for_status()
+            # Handle SEC inline XBRL viewer URLs
+            if '/ix?doc=' in instance_url:
+                instance_url = instance_url.split('/ix?doc=')[1]
+                if not instance_url.startswith('http'):
+                    instance_url = self.BASE_URL + '/' + instance_url.lstrip('/')
             
-            output_path.write_bytes(response.content)
-            logger.info(f"Successfully downloaded to {output_path}")
+            if not instance_path.exists():
+                logger.info(f"Downloading instance: {instance_filename}")
+                response = self.session.get(instance_url)
+                response.raise_for_status()
+                instance_path.write_bytes(response.content)
+                self._rate_limit()
             
-            self._rate_limit()
-            return output_path
+            # Download complete package if requested
+            if download_complete_package:
+                # Download linkbase files
+                for category in ['calculation', 'presentation', 'definition', 'label', 'schema']:
+                    for file_info in xbrl_files.get(category, []):
+                        file_path = filing_dir / file_info['filename']
+                        
+                        if file_path.exists():
+                            logger.debug(f"Already exists: {file_info['filename']}")
+                            continue
+                        
+                        try:
+                            logger.info(f"Downloading {category}: {file_info['filename']}")
+                            response = self.session.get(file_info['url'])
+                            response.raise_for_status()
+                            file_path.write_bytes(response.content)
+                            self._rate_limit()
+                        except Exception as e:
+                            logger.warning(f"Failed to download {file_info['filename']}: {e}")
+                            continue
+            
+            logger.info(f"✅ Successfully downloaded XBRL package to {filing_dir}")
+            logger.info(f"   Instance: {instance_path}")
+            
+            return instance_path
             
         except Exception as e:
-            logger.error(f"Error downloading file: {e}")
+            logger.error(f"Error downloading files: {e}")
             return None
     
     def download_from_url(self, url: str, ticker: str, year: int) -> Optional[Path]:
