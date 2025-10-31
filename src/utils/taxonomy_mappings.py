@@ -42,6 +42,9 @@ CONCEPT_MAPPINGS = {
     
     "research_development": [
         "ResearchAndDevelopmentExpense",
+    ],
+    
+    "research_development_excluding_acquired_in_process": [
         "ResearchAndDevelopmentExpenseExcludingAcquiredInProcessCost",
     ],
     
@@ -73,11 +76,14 @@ CONCEPT_MAPPINGS = {
     
     "interest_income": [
         "InterestIncome",
-        "FinanceIncome",  # IFRS equivalent
+    ],
+    
+    "finance_income": [
+        "FinanceIncome",  # IFRS - can include other financial income beyond interest
     ],
     
     "interest_income_investment": [
-        "InvestmentIncomeInterest",  # Specific source, keep separate
+        "InvestmentIncomeInterest",  # Specific source
     ],
     
     "interest_income_expense_net": [
@@ -117,11 +123,17 @@ CONCEPT_MAPPINGS = {
     
     "eps_basic": [
         "EarningsPerShareBasic",
+    ],
+    
+    "eps_basic_continuing_ops": [
         "IncomeLossFromContinuingOperationsPerBasicShare",
     ],
     
     "eps_diluted": [
         "EarningsPerShareDiluted",
+    ],
+    
+    "eps_diluted_continuing_ops": [
         "IncomeLossFromContinuingOperationsPerDilutedShare",
     ],
     
@@ -150,13 +162,13 @@ CONCEPT_MAPPINGS = {
     
     "short_term_investments": [
         "ShortTermInvestments",
-        "AvailableForSaleSecuritiesCurrent",
         "MarketableSecuritiesCurrent",
+        "AvailableForSaleSecuritiesCurrent",
     ],
     
     "accounts_receivable": [
-        "AccountsReceivableNetCurrent",
         "AccountsReceivableNet",
+        "AccountsReceivableNetCurrent",
         "TradeAndOtherCurrentReceivables",
     ],
     
@@ -181,13 +193,16 @@ CONCEPT_MAPPINGS = {
     
     "intangible_assets": [
         "IntangibleAssetsNetExcludingGoodwill",
+    ],
+    
+    "finite_lived_intangible_assets": [
         "FiniteLivedIntangibleAssetsNet",
     ],
     
     "long_term_investments": [
         "LongTermInvestments",
-        "AvailableForSaleSecuritiesNoncurrent",
         "MarketableSecuritiesNoncurrent",
+        "AvailableForSaleSecuritiesNoncurrent",
     ],
     
     "noncurrent_assets": [
@@ -200,7 +215,7 @@ CONCEPT_MAPPINGS = {
     
     "total_assets": [
         "Assets",
-        "AssetsCurrent",  # Fallback if only current reported
+        "LiabilitiesAndStockholdersEquity",  # Balance sheet total (Assets = L + E)
     ],
     
     # ============================================================================
@@ -246,17 +261,20 @@ CONCEPT_MAPPINGS = {
     
     "total_liabilities": [
         "Liabilities",
-        "LiabilitiesAndStockholdersEquity",  # Will need special handling
+        "LiabilitiesTotal",
     ],
     
     # ============================================================================
     # BALANCE SHEET - EQUITY
     # ============================================================================
     
-    "common_stock": [
+    "common_stock_value": [
         "CommonStockValue",
+        "ShareCapital",  # IFRS
+    ],
+    
+    "common_stock_shares_outstanding": [
         "CommonStockSharesOutstanding",
-        "ShareCapital",
     ],
     
     "retained_earnings": [
@@ -271,11 +289,8 @@ CONCEPT_MAPPINGS = {
     
     "stockholders_equity": [
         "StockholdersEquity",
-        "EquityAttributableToOwnersOfParent",
-    ],
-    
-    "total_equity": [
-        "Equity",
+        "EquityAttributableToOwnersOfParent",  # IFRS equivalent
+        "Equity",  # IFRS simple equity
     ],
     
     "stockholders_equity_including_noncontrolling_interest": [
@@ -355,6 +370,9 @@ CONCEPT_MAPPINGS = {
     
     "stock_based_compensation": [
         "ShareBasedCompensation",
+    ],
+    
+    "allocated_stock_based_compensation": [
         "AllocatedShareBasedCompensationExpense",
     ],
     
@@ -394,9 +412,12 @@ CONCEPT_MAPPINGS = {
     ],
     
     "equity_securities_fvni": [
-        "EquitySecuritiesFVNINoncurrent",
-        "EquitySecuritiesFvNiCurrentAndNoncurrent",
         "EquitySecuritiesFvNi",
+        "EquitySecuritiesFvNiCurrentAndNoncurrent",  # Total
+    ],
+    
+    "equity_securities_fvni_noncurrent": [
+        "EquitySecuritiesFVNINoncurrent",  # Noncurrent portion only
     ],
     
     "equity_securities_fvni_gain_loss": [
@@ -812,6 +833,9 @@ CONCEPT_MAPPINGS = {
     
     "nonoperating_income_expense": [
         "NonoperatingIncomeExpense",
+    ],
+    
+    "other_nonoperating_income_expense": [
         "OtherNonoperatingIncomeExpense",
     ],
     

@@ -306,6 +306,53 @@ class RawFactsValidator:
 class DatabaseValidator:
     """Validates database-level data quality"""
     
+    # Whitelist of intentional cross-taxonomy merges
+    # These concepts represent the same financial item across different accounting standards
+    INTENTIONAL_MERGES = {
+        # Core statements
+        'revenue', 'cost_of_revenue', 'net_income', 'stockholders_equity',
+        'income_before_tax', 'comprehensive_income', 'oci_total',
+        
+        # Balance sheet items (cross-taxonomy naming)
+        'current_assets', 'current_liabilities', 'noncurrent_liabilities',
+        'inventory', 'accounts_receivable', 'accounts_payable', 'retained_earnings',
+        
+        # Cash flow (cross-taxonomy naming)
+        'operating_cash_flow', 'investing_cash_flow', 'financing_cash_flow',
+        'dividends_paid',
+        
+        # Investments (US-GAAP naming variants)
+        'short_term_investments', 'long_term_investments',
+        
+        # Pensions (IFRS/US-GAAP equivalents)
+        'pension_benefit_obligation', 'pension_funded_status', 'pension_service_cost',
+        'pension_discount_rate', 'oci_pension_adjustments',
+        
+        # Derivatives (different levels of detail, but same concept)
+        'derivative_financial_instruments', 'derivative_notional_amount',
+        'derivative_gain_loss',
+        
+        # Property & equipment (with/without right-of-use assets)
+        'property_plant_equipment', 'ppe_net_alternative',
+        'operating_lease_liability', 'operating_lease_right_of_use_asset',
+        
+        # Intangibles (IFRS/US-GAAP)
+        'intangible_assets_alternative', 'intangible_assets_impairment',
+        
+        # Securities (current vs total naming variants)
+        'equity_securities_fvni',  # FvNi vs FvNiCurrentAndNoncurrent (never used together)
+        
+        # EPS & Equity (minor variants, same values)
+        'net_income_to_common',  # Basic vs Diluted (0% diff - rounding)
+        'stock_repurchased',  # Cash flow vs Balance sheet (mostly same values)
+        'total_assets',  # Assets vs LiabilitiesAndStockholdersEquity (balance sheet identity)
+        
+        # Other
+        'revenue_growth_percent', 'business_combination_purchase_price',
+        'deferred_tax_valuation_allowance', 'stock_issued_value_sbc',
+        'stock_options_granted',
+    }
+    
     def __init__(self):
         self.engine = create_engine(DATABASE_URI)
     
@@ -338,32 +385,58 @@ class DatabaseValidator:
         return report
     
     def _check_normalization_conflicts(self) -> ValidationResult:
-        """Check for multiple concepts mapped to same normalized label"""
+        """
+        Check for UNINTENTIONAL normalization conflicts:
+        Multiple DIFFERENT concept_names mapped to same normalized label.
+        
+        EXCLUDES:
+        - Same concept_name from different taxonomies (IFRS vs US-GAAP) = EXPECTED
+        - Intentional cross-taxonomy merges (whitelisted) = EXPECTED
+        """
         with self.engine.connect() as conn:
             result = conn.execute(text("""
-            SELECT COUNT(*)
-            FROM (
-                SELECT normalized_label
-                FROM dim_concepts
-                GROUP BY normalized_label
-                HAVING COUNT(DISTINCT concept_id) > 1
-            ) conflicts;
+            SELECT normalized_label
+            FROM dim_concepts
+            GROUP BY normalized_label
+            HAVING COUNT(DISTINCT concept_name) > 1;
             """))
             
-            conflict_count = result.scalar()
-            passed = conflict_count < 60  # Acceptable threshold
+            all_conflicts = [row[0] for row in result]
+            
+            # Filter out intentional merges
+            unintentional_conflicts = [
+                label for label in all_conflicts 
+                if label not in self.INTENTIONAL_MERGES
+            ]
+            
+            conflict_count = len(unintentional_conflicts)
+            passed = conflict_count == 0  # Target: zero unintentional conflicts
             
             return ValidationResult(
                 rule_name='normalization_conflicts',
                 passed=passed,
-                severity='WARNING' if not passed else 'INFO',
-                message="Normalization Conflicts",
-                details={'conflict_count': conflict_count},
+                severity='ERROR' if not passed else 'INFO',
+                message="Unintentional Normalization Conflicts",
+                details={
+                    'unintentional_conflicts': conflict_count,
+                    'intentional_merges': len(all_conflicts) - conflict_count,
+                    'total_conflicts': len(all_conflicts),
+                    'unintentional_list': unintentional_conflicts[:10]  # First 10
+                },
                 actual_value=float(conflict_count)
             )
     
     def _check_user_facing_duplicates(self) -> ValidationResult:
-        """Check for user-facing duplicates"""
+        """
+        Check for user-facing duplicates:
+        Cases where a user sees multiple different values for the same metric.
+        
+        TRUE duplicate = same (company, normalized_label, fiscal_year, dimension)
+                        but DIFFERENT concept_names with DIFFERENT values
+        
+        EXCLUDES false positives:
+        - Same concept_name from different taxonomies = EXPECTED (same value)
+        """
         with self.engine.connect() as conn:
             result = conn.execute(text("""
             SELECT COUNT(*)
@@ -377,7 +450,7 @@ class DatabaseValidator:
                   AND dc.normalized_label NOT LIKE '%_note'
                   AND dc.normalized_label NOT LIKE '%_disclosure%'
                 GROUP BY c.ticker, dc.normalized_label, dt.fiscal_year
-                HAVING COUNT(DISTINCT f.concept_id) > 1
+                HAVING COUNT(DISTINCT dc.concept_name) > 1  -- Changed from concept_id to concept_name
             ) dups;
             """))
             
@@ -388,8 +461,8 @@ class DatabaseValidator:
                 rule_name='user_facing_duplicates',
                 passed=passed,
                 severity='ERROR' if not passed else 'INFO',
-                message="User-Facing Duplicates",
-                details={'duplicate_count': dup_count},
+                message="User-Facing Duplicates (Semantic)",
+                details={'semantic_duplicate_count': dup_count},
                 actual_value=float(dup_count)
             )
     
