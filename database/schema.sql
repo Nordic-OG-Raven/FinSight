@@ -4,6 +4,9 @@
 -- ============================================================================
 
 -- Drop existing tables (in correct order due to foreign keys)
+DROP TABLE IF EXISTS rel_footnote_references CASCADE;
+DROP TABLE IF EXISTS rel_presentation_hierarchy CASCADE;
+DROP TABLE IF EXISTS rel_calculation_hierarchy CASCADE;
 DROP TABLE IF EXISTS fact_financial_metrics CASCADE;
 DROP TABLE IF EXISTS data_quality_scores CASCADE;
 DROP TABLE IF EXISTS dim_xbrl_dimensions CASCADE;
@@ -158,6 +161,54 @@ CREATE TABLE taxonomy_mappings (
 );
 
 -- ============================================================================
+-- XBRL RELATIONSHIP TABLES
+-- ============================================================================
+
+-- Calculation relationships (parent-child summation relationships)
+-- Example: Revenue = Product Revenue + Service Revenue
+CREATE TABLE rel_calculation_hierarchy (
+    calculation_id SERIAL PRIMARY KEY,
+    filing_id INTEGER NOT NULL REFERENCES dim_filings(filing_id),
+    parent_concept_id INTEGER NOT NULL REFERENCES dim_concepts(concept_id),
+    child_concept_id INTEGER NOT NULL REFERENCES dim_concepts(concept_id),
+    weight NUMERIC(5,2) DEFAULT 1.0, -- Usually 1.0 for addition, -1.0 for subtraction
+    order_index INTEGER, -- Order within calculation tree
+    arcrole VARCHAR(200), -- XBRL arcrole URI
+    priority INTEGER DEFAULT 0,
+    UNIQUE(filing_id, parent_concept_id, child_concept_id)
+);
+
+-- Presentation hierarchy (how concepts are organized in financial statements)
+-- Example: Balance Sheet > Current Assets > Cash
+CREATE TABLE rel_presentation_hierarchy (
+    presentation_id SERIAL PRIMARY KEY,
+    filing_id INTEGER NOT NULL REFERENCES dim_filings(filing_id),
+    parent_concept_id INTEGER REFERENCES dim_concepts(concept_id), -- NULL for root nodes
+    child_concept_id INTEGER NOT NULL REFERENCES dim_concepts(concept_id),
+    order_index INTEGER NOT NULL, -- Order within statement section
+    preferred_label VARCHAR(100), -- Label role (e.g., 'http://www.xbrl.org/2003/role/label')
+    statement_type VARCHAR(50), -- balance_sheet, income_statement, cash_flow, etc.
+    arcrole VARCHAR(200), -- XBRL arcrole URI (usually parent-child)
+    priority INTEGER DEFAULT 0,
+    UNIQUE(filing_id, parent_concept_id, child_concept_id, order_index)
+);
+
+-- Footnote references (links facts to footnote disclosures)
+-- Example: DebtInstrument fact → links to Note 8: Long-term Debt
+CREATE TABLE rel_footnote_references (
+    footnote_id SERIAL PRIMARY KEY,
+    filing_id INTEGER NOT NULL REFERENCES dim_filings(filing_id),
+    fact_id INTEGER REFERENCES fact_financial_metrics(fact_id), -- Can be NULL if footnote references a concept
+    concept_id INTEGER REFERENCES dim_concepts(concept_id), -- Concept the footnote explains
+    footnote_text TEXT, -- The actual footnote text content
+    footnote_label VARCHAR(100), -- Footnote identifier (e.g., 'F1', 'Note 8')
+    footnote_role VARCHAR(200), -- XBRL role URI
+    footnote_lang VARCHAR(10) DEFAULT 'en',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(filing_id, fact_id, concept_id, footnote_label)
+);
+
+-- ============================================================================
 -- INDEXES
 -- ============================================================================
 
@@ -188,6 +239,18 @@ CREATE INDEX idx_dimensions_json ON dim_xbrl_dimensions USING GIN(dimension_json
 CREATE INDEX idx_quality_filing ON data_quality_scores(filing_id);
 CREATE INDEX idx_quality_check ON data_quality_scores(check_name);
 CREATE INDEX idx_quality_passed ON data_quality_scores(check_passed);
+
+-- Relationship table indexes
+CREATE INDEX idx_calc_filing ON rel_calculation_hierarchy(filing_id);
+CREATE INDEX idx_calc_parent ON rel_calculation_hierarchy(parent_concept_id);
+CREATE INDEX idx_calc_child ON rel_calculation_hierarchy(child_concept_id);
+CREATE INDEX idx_pres_filing ON rel_presentation_hierarchy(filing_id);
+CREATE INDEX idx_pres_parent ON rel_presentation_hierarchy(parent_concept_id);
+CREATE INDEX idx_pres_child ON rel_presentation_hierarchy(child_concept_id);
+CREATE INDEX idx_pres_statement ON rel_presentation_hierarchy(statement_type);
+CREATE INDEX idx_footnote_filing ON rel_footnote_references(filing_id);
+CREATE INDEX idx_footnote_fact ON rel_footnote_references(fact_id);
+CREATE INDEX idx_footnote_concept ON rel_footnote_references(concept_id);
 
 -- ============================================================================
 -- VIEWS FOR COMMON QUERIES

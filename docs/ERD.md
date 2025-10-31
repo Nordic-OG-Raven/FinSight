@@ -111,12 +111,66 @@
 │ UK (filing_id,           │      │
 │     check_name)          │      │
 └──────────────────────────┘      │
-                                  │
-                                  │
+                                   │
+                                   │
                     ┌─────────────┘
                     │
                     ▼
           (References dim_filings)
+
+┌──────────────────────────────────┐
+│  rel_calculation_hierarchy       │
+├──────────────────────────────────┤
+│ PK calculation_id (SERIAL)       │
+│ FK filing_id → dim_filings       │
+│ FK parent_concept_id →           │
+│    dim_concepts                  │
+│ FK child_concept_id →            │
+│    dim_concepts                  │
+│    weight (NUMERIC)              │  -- Usually 1.0 (add) or -1.0 (subtract)
+│    order_index                   │
+│    arcrole                       │
+│    priority                      │
+│ UK (filing_id, parent_concept_id,│
+│     child_concept_id)            │
+└──────────────────────────────────┘
+
+┌──────────────────────────────────┐
+│  rel_presentation_hierarchy      │
+├──────────────────────────────────┤
+│ PK presentation_id (SERIAL)      │
+│ FK filing_id → dim_filings       │
+│ FK parent_concept_id →           │
+│    dim_concepts (NULL OK)        │  -- NULL for root nodes
+│ FK child_concept_id →            │
+│    dim_concepts                  │
+│    order_index                   │
+│    preferred_label               │
+│    statement_type                │  -- balance_sheet, income_statement, etc.
+│    arcrole                       │
+│    priority                      │
+│ UK (filing_id, parent_concept_id,│
+│     child_concept_id, order_index)│
+└──────────────────────────────────┘
+
+┌──────────────────────────────────┐
+│  rel_footnote_references         │
+├──────────────────────────────────┤
+│ PK footnote_id (SERIAL)         │
+│ FK filing_id → dim_filings       │
+│ FK fact_id →                     │
+│    fact_financial_metrics        │
+│    (NULL OK)                     │
+│ FK concept_id →                  │
+│    dim_concepts (NULL OK)        │
+│    footnote_text (TEXT)          │
+│    footnote_label                │  -- e.g., 'F1', 'Note 8'
+│    footnote_role                 │
+│    footnote_lang                 │
+│    created_at                    │
+│ UK (filing_id, fact_id,          │
+│     concept_id, footnote_label)  │
+└──────────────────────────────────┘
 ```
 
 ## Relationships
@@ -138,6 +192,21 @@
 **data_quality_scores**
 - **Many-to-One** → `dim_filings` (via `filing_id`)
 
+**rel_calculation_hierarchy**
+- **Many-to-One** → `dim_filings` (via `filing_id`)
+- **Many-to-One** → `dim_concepts` (via `parent_concept_id`)
+- **Many-to-One** → `dim_concepts` (via `child_concept_id`)
+
+**rel_presentation_hierarchy**
+- **Many-to-One** → `dim_filings` (via `filing_id`)
+- **Many-to-One** → `dim_concepts` (via `parent_concept_id`, nullable)
+- **Many-to-One** → `dim_concepts` (via `child_concept_id`)
+
+**rel_footnote_references**
+- **Many-to-One** → `dim_filings` (via `filing_id`)
+- **Many-to-One** → `fact_financial_metrics` (via `fact_id`, nullable)
+- **Many-to-One** → `dim_concepts` (via `concept_id`, nullable)
+
 ## Key Constraints
 
 ### Primary Keys (Auto-increment SERIAL)
@@ -152,6 +221,15 @@
 - `fact_financial_metrics.dimension_id` → `dim_xbrl_dimensions.dimension_id` (nullable)
 - `dim_filings.company_id` → `dim_companies.company_id`
 - `data_quality_scores.filing_id` → `dim_filings.filing_id`
+- `rel_calculation_hierarchy.filing_id` → `dim_filings.filing_id`
+- `rel_calculation_hierarchy.parent_concept_id` → `dim_concepts.concept_id`
+- `rel_calculation_hierarchy.child_concept_id` → `dim_concepts.concept_id`
+- `rel_presentation_hierarchy.filing_id` → `dim_filings.filing_id`
+- `rel_presentation_hierarchy.parent_concept_id` → `dim_concepts.concept_id` (nullable)
+- `rel_presentation_hierarchy.child_concept_id` → `dim_concepts.concept_id`
+- `rel_footnote_references.filing_id` → `dim_filings.filing_id`
+- `rel_footnote_references.fact_id` → `fact_financial_metrics.fact_id` (nullable)
+- `rel_footnote_references.concept_id` → `dim_concepts.concept_id` (nullable)
 
 ### Unique Constraints (Business Keys)
 
@@ -181,6 +259,15 @@
 
 **taxonomy_mappings:**
 - `UNIQUE(source_concept, source_taxonomy)` - One mapping per source concept
+
+**rel_calculation_hierarchy:**
+- `UNIQUE(filing_id, parent_concept_id, child_concept_id)` - One calculation relationship per parent-child pair per filing
+
+**rel_presentation_hierarchy:**
+- `UNIQUE(filing_id, parent_concept_id, child_concept_id, order_index)` - One presentation relationship per parent-child-order combo per filing
+
+**rel_footnote_references:**
+- `UNIQUE(filing_id, fact_id, concept_id, footnote_label)` - One footnote reference per fact/concept-label combo per filing
 
 ## Data Flow
 
@@ -303,6 +390,61 @@ XBRL inline documents often contain the same fact multiple times (e.g., in main 
 - Ensures statement-level queries return correct facts
 - Maintains data quality for cross-company comparisons
 - Preserves ability to trace fact to primary financial statement
+
+### XBRL Relationship Tables
+
+**1. Calculation Relationships (`rel_calculation_hierarchy`)**
+
+Tracks parent-child summation relationships defined in XBRL calculation linkbases.
+
+**Example:**
+```
+Revenue (parent) = Product Revenue (child, weight=1.0) + Service Revenue (child, weight=1.0)
+Net Income (parent) = Revenue (child, weight=1.0) - Expenses (child, weight=-1.0)
+```
+
+**Use Cases:**
+- **Drill-down navigation**: Click "Revenue" → show Product/Service breakdown
+- **Validation**: Verify children sum to parent (data quality checks)
+- **Missing data detection**: If parent exists but no children, flag incomplete data
+- **Cross-company comparison**: Compare calculation structures across accounting standards
+
+**2. Presentation Hierarchy (`rel_presentation_hierarchy`)**
+
+Tracks how concepts are organized in financial statements (from presentation linkbase).
+
+**Example:**
+```
+Balance Sheet (root)
+  ├─ Current Assets (parent, NULL)
+  │    ├─ Cash (child, order_index=1)
+  │    └─ Accounts Receivable (child, order_index=2)
+  └─ Non-Current Assets (parent)
+       └─ Property, Plant & Equipment (child, order_index=1)
+```
+
+**Use Cases:**
+- **Statement reconstruction**: Rebuild exact financial statements as filed
+- **Section filtering**: Show only "Current Assets" section
+- **Better duplicate handling**: Keep facts from primary statement section (`order_index`)
+- **Visualization**: Display statements in correct hierarchical order
+- **Cross-standard alignment**: Map IFRS vs US-GAAP statement structures
+
+**3. Footnote References (`rel_footnote_references`)**
+
+Links facts or concepts to detailed footnote disclosures.
+
+**Example:**
+```
+DebtInstrument fact → footnote_label='F1', footnote_text='Long-term debt consists of...'
+Revenue concept → footnote_label='Note 2', footnote_text='Revenue recognition policy...'
+```
+
+**Use Cases:**
+- **Detailed disclosure access**: Click metric → see explanation
+- **Compliance tracking**: Verify all facts have required disclosures
+- **Audit trail**: Trace where each fact comes from in the filing
+- **Textual analysis**: Analyze footnote content for qualitative insights
 
 ## Example Queries
 

@@ -326,8 +326,210 @@ class StarSchemaLoader:
                 print(f"      ⚠️  Skipped fact {fact.get('concept')}: {e}")
                 continue
         
+        # Load relationships if present
+        relationships = data.get('relationships', {})
+        
+        # Load calculation relationships
+        if relationships.get('calculation'):
+            calc_count = self.load_calculation_relationships(filing_id, relationships['calculation'], data.get('metadata', {}))
+            print(f"   ✅ Loaded {calc_count} calculation relationships")
+        
+        # Load presentation hierarchy
+        if relationships.get('presentation'):
+            pres_count = self.load_presentation_hierarchy(filing_id, relationships['presentation'], data.get('metadata', {}))
+            print(f"   ✅ Loaded {pres_count} presentation relationships")
+        
+        # Load footnote references
+        if relationships.get('footnotes'):
+            footnote_count = self.load_footnote_references(filing_id, relationships['footnotes'], facts, data.get('metadata', {}))
+            print(f"   ✅ Loaded {footnote_count} footnote references")
+        
         self.conn.commit()
         print(f"   ✅ Loaded {facts_loaded} facts ({facts_with_dims} with dimensions)")
+    
+    def load_calculation_relationships(self, filing_id: int, calc_rels: List[Dict], metadata: Dict) -> int:
+        """Load calculation relationships"""
+        loaded = 0
+        
+        for rel in calc_rels:
+            try:
+                # Get parent and child concept IDs
+                parent_taxonomy = self._identify_taxonomy_from_namespace(rel.get('parent_namespace'))
+                child_taxonomy = self._identify_taxonomy_from_namespace(rel.get('child_namespace'))
+                
+                self.cur.execute("""
+                    SELECT concept_id FROM dim_concepts 
+                    WHERE concept_name = %s AND taxonomy = %s
+                """, (rel['parent_concept'], parent_taxonomy))
+                parent_result = self.cur.fetchone()
+                
+                self.cur.execute("""
+                    SELECT concept_id FROM dim_concepts 
+                    WHERE concept_name = %s AND taxonomy = %s
+                """, (rel['child_concept'], child_taxonomy))
+                child_result = self.cur.fetchone()
+                
+                if not parent_result or not child_result:
+                    continue  # Skip if concepts don't exist
+                
+                parent_concept_id = parent_result[0]
+                child_concept_id = child_result[0]
+                
+                # Insert relationship
+                self.cur.execute("""
+                    INSERT INTO rel_calculation_hierarchy (
+                        filing_id, parent_concept_id, child_concept_id,
+                        weight, order_index, arcrole, priority
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (filing_id, parent_concept_id, child_concept_id) DO NOTHING
+                """, (
+                    filing_id,
+                    parent_concept_id,
+                    child_concept_id,
+                    rel.get('weight', 1.0),
+                    rel.get('order_index'),
+                    rel.get('arcrole'),
+                    rel.get('priority', 0)
+                ))
+                loaded += 1
+            except Exception as e:
+                continue  # Skip on error
+        
+        self.conn.commit()
+        return loaded
+    
+    def load_presentation_hierarchy(self, filing_id: int, pres_rels: List[Dict], metadata: Dict) -> int:
+        """Load presentation hierarchy relationships"""
+        loaded = 0
+        
+        for rel in pres_rels:
+            try:
+                # Get child concept ID
+                child_taxonomy = self._identify_taxonomy_from_namespace(rel.get('child_namespace'))
+                
+                self.cur.execute("""
+                    SELECT concept_id FROM dim_concepts 
+                    WHERE concept_name = %s AND taxonomy = %s
+                """, (rel['child_concept'], child_taxonomy))
+                child_result = self.cur.fetchone()
+                
+                if not child_result:
+                    continue  # Skip if concept doesn't exist
+                
+                child_concept_id = child_result[0]
+                
+                # Get parent concept ID if present
+                parent_concept_id = None
+                if rel.get('parent_concept'):
+                    parent_taxonomy = self._identify_taxonomy_from_namespace(rel.get('parent_namespace'))
+                    self.cur.execute("""
+                        SELECT concept_id FROM dim_concepts 
+                        WHERE concept_name = %s AND taxonomy = %s
+                    """, (rel['parent_concept'], parent_taxonomy))
+                    parent_result = self.cur.fetchone()
+                    if parent_result:
+                        parent_concept_id = parent_result[0]
+                
+                # Insert relationship
+                self.cur.execute("""
+                    INSERT INTO rel_presentation_hierarchy (
+                        filing_id, parent_concept_id, child_concept_id,
+                        order_index, preferred_label, statement_type, arcrole, priority
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (filing_id, parent_concept_id, child_concept_id, order_index) DO NOTHING
+                """, (
+                    filing_id,
+                    parent_concept_id,
+                    child_concept_id,
+                    rel.get('order_index'),
+                    rel.get('preferred_label'),
+                    rel.get('statement_type', 'other'),
+                    rel.get('arcrole'),
+                    rel.get('priority', 0)
+                ))
+                loaded += 1
+            except Exception as e:
+                continue  # Skip on error
+        
+        self.conn.commit()
+        return loaded
+    
+    def load_footnote_references(self, filing_id: int, footnotes: List[Dict], facts: List[Dict], metadata: Dict) -> int:
+        """Load footnote references"""
+        loaded = 0
+        
+        # Note: fact_id mapping handled per-footnote via database lookup
+        
+        for footnote in footnotes:
+            try:
+                fact_id_xbrl = footnote.get('fact_id_xbrl')
+                concept_name = footnote.get('concept_name')
+                
+                # Try to find fact_id from database
+                fact_id = None
+                if fact_id_xbrl:
+                    # Query by fact_id_xbrl
+                    self.cur.execute("""
+                        SELECT fact_id FROM fact_financial_metrics 
+                        WHERE fact_id_xbrl = %s AND filing_id = %s
+                        LIMIT 1
+                    """, (fact_id_xbrl, filing_id))
+                    fact_result = self.cur.fetchone()
+                    if fact_result:
+                        fact_id = fact_result[0]
+                
+                # Get concept_id if concept_name provided
+                concept_id = None
+                if concept_name:
+                    self.cur.execute("""
+                        SELECT concept_id FROM dim_concepts 
+                        WHERE concept_name = %s
+                        LIMIT 1
+                    """, (concept_name,))
+                    concept_result = self.cur.fetchone()
+                    if concept_result:
+                        concept_id = concept_result[0]
+                
+                # Insert footnote
+                self.cur.execute("""
+                    INSERT INTO rel_footnote_references (
+                        filing_id, fact_id, concept_id,
+                        footnote_text, footnote_label, footnote_role, footnote_lang
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (filing_id, fact_id, concept_id, footnote_label) DO NOTHING
+                """, (
+                    filing_id,
+                    fact_id,
+                    concept_id,
+                    footnote.get('footnote_text'),
+                    footnote.get('footnote_label'),
+                    footnote.get('footnote_role'),
+                    footnote.get('footnote_lang', 'en')
+                ))
+                loaded += 1
+            except Exception as e:
+                continue  # Skip on error
+        
+        self.conn.commit()
+        return loaded
+    
+    def _identify_taxonomy_from_namespace(self, namespace: Optional[str]) -> str:
+        """Identify taxonomy from namespace URI"""
+        if not namespace:
+            return 'unknown'
+        
+        namespace_lower = namespace.lower()
+        
+        if 'us-gaap' in namespace_lower or 'fasb' in namespace_lower:
+            return 'US-GAAP'
+        elif 'ifrs' in namespace_lower:
+            return 'IFRS'
+        elif 'dei' in namespace_lower:
+            return 'DEI'
+        elif 'country' in namespace_lower or 'sec.gov' in namespace_lower:
+            return 'SEC'
+        else:
+            return 'custom'
     
     def load_all_files(self, data_dir: Path):
         """Load all JSON files from directory"""

@@ -422,23 +422,236 @@ class ComprehensiveXBRLParser:
             # Extract all facts
             facts = self.extract_all_facts(model_xbrl)
             
+            # Extract XBRL relationships
+            calculation_relationships = self.extract_calculation_relationships(model_xbrl)
+            presentation_hierarchy = self.extract_presentation_hierarchy(model_xbrl)
+            footnote_references = self.extract_footnote_references(model_xbrl, facts)
+            
             # Get filing metadata
             metadata = self._extract_filing_metadata(model_xbrl)
             
             result = {
                 'facts': facts,
+                'relationships': {
+                    'calculation': calculation_relationships,
+                    'presentation': presentation_hierarchy,
+                    'footnotes': footnote_references
+                },
                 'metadata': metadata,
                 'total_facts': len(facts),
                 'extraction_timestamp': datetime.now().isoformat()
             }
             
             logger.info(f"Parsing complete: {len(facts)} facts extracted")
+            logger.info(f"  Calculation relationships: {len(calculation_relationships)}")
+            logger.info(f"  Presentation relationships: {len(presentation_hierarchy)}")
+            logger.info(f"  Footnote references: {len(footnote_references)}")
             
             return result
             
         finally:
             # Clean up
             model_xbrl.close()
+    
+    def extract_calculation_relationships(self, model_xbrl: ModelXbrl.ModelXbrl) -> List[Dict[str, Any]]:
+        """
+        Extract calculation relationships (parent-child summation relationships)
+        
+        Args:
+            model_xbrl: Loaded XBRL model
+            
+        Returns:
+            List of calculation relationship dictionaries
+        """
+        relationships = []
+        
+        try:
+            # Get calculation relationship set
+            # XBRL uses 'http://www.xbrl.org/2003/arcrole/summation-item' for calculations
+            calc_arcrole = XbrlConst.summationItem if hasattr(XbrlConst, 'summationItem') else 'http://www.xbrl.org/2003/arcrole/summation-item'
+            calc_rels = model_xbrl.relationshipSet(calc_arcrole)
+            
+            if not calc_rels:
+                logger.debug("No calculation relationships found")
+                return relationships
+            
+            # Iterate through all calculation relationships
+            for from_concept in calc_rels.modelConcepts:
+                for to_concept, rel in calc_rels.fromModelObject(from_concept):
+                    parent_qname = from_concept.qname if from_concept else None
+                    child_qname = to_concept.qname if to_concept else None
+                    
+                    if not parent_qname or not child_qname:
+                        continue
+                    
+                    # Extract weight (usually 1.0 for addition, -1.0 for subtraction)
+                    weight = float(rel.weight) if hasattr(rel, 'weight') and rel.weight else 1.0
+                    
+                    # Extract order and priority
+                    order_index = rel.order if hasattr(rel, 'order') else None
+                    priority = rel.priority if hasattr(rel, 'priority') else 0
+                    arcrole = rel.arcrole if hasattr(rel, 'arcrole') else calc_arcrole
+                    
+                    relationships.append({
+                        'parent_concept': parent_qname.localName,
+                        'parent_namespace': parent_qname.namespaceURI,
+                        'child_concept': child_qname.localName,
+                        'child_namespace': child_qname.namespaceURI,
+                        'weight': weight,
+                        'order_index': order_index,
+                        'priority': priority,
+                        'arcrole': arcrole
+                    })
+            
+            logger.info(f"Extracted {len(relationships)} calculation relationships")
+            
+        except Exception as e:
+            logger.warning(f"Error extracting calculation relationships: {e}")
+        
+        return relationships
+    
+    def extract_presentation_hierarchy(self, model_xbrl: ModelXbrl.ModelXbrl) -> List[Dict[str, Any]]:
+        """
+        Extract presentation hierarchy (how concepts are organized in statements)
+        
+        Args:
+            model_xbrl: Loaded XBRL model
+            
+        Returns:
+            List of presentation relationship dictionaries
+        """
+        relationships = []
+        
+        try:
+            # Get presentation relationship set (parent-child in presentation linkbase)
+            pres_arcrole = XbrlConst.parentChild if hasattr(XbrlConst, 'parentChild') else 'http://www.xbrl.org/2003/arcrole/parent-child'
+            pres_rels = model_xbrl.relationshipSet(pres_arcrole)
+            
+            if not pres_rels:
+                logger.debug("No presentation relationships found")
+                return relationships
+            
+            # Track statement type for each relationship
+            statement_types = {}
+            
+            # Iterate through all presentation relationships
+            for from_concept in pres_rels.modelConcepts:
+                for to_concept, rel in pres_rels.fromModelObject(from_concept):
+                    parent_qname = from_concept.qname if from_concept else None
+                    child_qname = to_concept.qname if to_concept else None
+                    
+                    if not child_qname:
+                        continue
+                    
+                    # Infer statement type from concept names
+                    if parent_qname:
+                        statement_type = self._infer_statement_type(parent_qname.localName)
+                    else:
+                        # Root node - infer from child
+                        statement_type = self._infer_statement_type(child_qname.localName)
+                    
+                    # Extract order and metadata
+                    order_index = rel.order if hasattr(rel, 'order') else None
+                    priority = rel.priority if hasattr(rel, 'priority') else 0
+                    arcrole = rel.arcrole if hasattr(rel, 'arcrole') else pres_arcrole
+                    
+                    # Extract preferred label role
+                    preferred_label = None
+                    if hasattr(rel, 'preferredLabel'):
+                        preferred_label = str(rel.preferredLabel)
+                    
+                    relationships.append({
+                        'parent_concept': parent_qname.localName if parent_qname else None,
+                        'parent_namespace': parent_qname.namespaceURI if parent_qname else None,
+                        'child_concept': child_qname.localName,
+                        'child_namespace': child_qname.namespaceURI,
+                        'order_index': order_index,
+                        'priority': priority,
+                        'arcrole': arcrole,
+                        'preferred_label': preferred_label,
+                        'statement_type': statement_type
+                    })
+            
+            logger.info(f"Extracted {len(relationships)} presentation relationships")
+            
+        except Exception as e:
+            logger.warning(f"Error extracting presentation relationships: {e}")
+        
+        return relationships
+    
+    def extract_footnote_references(self, model_xbrl: ModelXbrl.ModelXbrl, facts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Extract footnote references linking facts to footnote disclosures
+        
+        Args:
+            model_xbrl: Loaded XBRL model
+            facts: List of extracted fact dictionaries
+            
+        Returns:
+            List of footnote reference dictionaries
+        """
+        footnotes = []
+        
+        try:
+            # Create fact lookup by fact ID
+            fact_lookup = {f.get('fact_id'): f for f in facts if f.get('fact_id')}
+            
+            # Iterate through all facts to find footnote references
+            for fact_obj in model_xbrl.facts:
+                # Check if fact has footnote references
+                if hasattr(fact_obj, 'footnoteRefs') and fact_obj.footnoteRefs:
+                    fact_qname = fact_obj.qname
+                    concept_name = fact_qname.localName if fact_qname else None
+                    fact_id_xbrl = fact_obj.id if hasattr(fact_obj, 'id') else None
+                    
+                    for footnote_ref in fact_obj.footnoteRefs:
+                        if not footnote_ref:
+                            continue
+                        
+                        # Get footnote object
+                        footnote_obj = model_xbrl.modelObject(footnote_ref)
+                        if not footnote_obj:
+                            continue
+                        
+                        # Extract footnote text
+                        footnote_text = None
+                        if hasattr(footnote_obj, 'textValue'):
+                            footnote_text = footnote_obj.textValue
+                        elif hasattr(footnote_obj, 'stringValue'):
+                            footnote_text = footnote_obj.stringValue
+                        
+                        # Extract footnote label/ID
+                        footnote_label = None
+                        if hasattr(footnote_obj, 'label'):
+                            footnote_label = footnote_obj.label
+                        elif hasattr(footnote_obj, 'id'):
+                            footnote_label = footnote_obj.id
+                        
+                        # Extract footnote role
+                        footnote_role = None
+                        if hasattr(footnote_obj, 'role'):
+                            footnote_role = footnote_obj.role
+                        
+                        # Extract language
+                        footnote_lang = 'en'
+                        if hasattr(footnote_obj, 'xmlLang'):
+                            footnote_lang = footnote_obj.xmlLang or 'en'
+                        
+                        footnotes.append({
+                            'fact_id_xbrl': fact_id_xbrl,
+                            'concept_name': concept_name,
+                            'footnote_text': footnote_text,
+                            'footnote_label': footnote_label,
+                            'footnote_role': footnote_role,
+                            'footnote_lang': footnote_lang
+                        })
+            
+            logger.info(f"Extracted {len(footnotes)} footnote references")
+            
+        except Exception as e:
+            logger.warning(f"Error extracting footnote references: {e}")
+        
+        return footnotes
     
     def _extract_filing_metadata(self, model_xbrl: ModelXbrl.ModelXbrl) -> Dict[str, Any]:
         """Extract filing-level metadata"""
