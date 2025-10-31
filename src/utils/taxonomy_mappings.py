@@ -25,17 +25,8 @@ CONCEPT_MAPPINGS = {
     
     "cost_of_revenue": [
         "CostOfRevenue",
-    ],
-    
-    "cost_of_goods_and_services_sold": [
         "CostOfGoodsAndServicesSold",
-    ],
-    
-    "cost_of_sales": [
-        "CostOfSales",
-    ],
-    
-    "cost_of_goods_sold": [
+        "CostOfSales",  # IFRS
         "CostOfGoodsSold",
     ],
     
@@ -80,16 +71,13 @@ CONCEPT_MAPPINGS = {
         "FinanceExpense",
     ],
     
-    "interest_income_investment": [
-        "InvestmentIncomeInterest",
-    ],
-    
-    "finance_income": [
-        "FinanceIncome",
-    ],
-    
     "interest_income": [
         "InterestIncome",
+        "FinanceIncome",  # IFRS equivalent
+    ],
+    
+    "interest_income_investment": [
+        "InvestmentIncomeInterest",  # Specific source, keep separate
     ],
     
     "interest_income_expense_net": [
@@ -117,9 +105,8 @@ CONCEPT_MAPPINGS = {
     
     "net_income": [
         "NetIncomeLoss",
-        "NetIncomeLossAvailableToCommonStockholdersBasic",
-        "ProfitLossAttributableToOwnersOfParent",
-        "ProfitLoss",
+        "ProfitLoss",  # IFRS equivalent
+        "ProfitLossAttributableToOwnersOfParent",  # IFRS variant
         "NetIncome",
     ],
     
@@ -203,12 +190,12 @@ CONCEPT_MAPPINGS = {
         "MarketableSecuritiesNoncurrent",
     ],
     
-    "noncurrent_assets_total": [
-        "AssetsNoncurrent",
+    "noncurrent_assets": [
+        "AssetsNoncurrent",  # US-GAAP: Always the total
     ],
     
-    "noncurrent_assets": [
-        "NoncurrentAssets",
+    "noncurrent_assets_ifrs": [
+        "NoncurrentAssets",  # IFRS: Total noncurrent (context-dependent in US-GAAP)
     ],
     
     "total_assets": [
@@ -337,10 +324,7 @@ CONCEPT_MAPPINGS = {
     "dividends_paid": [
         "PaymentsOfDividends",
         "DividendsPaid",
-    ],
-    
-    "dividends_paid_common_stock": [
-        "PaymentsOfDividendsCommonStock",
+        "PaymentsOfDividendsCommonStock",  # Common stock is the main dividend for most companies
     ],
     
     "stock_repurchased": [
