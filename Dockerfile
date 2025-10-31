@@ -27,6 +27,6 @@ RUN mkdir -p api/data
 # Expose port (Railway will override with PORT env var)
 EXPOSE 5000
 
-# Run with gunicorn
-CMD gunicorn api.main:app --bind 0.0.0.0:$PORT --timeout 600 --workers 1 --log-level info
+# Run with gunicorn (use shell form for variable expansion)
+CMD sh -c "gunicorn api.main:app --bind 0.0.0.0:${PORT:-5000} --timeout 600 --workers 1 --log-level info"
 
