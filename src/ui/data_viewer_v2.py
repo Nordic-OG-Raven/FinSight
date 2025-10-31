@@ -13,6 +13,23 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from config import DATABASE_URI
+import re
+
+
+def humanize_label(label):
+    """Convert snake_case to Title Case (e.g., 'total_assets' -> 'Total Assets')"""
+    if not label:
+        return label
+    return label.replace('_', ' ').title()
+
+
+def humanize_camel_case(text):
+    """Add spaces to CamelCase (e.g., 'GeographicalAreasAxis' -> 'Geographical Areas Axis')"""
+    if not text:
+        return text
+    # Insert space before uppercase letters (except at start)
+    spaced = re.sub(r'(?<!^)(?=[A-Z])', ' ', text)
+    return spaced
 
 
 @st.cache_data(ttl=600)
@@ -182,12 +199,12 @@ def main():
         help="Include product, geography, and other segment-level data"
     )
     
-    # Debug toggle for showing all source concepts (in Advanced Options expander)
+    # Auditor view toggle (in Advanced Options expander)
     with st.sidebar.expander("⚙️ Advanced Options"):
         show_all_concepts = st.checkbox(
-            "Show all source concepts (debug)",
+            "Auditor view",
             value=False,
-            help="When OFF (default): Shows deduplicated data for cleaner analysis. When ON: Shows ALL XBRL concepts including duplicates (e.g., both 'Assets' and 'LiabilitiesAndStockholdersEquity' with same value). Useful for validation/auditing."
+            help="Shows all source XBRL concepts including duplicates (e.g., both 'Assets' and 'LiabilitiesAndStockholdersEquity' for the same value). Useful for validation and auditing."
         )
     
     # Company filter
@@ -206,27 +223,14 @@ def main():
         value=(2023, 2024)
     )
     
-    # Metric filter with search
+    # Metric filter (multiselect has built-in search)
     all_concepts = get_normalized_labels()
-    
-    # Add a search box to help users find metrics
-    metric_search = st.sidebar.text_input(
-        "🔍 Search Metrics",
-        placeholder="Type to search (e.g., revenue, cash, debt)...",
-        help="Filter the metric list below"
-    )
-    
-    # Filter options based on search
-    if metric_search:
-        filtered_concepts = [c for c in all_concepts if metric_search.lower() in c.lower()]
-    else:
-        filtered_concepts = all_concepts
     
     selected_concepts = st.sidebar.multiselect(
         "Filter by Metrics",
-        options=filtered_concepts,
+        options=all_concepts,
         default=[],
-        help="Leave empty to see all metrics, or select specific ones"
+        help="Leave empty to see all metrics, or type to search and select specific ones"
     )
     
     # Debug: Show what was selected
@@ -367,12 +371,11 @@ def main():
     # Format data for display
     display_df = df.copy()
     
-    # Fix normalized_label truncation (limit to 50 chars for display)
+    # Humanize normalized_label (snake_case -> Title Case)
     if 'normalized_label' in display_df.columns:
         display_df['label'] = display_df['normalized_label'].apply(
-            lambda x: x[:47] + '...' if pd.notnull(x) and len(str(x)) > 50 else x
+            lambda x: humanize_label(x[:47] + '...') if pd.notnull(x) and len(str(x)) > 50 else humanize_label(x) if pd.notnull(x) else x
         )
-        # Keep full version for tooltips
         display_df = display_df.drop('normalized_label', axis=1)
     
     # Handle segment/dimension columns - HIDE them if all values are None (not showing segments)
@@ -381,8 +384,9 @@ def main():
         if display_df['member_name'].isna().all() or (display_df['member_name'] == 'None').all():
             display_df = display_df.drop('member_name', axis=1)  # Hide column entirely
         else:
+            # Humanize CamelCase in segment names
             display_df['segment'] = display_df['member_name'].apply(
-                lambda x: x[:37] + '...' if pd.notnull(x) and len(str(x)) > 40 else x
+                lambda x: humanize_camel_case(x[:37] + '...') if pd.notnull(x) and len(str(x)) > 40 else humanize_camel_case(x) if pd.notnull(x) else x
             )
             display_df = display_df.drop('member_name', axis=1)
     
@@ -391,8 +395,9 @@ def main():
         if display_df['axis_name'].isna().all() or (display_df['axis_name'] == 'None').all():
             display_df = display_df.drop('axis_name', axis=1)  # Hide column entirely
         else:
+            # Humanize CamelCase in dimension names
             display_df['dimension'] = display_df['axis_name'].apply(
-                lambda x: x[:37] + '...' if pd.notnull(x) and len(str(x)) > 40 else x
+                lambda x: humanize_camel_case(x[:37] + '...') if pd.notnull(x) and len(str(x)) > 40 else humanize_camel_case(x) if pd.notnull(x) else x
             )
             display_df = display_df.drop('axis_name', axis=1)
     
