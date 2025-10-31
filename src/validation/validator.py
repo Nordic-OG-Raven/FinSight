@@ -383,6 +383,10 @@ class DatabaseValidator:
         missing_matrix_result = self._check_missing_data_matrix()
         report.add_result(missing_matrix_result)
         
+        # Check universal metrics completeness (SOLUTION 2)
+        universal_metrics_result = self._check_universal_metrics()
+        report.add_result(universal_metrics_result)
+        
         # Calculate overall score
         report.calculate_score()
         
@@ -717,6 +721,89 @@ class DatabaseValidator:
             message='Missing Data Matrix Analysis failed',
             details={'error': 'Could not calculate missing data matrix'}
         )
+    
+    def _check_universal_metrics(self) -> ValidationResult:
+        """
+        SOLUTION 2: Check that ALL companies report mandatory universal metrics.
+        
+        Universal metrics are metrics that EVERY publicly listed company MUST report
+        (e.g., Assets, Revenue, Net Income, Accounts Payable).
+        
+        HARD FAILS if any company is missing these - indicates data loading problem.
+        """
+        # Use ACTUAL normalized labels from database
+        UNIVERSAL_METRICS = {
+            'total_assets',  # Not 'assets'
+            'revenue', 
+            'net_income', 
+            'stockholders_equity',
+            'current_liabilities',  # Not 'liabilities_current'
+            'noncurrent_liabilities',  # Not 'liabilities_noncurrent'
+            'accounts_receivable', 
+            'accounts_payable',
+            'cash_and_equivalents', 
+            'operating_cash_flow'
+        }
+        
+        query = """
+        WITH all_companies AS (
+            SELECT ticker, company_id
+            FROM dim_companies
+            WHERE company_id > 0
+        ),
+        reported_metrics AS (
+            SELECT DISTINCT
+                c.ticker,
+                dc.normalized_label
+            FROM fact_financial_metrics f
+            JOIN dim_companies c ON f.company_id = c.company_id
+            JOIN dim_concepts dc ON f.concept_id = dc.concept_id
+            WHERE f.dimension_id IS NULL
+              AND f.value_numeric IS NOT NULL
+              AND dc.normalized_label = ANY(:universal_metrics)
+        )
+        SELECT 
+            ac.ticker,
+            ARRAY_AGG(DISTINCT ac.ticker || ':' || um.metric) FILTER (WHERE rm.normalized_label IS NULL) as missing_metrics
+        FROM all_companies ac
+        CROSS JOIN (SELECT unnest(:universal_metrics::text[]) as metric) um
+        LEFT JOIN reported_metrics rm ON ac.ticker = rm.ticker AND um.metric = rm.normalized_label
+        GROUP BY ac.ticker
+        HAVING COUNT(*) FILTER (WHERE rm.normalized_label IS NULL) > 0;
+        """
+        
+        with self.engine.connect() as conn:
+            result = conn.execute(text(query), {
+                'universal_metrics': list(UNIVERSAL_METRICS)
+            })
+            
+            missing = result.fetchall()
+            
+            if missing:
+                missing_by_company = {row[0]: [m.split(':')[1] for m in row[1]] for row in missing}
+                total_companies = len(missing)
+                total_missing = sum(len(metrics) for metrics in missing_by_company.values())
+                
+                return ValidationResult(
+                    rule_name='universal_metrics_completeness',
+                    passed=False,
+                    severity='ERROR',
+                    message=f'{total_companies} companies missing {total_missing} universal metrics',
+                    details={
+                        'missing_by_company': missing_by_company,
+                        'universal_metrics': list(UNIVERSAL_METRICS),
+                        'total_companies_checked': total_companies,
+                        'total_violations': total_missing
+                    }
+                )
+            else:
+                return ValidationResult(
+                    rule_name='universal_metrics_completeness',
+                    passed=True,
+                    severity='INFO',
+                    message='All companies report all universal metrics',
+                    details={'universal_metrics': list(UNIVERSAL_METRICS)}
+                )
 
 
 def print_validation_report(report: ValidationReport, verbose: bool = True):

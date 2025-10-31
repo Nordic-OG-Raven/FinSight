@@ -730,6 +730,21 @@ def main():
     try:
         loader.load_all_files(data_dir)
         print("\n✅ Data loading complete!")
+        
+        # SOLUTION 1: Populate hierarchy_level for ALL concepts (lasting fix)
+        print("\n" + "="*80)
+        print("🔧 Populating hierarchy levels for all concepts...")
+        print("="*80)
+        import sys
+        sys.path.insert(0, str(Path(__file__).parent.parent))
+        from src.utils.populate_missing_hierarchy import populate_all_hierarchy_levels
+        from sqlalchemy import create_engine
+        from config import DATABASE_URI
+        
+        engine = create_engine(DATABASE_URI)
+        populate_all_hierarchy_levels(engine)
+        print("✅ Hierarchy population complete!")
+        
         return 0
     except Exception as e:
         print(f"\n❌ Error during loading: {e}")

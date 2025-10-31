@@ -373,6 +373,7 @@ def main():
             params['concepts'] = selected_concepts
         
         # Filter by hierarchy level (only in hierarchical view)
+        # CRITICAL: Always allow NULL hierarchy_level (fallback for unmapped concepts)
         if not show_all_concepts:
             query += " AND (f.hierarchy_level >= :min_hierarchy OR f.hierarchy_level IS NULL)"
             params['min_hierarchy'] = min_hierarchy_level
