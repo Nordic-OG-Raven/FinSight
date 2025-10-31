@@ -227,16 +227,24 @@ CONCEPT_MAPPINGS = {
     
     "accounts_payable": [
         "AccountsPayableCurrent",
+        "AccountsPayableAndAccruedLiabilitiesCurrent",  # KO uses combined line item
         "TradeAndOtherCurrentPayables",
     ],
     
     "accrued_liabilities_current": [
         "AccruedLiabilitiesCurrent",
-        "OtherAccruedLiabilitiesCurrent",  # AAPL variant
-        "AccountsPayableAndAccruedLiabilitiesCurrent",  # KO combined line item
-        "AccruedExpensesCurrent",
-        "OtherLiabilitiesCurrent",  # LLY uses this
-        "EmployeeRelatedLiabilitiesCurrent",  # LLY employee accruals
+    ],
+    
+    "employee_related_liabilities_current": [
+        "EmployeeRelatedLiabilitiesCurrent",
+    ],
+    
+    "other_accrued_liabilities_current": [
+        "OtherAccruedLiabilitiesCurrent",
+    ],
+    
+    "other_liabilities_current": [
+        "OtherLiabilitiesCurrent",
     ],
     
     "short_term_debt": [

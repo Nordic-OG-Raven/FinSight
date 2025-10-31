@@ -42,7 +42,6 @@
 │    -- HIERARCHICAL STRUCTURE (NEW):
 │    hierarchy_level (INT) │     │  -- 1=detail, 2=subtotal, 3=section_total, 4=statement_total
 │ FK parent_concept_id     │─────┤  -- Self-referencing FK to concept_id (NULL for top-level)
-│    is_calculated (BOOL)  │     │  -- TRUE if value derived from children, FALSE if reported directly
 │    calculation_weight    │     │  -- Multiplier for summation (1.0 for addition, -1.0 for subtraction)
 │                          │     │
 │ UK (concept_name,        │     │
@@ -79,12 +78,13 @@
 │    source_url            │               │    source_line             │
 │    accession_number      │               │    order_index             │
 │    extraction_timestamp  │               │    is_primary (BOOL)       │
-│    validation_score      │               │    extraction_method       │
-│    completeness_score    │               │    created_at              │
-│ UK (company_id,          │               │                            │
-│     filing_type,         │               │ UK (filing_id, concept_id, │
-│     fiscal_year_end)     │               │     period_id,             │
-└──────────────────────────┘               │     dimension_id,          │
+│    validation_score      │               │    is_calculated (BOOL)    │
+│    completeness_score    │               │    extraction_method       │
+│ UK (company_id,          │               │    created_at              │
+│     filing_type,         │               │                            │
+│     fiscal_year_end)     │               │ UK (filing_id, concept_id, │
+└──────────────────────────┘               │     period_id,             │
+                                           │     dimension_id,          │
                                            │     fact_id_xbrl)          │
                                            └────────────────────────────┘
                                                         │
@@ -439,14 +439,17 @@ Companies report the **same business item** at **different levels of granularity
    - Links child concept to parent concept
    - `NULL` for top-level concepts (statement totals)
    
-3. **`is_calculated` (BOOLEAN)**:
-   - `FALSE` = Reported directly in XBRL filing
-   - `TRUE` = Calculated by summing children (synthesized)
-   
-4. **`calculation_weight` (DECIMAL)**:
+3. **`calculation_weight` (DECIMAL)**:
    - `1.0` = Add to parent (assets, revenues, expenses)
    - `-1.0` = Subtract from parent (contra-accounts, deductions)
    - Used for: `parent_value = SUM(child_value * weight)`
+
+**Additional Fields:**
+
+- **`is_calculated` (on `fact_financial_metrics`, not `dim_concepts`)**:
+  - `FALSE` = Reported directly in XBRL filing
+  - `TRUE` = Calculated by summing children (synthesized at ETL)
+  - Reason: Same concept can be calculated for one company but reported by another
 
 ### Hierarchy Construction Process
 

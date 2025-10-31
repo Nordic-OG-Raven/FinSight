@@ -46,6 +46,13 @@ CREATE TABLE dim_concepts (
     data_type VARCHAR(50),
     is_abstract BOOLEAN DEFAULT FALSE,
     statement_type VARCHAR(50), -- income_statement, balance_sheet, cash_flow, etc.
+    
+    -- HIERARCHICAL STRUCTURE (parent-child relationships)
+    hierarchy_level INTEGER, -- 1=detail, 2=subtotal, 3=section_total, 4=statement_total
+    parent_concept_id INTEGER REFERENCES dim_concepts(concept_id) ON DELETE SET NULL,
+    is_calculated BOOLEAN DEFAULT FALSE, -- TRUE if value derived from children
+    calculation_weight DECIMAL(10,4) DEFAULT 1.0, -- 1.0 for addition, -1.0 for subtraction
+    
     UNIQUE(concept_name, taxonomy)
 );
 
@@ -118,6 +125,9 @@ CREATE TABLE fact_financial_metrics (
     source_line INTEGER,
     order_index INTEGER, -- Fact ordering within document sections
     is_primary BOOLEAN DEFAULT TRUE, -- TRUE if primary occurrence (not a duplicate reference)
+    
+    -- Hierarchical aggregation
+    is_calculated BOOLEAN DEFAULT FALSE, -- TRUE if value calculated from children (not in XBRL filing)
     
     -- Provenance
     extraction_method VARCHAR(50) DEFAULT 'arelle',
