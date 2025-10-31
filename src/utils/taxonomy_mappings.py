@@ -47,7 +47,13 @@ CONCEPT_MAPPINGS = {
     
     "selling_general_admin": [
         "SellingGeneralAndAdministrativeExpense",
+    ],
+    
+    "selling_and_marketing_expense": [
         "SellingAndMarketingExpense",
+    ],
+    
+    "general_and_administrative_expense": [
         "GeneralAndAdministrativeExpense",
     ],
     
@@ -65,10 +71,13 @@ CONCEPT_MAPPINGS = {
     ],
     
     "interest_income": [
-        "InterestIncomeExpenseNonoperatingNet",
-        "InterestIncomeExpenseNet",
         "InvestmentIncomeInterest",
         "FinanceIncome",
+    ],
+    
+    "interest_income_expense_net": [
+        "InterestIncomeExpenseNet",
+        "InterestIncomeExpenseNonoperatingNet",
     ],
     
     "income_before_tax": [
@@ -301,10 +310,16 @@ CONCEPT_MAPPINGS = {
     # OTHER FINANCIAL METRICS
     # ============================================================================
     
-    "depreciation_amortization": [
-        "DepreciationDepletionAndAmortization",
+    "depreciation": [
         "Depreciation",
+    ],
+    
+    "depreciation_and_amortization": [
         "DepreciationAndAmortization",
+    ],
+    
+    "depreciation_depletion_and_amortization": [
+        "DepreciationDepletionAndAmortization",
     ],
     
     "stock_based_compensation": [
@@ -1018,6 +1033,7 @@ def get_normalized_label(concept: str) -> str | None:
     Get the normalized label for a given concept name.
     
     Uses explicit mappings first, then auto-generates from concept name as fallback.
+    Ensures uniqueness by preserving semantic distinctions, not blindly truncating.
     
     Args:
         concept: XBRL concept name (e.g., 'RevenueFromContractWithCustomerExcludingAssessedTax')
@@ -1026,6 +1042,7 @@ def get_normalized_label(concept: str) -> str | None:
         Normalized label (e.g., 'revenue') or auto-generated snake_case label
     """
     import re
+    import hashlib
     
     # Try explicit mappings first (curated, high-quality)
     for normalized, concepts in CONCEPT_MAPPINGS.items():
@@ -1051,9 +1068,15 @@ def get_normalized_label(concept: str) -> str | None:
     s2 = s2.replace('_policy_text_block', '_policy_note')  # Already marked
     s2 = s2.replace('_table_text_block', '_table_note')  # MARK as table
     
-    # Limit length to keep labels manageable
-    if len(s2) > 80:
-        s2 = s2[:80]
+    # Smart length management: preserve uniqueness instead of blind truncation
+    # If the label is too long, keep the start and append a unique hash of the full string
+    MAX_BASE_LENGTH = 100  # Increased from 80 to preserve more semantics
+    
+    if len(s2) > MAX_BASE_LENGTH:
+        # Take first 92 chars and append 8-char hash to ensure uniqueness
+        # This prevents different concepts from being conflated
+        hash_suffix = hashlib.sha256(s2.encode()).hexdigest()[:8]
+        s2 = s2[:92] + '_' + hash_suffix
     
     return s2
 
@@ -1094,7 +1117,8 @@ STATEMENT_TYPES = {
         "capex", "dividends_paid", "stock_repurchased", "free_cash_flow"
     ],
     "other": [
-        "depreciation_amortization", "stock_based_compensation", "deferred_revenue"
+        "depreciation", "depreciation_and_amortization", "depreciation_depletion_and_amortization", 
+        "stock_based_compensation", "deferred_revenue"
     ]
 }
 
