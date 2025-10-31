@@ -272,6 +272,12 @@ def main():
             lambda x: f"{x:,.0f}" if pd.notnull(x) and abs(x) >= 1000 else (f"{x:.2f}" if pd.notnull(x) else "")
         )
     
+    # Remove redundant technical columns
+    if 'concept' in display_df.columns:
+        display_df = display_df.drop('concept', axis=1)  # User has normalized label, don't need raw concept
+    if 'concept_name' in display_df.columns:
+        display_df = display_df.drop('concept_name', axis=1)
+    
     # Reorder columns for better display
     column_order = []
     if 'company' in display_df.columns:
@@ -289,9 +295,10 @@ def main():
     if 'member' in display_df.columns:
         column_order.append('member')
     
-    # Add remaining columns
+    # Add remaining columns (but skip raw technical fields)
+    skip_cols = ['value_numeric', 'value_text']  # Already have 'value' formatted
     for col in display_df.columns:
-        if col not in column_order:
+        if col not in column_order and col not in skip_cols:
             column_order.append(col)
     
     display_df = display_df[column_order]
