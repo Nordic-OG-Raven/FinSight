@@ -157,7 +157,7 @@ def main():
     )
     
     st.title("📊 FinSight Financial Data Warehouse")
-    st.markdown("**Star Schema Design** • Proper Dimensional Modeling • Cross-Company Analysis")
+    st.markdown("Cross-company financial analysis from SEC and ESEF filings")
     
     # Database statistics
     stats = get_database_stats()
@@ -180,13 +180,6 @@ def main():
         "Show segment breakdowns",
         value=False,
         help="Include product, geography, and other segment-level data"
-    )
-    
-    # Filter out text/notes by default
-    exclude_notes = st.sidebar.checkbox(
-        "Exclude text notes and disclosures",
-        value=True,
-        help="Hide text blocks, policy notes, and disclosure narratives (show only numeric data)"
     )
     
     # Company filter
@@ -259,10 +252,9 @@ def main():
         if not show_segments:
             query += " AND f.dimension_id IS NULL"
         
-        # Exclude text notes if requested
-        if exclude_notes:
-            query += " AND (co.normalized_label NOT LIKE '%_note' AND co.normalized_label NOT LIKE '%_disclosure%' AND co.normalized_label NOT LIKE '%_section_header')"
-            query += " AND f.value_numeric IS NOT NULL"  # Only show numeric data
+        # ALWAYS exclude text notes - users want numbers, not documentation
+        query += " AND (co.normalized_label NOT LIKE '%_note' AND co.normalized_label NOT LIKE '%_disclosure%' AND co.normalized_label NOT LIKE '%_section_header')"
+        query += " AND f.value_numeric IS NOT NULL"  # Only show numeric data
         
         query += " ORDER BY c.ticker, t.fiscal_year, co.normalized_label"
         
@@ -289,19 +281,30 @@ def main():
         # Keep full version for tooltips
         display_df = display_df.drop('normalized_label', axis=1)
     
-    # Fix member_name truncation
+    # Handle segment/dimension columns - HIDE them if all values are None (not showing segments)
     if 'member_name' in display_df.columns:
-        display_df['member'] = display_df['member_name'].apply(
-            lambda x: x[:37] + '...' if pd.notnull(x) and len(str(x)) > 40 else x
-        )
-        display_df = display_df.drop('member_name', axis=1)
+        # Check if all values are None/null
+        if display_df['member_name'].isna().all() or (display_df['member_name'] == 'None').all():
+            display_df = display_df.drop('member_name', axis=1)  # Hide column entirely
+        else:
+            display_df['segment'] = display_df['member_name'].apply(
+                lambda x: x[:37] + '...' if pd.notnull(x) and len(str(x)) > 40 else x
+            )
+            display_df = display_df.drop('member_name', axis=1)
     
-    # Fix axis_name truncation
     if 'axis_name' in display_df.columns:
-        display_df['axis'] = display_df['axis_name'].apply(
-            lambda x: x[:37] + '...' if pd.notnull(x) and len(str(x)) > 40 else x
-        )
-        display_df = display_df.drop('axis_name', axis=1)
+        # Check if all values are None/null
+        if display_df['axis_name'].isna().all() or (display_df['axis_name'] == 'None').all():
+            display_df = display_df.drop('axis_name', axis=1)  # Hide column entirely
+        else:
+            display_df['dimension'] = display_df['axis_name'].apply(
+                lambda x: x[:37] + '...' if pd.notnull(x) and len(str(x)) > 40 else x
+            )
+            display_df = display_df.drop('axis_name', axis=1)
+    
+    # Always drop data_type column - internal use only
+    if 'data_type' in display_df.columns:
+        display_df = display_df.drop('data_type', axis=1)
     
     # Fix unit_measure display (remove curly braces from arrays)
     if 'unit_measure' in display_df.columns:
@@ -334,10 +337,10 @@ def main():
         column_order.append('value')
     if 'unit' in display_df.columns:
         column_order.append('unit')
-    if 'axis' in display_df.columns:
-        column_order.append('axis')
-    if 'member' in display_df.columns:
-        column_order.append('member')
+    if 'dimension' in display_df.columns:  # Only present when showing segments
+        column_order.append('dimension')
+    if 'segment' in display_df.columns:  # Only present when showing segments
+        column_order.append('segment')
     
     # Add remaining columns (but skip raw technical fields)
     skip_cols = ['value_numeric', 'value_text']  # Already have 'value' formatted
@@ -358,8 +361,8 @@ def main():
             "fiscal_year": st.column_config.NumberColumn("Year", width="small"),
             "value": st.column_config.TextColumn("Value", width="medium"),
             "unit": st.column_config.TextColumn("Unit", width="small"),
-            "axis": st.column_config.TextColumn("Dimension", width="medium"),
-            "member": st.column_config.TextColumn("Segment", width="medium"),
+            "dimension": st.column_config.TextColumn("Dimension", width="medium"),
+            "segment": st.column_config.TextColumn("Segment", width="medium"),
         },
         hide_index=False
     )
