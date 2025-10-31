@@ -1017,16 +1017,41 @@ def get_normalized_label(concept: str) -> str | None:
     """
     Get the normalized label for a given concept name.
     
+    Uses explicit mappings first, then auto-generates from concept name as fallback.
+    
     Args:
         concept: XBRL concept name (e.g., 'RevenueFromContractWithCustomerExcludingAssessedTax')
     
     Returns:
-        Normalized label (e.g., 'revenue') or None if not found
+        Normalized label (e.g., 'revenue') or auto-generated snake_case label
     """
+    import re
+    
+    # Try explicit mappings first (curated, high-quality)
     for normalized, concepts in CONCEPT_MAPPINGS.items():
         if concept in concepts:
             return normalized
-    return None
+    
+    # Fallback: Auto-generate normalized label from concept name
+    # This ensures 100% coverage while prioritizing curated mappings for key metrics
+    
+    # Convert CamelCase to snake_case
+    s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', concept)
+    s2 = re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
+    
+    # Remove common XBRL suffixes that don't add meaning
+    s2 = s2.replace('_disclosure_text_block', '')
+    s2 = s2.replace('_text_block', '')
+    s2 = s2.replace('_abstract', '')
+    s2 = s2.replace('_policy_text_block', '')
+    s2 = s2.replace('_policy', '_policy_note')  # Keep policy but mark it
+    s2 = s2.replace('_table_text_block', '_table')
+    
+    # Limit length to keep labels manageable
+    if len(s2) > 80:
+        s2 = s2[:80]
+    
+    return s2
 
 
 def get_concepts_for_label(normalized_label: str) -> list[str]:
