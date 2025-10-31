@@ -512,15 +512,18 @@ def main():
                 # Only show chart if metrics are explicitly selected
                 if selected_concepts:
                     metrics_to_plot = selected_concepts[:5]  # Max 5 metrics for readability
-                    plot_df = df[df['normalized_label'].isin(metrics_to_plot)]
+                    plot_df = df[df['normalized_label'].isin(metrics_to_plot)].copy()
                     if not plot_df.empty and len(plot_df) > 0:
+                        # Convert fiscal_year to string to prevent interpolation (2,023.5 issue)
+                        plot_df['fiscal_year_str'] = plot_df['fiscal_year'].astype(str)
                         fig = px.line(
                             plot_df,
-                            x='fiscal_year',
+                            x='fiscal_year_str',
                             y='value_numeric',
                             color='normalized_label',
                             title="Metrics Over Time"
                         )
+                        fig.update_xaxes(type='category')  # Ensure discrete axis
                         st.plotly_chart(fig, use_container_width=True)
                     else:
                         st.info("No data for selected metrics")
@@ -533,14 +536,16 @@ def main():
             if len(selected_companies) > 1 and selected_concepts and len(selected_concepts) == 1:
                 # Cross-company comparison
                 st.markdown("**Cross-Company Comparison**")
-                concept_df = df[df['normalized_label'] == selected_concepts[0]]
+                concept_df = df[df['normalized_label'] == selected_concepts[0]].copy()
                 if not concept_df.empty:
+                    # Convert fiscal_year to string for discrete color mapping (prevents 2,023.5 issue)
+                    concept_df['fiscal_year_str'] = concept_df['fiscal_year'].astype(str)
                     fig = px.bar(
                         concept_df,
                         x='company',
                         y='value_numeric',
-                        color='fiscal_year',
-                        title=f"{selected_concepts[0]} by Company"
+                        color='fiscal_year_str',
+                        title=f"{humanize_label(selected_concepts[0])} by Company"
                     )
                     st.plotly_chart(fig, use_container_width=True)
             else:

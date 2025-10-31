@@ -379,6 +379,10 @@ class DatabaseValidator:
         completeness_results = self._check_data_completeness()
         report.results.extend(completeness_results)
         
+        # Check missing data matrix (company × metric × year)
+        missing_matrix_result = self._check_missing_data_matrix()
+        report.add_result(missing_matrix_result)
+        
         # Calculate overall score
         report.calculate_score()
         
@@ -532,6 +536,187 @@ class DatabaseValidator:
                 ))
         
         return results
+    
+    def _check_missing_data_matrix(self) -> ValidationResult:
+        """
+        Comprehensive missing data analysis: company × metric × year matrix.
+        
+        Calculates % missing for each company-metric combination across all time periods.
+        """
+        query = """
+        WITH company_data_years AS (
+            -- Get all years where each company has ANY data
+            SELECT DISTINCT
+                c.ticker as company,
+                t.fiscal_year
+            FROM fact_financial_metrics f
+            JOIN dim_companies c ON f.company_id = c.company_id
+            JOIN dim_time_periods t ON f.period_id = t.period_id
+            WHERE t.fiscal_year IS NOT NULL
+              AND f.dimension_id IS NULL  -- Only consolidated
+              AND f.value_numeric IS NOT NULL
+        ),
+        company_reported_metrics AS (
+            -- Get metrics that each company reports (at least once)
+            SELECT DISTINCT
+                c.ticker as company,
+                co.normalized_label as metric
+            FROM fact_financial_metrics f
+            JOIN dim_companies c ON f.company_id = c.company_id
+            JOIN dim_concepts co ON f.concept_id = co.concept_id
+            WHERE co.normalized_label IS NOT NULL
+              AND co.normalized_label NOT LIKE '%_note'
+              AND co.normalized_label NOT LIKE '%_disclosure%'
+        ),
+        expected_combinations AS (
+            -- For each company-metric pair, check coverage across ALL years where company has data
+            SELECT 
+                crm.company,
+                crm.metric,
+                cdy.fiscal_year
+            FROM company_reported_metrics crm
+            CROSS JOIN company_data_years cdy
+            WHERE crm.company = cdy.company
+        ),
+        actual_data AS (
+            SELECT DISTINCT
+                c.ticker as company,
+                co.normalized_label as metric,
+                t.fiscal_year
+            FROM fact_financial_metrics f
+            JOIN dim_companies c ON f.company_id = c.company_id
+            JOIN dim_concepts co ON f.concept_id = co.concept_id
+            JOIN dim_time_periods t ON f.period_id = t.period_id
+            WHERE f.dimension_id IS NULL  -- Only consolidated facts
+              AND f.value_numeric IS NOT NULL
+              AND co.normalized_label IS NOT NULL
+              AND co.normalized_label NOT LIKE '%_note'
+              AND co.normalized_label NOT LIKE '%_disclosure%'
+        ),
+        coverage_stats AS (
+            SELECT 
+                ec.company,
+                ec.metric,
+                COUNT(DISTINCT ad.fiscal_year) as years_available,
+                COUNT(DISTINCT ec.fiscal_year) as years_total,
+                ROUND(100.0 * COUNT(DISTINCT ad.fiscal_year) / NULLIF(COUNT(DISTINCT ec.fiscal_year), 0), 1) as coverage_pct
+            FROM expected_combinations ec
+            LEFT JOIN actual_data ad ON 
+                ec.company = ad.company AND 
+                ec.metric = ad.metric AND 
+                ec.fiscal_year = ad.fiscal_year
+            GROUP BY ec.company, ec.metric
+        )
+        SELECT 
+            COUNT(*) as total_combinations,
+            COUNT(*) FILTER (WHERE coverage_pct = 100.0) as complete,
+            COUNT(*) FILTER (WHERE coverage_pct > 0 AND coverage_pct < 100.0) as partial,
+            COUNT(*) FILTER (WHERE coverage_pct = 0.0) as missing,
+            ROUND(AVG(coverage_pct), 1) as avg_coverage_pct,
+            ROUND(100.0 * COUNT(*) FILTER (WHERE coverage_pct = 0.0) / COUNT(*), 1) as missing_pct
+        FROM coverage_stats;
+        """
+        
+        with self.engine.connect() as conn:
+            result = conn.execute(text(query))
+            row = result.fetchone()
+            
+            if row:
+                total_combinations, complete, partial, missing, avg_coverage, missing_pct = row
+                
+                # Get worst 10 combinations (metrics that company reports but missing in some years)
+                worst_query = """
+                WITH company_data_years AS (
+                    SELECT DISTINCT
+                        c.ticker as company,
+                        t.fiscal_year
+                    FROM fact_financial_metrics f
+                    JOIN dim_companies c ON f.company_id = c.company_id
+                    JOIN dim_time_periods t ON f.period_id = t.period_id
+                    WHERE t.fiscal_year IS NOT NULL
+                      AND f.dimension_id IS NULL
+                      AND f.value_numeric IS NOT NULL
+                ),
+                company_reported_metrics AS (
+                    SELECT DISTINCT
+                        c.ticker as company,
+                        co.normalized_label as metric
+                    FROM fact_financial_metrics f
+                    JOIN dim_companies c ON f.company_id = c.company_id
+                    JOIN dim_concepts co ON f.concept_id = co.concept_id
+                    WHERE co.normalized_label IS NOT NULL
+                      AND co.normalized_label NOT LIKE '%_note'
+                      AND co.normalized_label NOT LIKE '%_disclosure%'
+                ),
+                expected_combinations AS (
+                    SELECT 
+                        crm.company,
+                        crm.metric,
+                        cdy.fiscal_year
+                    FROM company_reported_metrics crm
+                    CROSS JOIN company_data_years cdy
+                    WHERE crm.company = cdy.company
+                ),
+                actual_data AS (
+                    SELECT DISTINCT
+                        c.ticker as company,
+                        co.normalized_label as metric,
+                        t.fiscal_year
+                    FROM fact_financial_metrics f
+                    JOIN dim_companies c ON f.company_id = c.company_id
+                    JOIN dim_concepts co ON f.concept_id = co.concept_id
+                    JOIN dim_time_periods t ON f.period_id = t.period_id
+                    WHERE f.dimension_id IS NULL
+                      AND f.value_numeric IS NOT NULL
+                      AND co.normalized_label IS NOT NULL
+                      AND co.normalized_label NOT LIKE '%_note'
+                ),
+                coverage_stats AS (
+                    SELECT 
+                        ec.company,
+                        ec.metric,
+                        COUNT(DISTINCT ad.fiscal_year) as years_available,
+                        COUNT(DISTINCT ec.fiscal_year) as years_total,
+                        ROUND(100.0 * COUNT(DISTINCT ad.fiscal_year) / NULLIF(COUNT(DISTINCT ec.fiscal_year), 0), 1) as coverage_pct
+                    FROM expected_combinations ec
+                    LEFT JOIN actual_data ad ON 
+                        ec.company = ad.company AND 
+                        ec.metric = ad.metric AND 
+                        ec.fiscal_year = ad.fiscal_year
+                    GROUP BY ec.company, ec.metric
+                    HAVING COUNT(DISTINCT ad.fiscal_year) = 0  -- Only missing
+                )
+                SELECT company, metric, years_total
+                FROM coverage_stats
+                ORDER BY years_total DESC
+                LIMIT 10;
+                """
+                worst_result = conn.execute(text(worst_query))
+                worst_examples = [f"{r[0]}:{r[1]}" for r in worst_result]
+                
+                return ValidationResult(
+                    rule_name='missing_data_matrix',
+                    passed=missing_pct < 30.0,  # Fail if > 30% missing
+                    severity='ERROR' if missing_pct > 50.0 else 'WARNING',
+                    message=f"Missing Data Matrix Analysis",
+                    details={
+                        'total_combinations': total_combinations,
+                        'complete': complete,
+                        'partial': partial,
+                        'missing': missing,
+                        'avg_coverage_pct': avg_coverage,
+                        'missing_pct': missing_pct,
+                        'worst_examples': worst_examples[:10]
+                    }
+                )
+        
+        return ValidationResult(
+            rule_name='missing_data_matrix',
+            passed=False,
+            severity='ERROR',
+            message='Missing Data Matrix Analysis failed',
+            details={'error': 'Could not calculate missing data matrix'}
+        )
 
 
 def print_validation_report(report: ValidationReport, verbose: bool = True):
