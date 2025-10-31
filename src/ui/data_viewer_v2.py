@@ -175,11 +175,18 @@ def main():
     # Sidebar filters
     st.sidebar.header("🔍 Filters")
     
-    # View mode
-    view_mode = st.sidebar.radio(
-        "View Mode",
-        ["Consolidated Facts", "Dimensional Breakdowns"],
-        help="Consolidated = totals only • Dimensional = segment/product/geography breakdowns"
+    # Show segments checkbox (simpler than "view mode")
+    show_segments = st.sidebar.checkbox(
+        "Show segment breakdowns",
+        value=False,
+        help="Include product, geography, and other segment-level data"
+    )
+    
+    # Filter out text/notes by default
+    exclude_notes = st.sidebar.checkbox(
+        "Exclude text notes and disclosures",
+        value=True,
+        help="Hide text blocks, policy notes, and disclosure narratives (show only numeric data)"
     )
     
     # Company filter
@@ -198,32 +205,69 @@ def main():
         value=(2023, 2024)
     )
     
-    # Concept filter (for consolidated only)
-    if view_mode == "Consolidated Facts":
-        all_concepts = get_normalized_labels()
-        selected_concepts = st.sidebar.multiselect(
-            "Normalized Labels",
-            options=all_concepts,
-            default=[]
-        )
-    else:
-        selected_concepts = None
+    # Metric filter
+    all_concepts = get_normalized_labels()
+    selected_concepts = st.sidebar.multiselect(
+        "Filter by Metrics",
+        options=all_concepts,
+        default=[],
+        help="Leave empty to see all metrics, or select specific ones"
+    )
     
-    # Load data
+    # Load data (unified query)
     with st.spinner("Loading data from warehouse..."):
-        if view_mode == "Consolidated Facts":
-            df = load_consolidated_data(
-                companies=selected_companies if selected_companies else None,
-                start_year=year_range[0],
-                end_year=year_range[1],
-                concepts=selected_concepts if selected_concepts else None
-            )
-        else:
-            df = load_dimensional_data(
-                companies=selected_companies if selected_companies else None,
-                start_year=year_range[0],
-                end_year=year_range[1]
-            )
+        engine = create_engine(DATABASE_URI)
+        
+        query = """
+        SELECT 
+            c.ticker as company,
+            co.concept_name as concept,
+            co.normalized_label,
+            t.fiscal_year,
+            f.value_numeric,
+            f.value_text,
+            f.unit_measure,
+            d.axis_name,
+            d.member_name,
+            CASE WHEN f.dimension_id IS NULL THEN 'Total' ELSE 'Segment' END as data_type
+        FROM fact_financial_metrics f
+        JOIN dim_companies c ON f.company_id = c.company_id
+        JOIN dim_concepts co ON f.concept_id = co.concept_id
+        JOIN dim_time_periods t ON f.period_id = t.period_id
+        LEFT JOIN dim_xbrl_dimensions d ON f.dimension_id = d.dimension_id
+        WHERE 1=1
+        """
+        
+        params = {}
+        
+        # Filter by selected companies
+        if selected_companies:
+            query += " AND c.ticker = ANY(:companies)"
+            params['companies'] = selected_companies
+        
+        # Filter by year range
+        query += " AND t.fiscal_year >= :start_year AND t.fiscal_year <= :end_year"
+        params['start_year'] = year_range[0]
+        params['end_year'] = year_range[1]
+        
+        # Filter by selected concepts
+        if selected_concepts:
+            query += " AND co.normalized_label = ANY(:concepts)"
+            params['concepts'] = selected_concepts
+        
+        # Exclude segments if not requested
+        if not show_segments:
+            query += " AND f.dimension_id IS NULL"
+        
+        # Exclude text notes if requested
+        if exclude_notes:
+            query += " AND (co.normalized_label NOT LIKE '%_note' AND co.normalized_label NOT LIKE '%_disclosure%' AND co.normalized_label NOT LIKE '%_section_header')"
+            query += " AND f.value_numeric IS NOT NULL"  # Only show numeric data
+        
+        query += " ORDER BY c.ticker, t.fiscal_year, co.normalized_label"
+        
+        with engine.connect() as conn:
+            df = pd.read_sql(text(query), conn, params=params)
     
     if df.empty:
         st.warning("No data found for selected filters")
@@ -328,40 +372,29 @@ def main():
         col1, col2 = st.columns(2)
         
         with col1:
-            if view_mode == "Consolidated Facts" and 'normalized_label' in df.columns:
-                # Time series by normalized label
-                if len(selected_companies) == 1 and selected_concepts:
-                    st.markdown("**Time Series by Concept**")
+            if len(selected_companies) == 1 and 'normalized_label' in df.columns:
+                # Time series
+                st.markdown("**Time Series**")
+                metrics_to_plot = selected_concepts[:5] if selected_concepts else df['normalized_label'].value_counts().head(5).index.tolist()
+                plot_df = df[df['normalized_label'].isin(metrics_to_plot)] if metrics_to_plot else df
+                if not plot_df.empty and len(plot_df) > 0:
                     fig = px.line(
-                        df[df['normalized_label'].isin(selected_concepts[:5])],
+                        plot_df,
                         x='fiscal_year',
                         y='value_numeric',
                         color='normalized_label',
                         title="Metrics Over Time"
                     )
                     st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.info("Select 1 company and some concepts for time series")
             else:
-                # Dimensional breakdown
-                if 'axis_name' in df.columns:
-                    st.markdown("**Dimensional Breakdown**")
-                    top_dims = df.nlargest(10, 'value_numeric')
-                    fig = px.bar(
-                        top_dims,
-                        x='member_name',
-                        y='value_numeric',
-                        color='company',
-                        title="Top 10 Dimensional Values"
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
+                st.info("Select 1 company to see time series chart")
         
         with col2:
-            if view_mode == "Consolidated Facts" and len(selected_companies) > 1:
+            if len(selected_companies) > 1 and selected_concepts and len(selected_concepts) == 1:
                 # Cross-company comparison
-                if selected_concepts and len(selected_concepts) == 1:
-                    st.markdown("**Cross-Company Comparison**")
-                    concept_df = df[df['normalized_label'] == selected_concepts[0]]
+                st.markdown("**Cross-Company Comparison**")
+                concept_df = df[df['normalized_label'] == selected_concepts[0]]
+                if not concept_df.empty:
                     fig = px.bar(
                         concept_df,
                         x='company',
@@ -370,8 +403,8 @@ def main():
                         title=f"{selected_concepts[0]} by Company"
                     )
                     st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.info("Select 1 concept for cross-company comparison")
+            else:
+                st.info("Select multiple companies and 1 metric for comparison")
     
     # Export
     st.markdown("---")

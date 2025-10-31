@@ -1039,13 +1039,17 @@ def get_normalized_label(concept: str) -> str | None:
     s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', concept)
     s2 = re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
     
-    # Remove common XBRL suffixes that don't add meaning
-    s2 = s2.replace('_disclosure_text_block', '')
-    s2 = s2.replace('_text_block', '')
-    s2 = s2.replace('_abstract', '')
-    s2 = s2.replace('_policy_text_block', '')
-    s2 = s2.replace('_policy', '_policy_note')  # Keep policy but mark it
-    s2 = s2.replace('_table_text_block', '_table')
+    # Mark text/disclosure fields clearly to avoid confusion with numeric data
+    is_text_field = False
+    if any(suffix in s2 for suffix in ['_disclosure_text_block', '_text_block', '_policy_text_block', '_table_text_block']):
+        is_text_field = True
+    
+    # Remove common XBRL suffixes but mark type
+    s2 = s2.replace('_disclosure_text_block', '_disclosure_note')  # MARK as note
+    s2 = s2.replace('_text_block', '_note')  # MARK as note
+    s2 = s2.replace('_abstract', '_section_header')  # MARK as abstract
+    s2 = s2.replace('_policy_text_block', '_policy_note')  # Already marked
+    s2 = s2.replace('_table_text_block', '_table_note')  # MARK as table
     
     # Limit length to keep labels manageable
     if len(s2) > 80:
