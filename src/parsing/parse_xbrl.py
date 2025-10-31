@@ -71,7 +71,7 @@ class ComprehensiveXBRLParser:
     
     def extract_all_facts(self, model_xbrl: ModelXbrl.ModelXbrl) -> List[Dict[str, Any]]:
         """
-        Extract ALL facts from XBRL document
+        Extract ALL facts from XBRL document with deduplication
         
         Args:
             model_xbrl: Loaded XBRL model
@@ -83,6 +83,10 @@ class ComprehensiveXBRLParser:
         
         facts = []
         fact_count = 0
+        duplicates_removed = 0
+        
+        # Track facts by (concept, context, value) to detect duplicates
+        fact_registry = {}  # key -> fact_dict
         
         # Iterate through ALL facts in the instance
         for fact in model_xbrl.facts:
@@ -90,14 +94,45 @@ class ComprehensiveXBRLParser:
             
             try:
                 fact_dict = self._extract_fact_details(fact, model_xbrl)
-                if fact_dict:
-                    facts.append(fact_dict)
+                if not fact_dict:
+                    continue
+                
+                # Create deduplication key
+                dedup_key = (
+                    fact_dict.get('concept'),
+                    fact_dict.get('context_id'),
+                    fact_dict.get('value_numeric'),
+                    fact_dict.get('value_text')
+                )
+                
+                # Check if this is a duplicate
+                if dedup_key in fact_registry:
+                    duplicates_removed += 1
+                    existing_fact = fact_registry[dedup_key]
+                    
+                    # Keep the one with LOWER order_index (primary statement location)
+                    existing_order = existing_fact.get('order_index') or 999999
+                    new_order = fact_dict.get('order_index') or 999999
+                    
+                    if new_order < existing_order:
+                        # Replace with better ordered fact
+                        fact_registry[dedup_key] = fact_dict
+                        fact_dict['is_primary'] = True
+                        logger.debug(f"Replaced duplicate with better ordered fact: {fact_dict.get('concept')}")
+                    # else: keep existing (it has better order)
+                else:
+                    # New unique fact
+                    fact_dict['is_primary'] = True
+                    fact_registry[dedup_key] = fact_dict
                     
             except Exception as e:
                 logger.warning(f"Error extracting fact {fact_count}: {e}")
                 continue
         
-        logger.info(f"Extracted {len(facts)} facts from {fact_count} total facts")
+        facts = list(fact_registry.values())
+        
+        logger.info(f"Extracted {len(facts)} unique facts from {fact_count} total facts")
+        logger.info(f"Duplicates removed: {duplicates_removed}")
         return facts
     
     def _extract_fact_details(self, fact: ModelFact, model_xbrl: ModelXbrl.ModelXbrl) -> Dict[str, Any]:
@@ -156,6 +191,14 @@ class ComprehensiveXBRLParser:
         # Extract concept metadata
         concept_metadata = self._extract_concept_metadata(concept) if concept else {}
         
+        # Extract NEW fields for completeness
+        scale_int = fact.scaleInt if hasattr(fact, 'scaleInt') else None
+        xbrl_format = str(fact.format) if hasattr(fact, 'format') else None
+        order_index = fact.order if hasattr(fact, 'order') else None
+        
+        # Infer statement type from concept name
+        statement_type = self._infer_statement_type(concept_name)
+        
         # Build complete fact dictionary
         fact_dict = {
             # Core fact data
@@ -186,15 +229,64 @@ class ComprehensiveXBRLParser:
             'concept_period_type': concept_metadata.get('period_type'),
             'concept_data_type': concept_metadata.get('data_type'),
             'concept_abstract': concept_metadata.get('abstract', False),
+            'statement_type': statement_type,
             
             # Provenance
             'source_line': fact.sourceline,
             'fact_id': fact.id if hasattr(fact, 'id') else None,
             'decimals': fact.decimals if hasattr(fact, 'decimals') else None,
             'precision': fact.precision if hasattr(fact, 'precision') else None,
+            'scale_int': scale_int,
+            'xbrl_format': xbrl_format,
+            'order_index': order_index,
         }
         
         return fact_dict
+    
+    def _infer_statement_type(self, concept_name: Optional[str]) -> str:
+        """Infer financial statement type from concept name"""
+        if not concept_name:
+            return 'other'
+        
+        concept_lower = concept_name.lower()
+        
+        # Balance Sheet indicators
+        if any(term in concept_lower for term in [
+            'asset', 'liability', 'equity', 'receivable', 'payable', 
+            'inventory', 'property', 'goodwill', 'intangible', 'debt',
+            'stockholder', 'sharehold', 'capital'
+        ]):
+            return 'balance_sheet'
+        
+        # Income Statement indicators
+        elif any(term in concept_lower for term in [
+            'revenue', 'sales', 'income', 'expense', 'cost', 'profit',
+            'margin', 'earnings', 'ebit', 'tax', 'interest'
+        ]):
+            return 'income_statement'
+        
+        # Cash Flow indicators
+        elif any(term in concept_lower for term in [
+            'cashflow', 'operatingactivit', 'investingactivit', 
+            'financingactivit', 'cashprovided', 'cashused'
+        ]):
+            return 'cash_flow'
+        
+        # Equity Statement indicators
+        elif any(term in concept_lower for term in [
+            'sharesissued', 'sharesoutstanding', 'dividend', 'stockissuance',
+            'stockrepurchase', 'treasurystock'
+        ]):
+            return 'equity_statement'
+        
+        # Disclosure/Notes indicators  
+        elif any(term in concept_lower for term in [
+            'disclosure', 'policy', 'footnote', 'textblock'
+        ]):
+            return 'notes'
+        
+        else:
+            return 'other'
     
     def _identify_taxonomy(self, namespace: Optional[str]) -> str:
         """Identify taxonomy from namespace URI"""
