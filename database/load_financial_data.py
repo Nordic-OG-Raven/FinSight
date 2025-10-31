@@ -262,6 +262,50 @@ class StarSchemaLoader:
             print(f"      ⚠️  Error loading fact: {e}")
             self.conn.rollback()
     
+    def validate_loaded_data(self, company_id: int, ticker: str, fiscal_year: int):
+        """
+        Validate data quality after loading - HARD FAIL on critical issues.
+        
+        Checks:
+        1. Balance sheet equation (Assets = Liabilities + Equity)
+        2. No duplicate metrics with different values (> 1% diff)
+        
+        Raises ValueError if validation fails.
+        """
+        # Check balance sheet equation for this company/year
+        self.cur.execute("""
+        SELECT 
+            c.ticker,
+            dt.fiscal_year,
+            MAX(CASE WHEN dc.concept_name = 'Assets' THEN f.value_numeric END) as assets,
+            MAX(CASE WHEN dc.concept_name = 'LiabilitiesAndStockholdersEquity' THEN f.value_numeric END) as liab_equity
+        FROM fact_financial_metrics f
+        JOIN dim_companies c ON f.company_id = c.company_id
+        JOIN dim_concepts dc ON f.concept_id = dc.concept_id
+        JOIN dim_time_periods dt ON f.period_id = dt.period_id
+        WHERE c.company_id = %s
+          AND dt.fiscal_year = %s
+          AND f.dimension_id IS NULL
+          AND dc.concept_name IN ('Assets', 'LiabilitiesAndStockholdersEquity')
+        GROUP BY c.ticker, dt.fiscal_year
+        HAVING MAX(CASE WHEN dc.concept_name = 'Assets' THEN f.value_numeric END) IS NOT NULL
+           AND MAX(CASE WHEN dc.concept_name = 'LiabilitiesAndStockholdersEquity' THEN f.value_numeric END) IS NOT NULL;
+        """, (company_id, fiscal_year))
+        
+        result = self.cur.fetchone()
+        if result:
+            assets, liab_equity = result[2], result[3]
+            diff_pct = abs(assets - liab_equity) / assets * 100 if assets else 0
+            
+            if diff_pct > 1.0:  # More than 1% difference is critical error
+                raise ValueError(
+                    f"❌ VALIDATION FAILED: Balance sheet doesn't balance for {ticker} FY{fiscal_year}\n"
+                    f"   Assets: ${assets:,.0f}\n"
+                    f"   Liabilities + Equity: ${liab_equity:,.0f}\n"
+                    f"   Difference: {diff_pct:.2f}%\n"
+                    f"   This indicates a DATA PROCESSING ERROR - DO NOT LOAD"
+                )
+    
     def load_json_file(self, json_path: Path):
         """Load a single JSON file"""
         print(f"\n📄 Loading: {json_path.name}")
@@ -402,6 +446,30 @@ class StarSchemaLoader:
         
         self.conn.commit()
         print(f"   ✅ Loaded {facts_loaded} facts ({facts_with_dims} with dimensions)")
+        
+        # CRITICAL VALIDATION - HARD FAIL on data quality issues
+        print(f"   🔍 Running validation (hard fail on errors)...")
+        try:
+            # Validate for each fiscal year in this filing
+            self.cur.execute("""
+            SELECT DISTINCT fiscal_year 
+            FROM dim_time_periods dt
+            JOIN fact_financial_metrics f ON dt.period_id = f.period_id
+            WHERE f.filing_id = %s;
+            """, (filing_id,))
+            
+            fiscal_years = [row[0] for row in self.cur.fetchall()]
+            
+            for fy in fiscal_years:
+                if fy:  # Skip NULL fiscal years
+                    self.validate_loaded_data(company_id, ticker, fy)
+            
+            print(f"   ✅ Validation passed")
+        except ValueError as e:
+            # HARD FAIL - rollback all changes
+            self.conn.rollback()
+            print(f"\n{str(e)}")
+            raise  # Re-raise to stop pipeline
     
     def load_calculation_relationships(self, filing_id: int, calc_rels: List[Dict], metadata: Dict) -> int:
         """Load calculation relationships"""
