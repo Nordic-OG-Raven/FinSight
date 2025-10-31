@@ -393,15 +393,16 @@ XBRL inline documents often contain the same fact multiple times (e.g., in main 
 
 ### XBRL Relationship Tables (Hybrid System)
 
-**Hybrid Approach: XBRL + Generated + Standard Template**
+**Hybrid Approach: XBRL + Data-Verified Only**
 
-Modern inline XBRL filings (SEC, ESEF) often don't include linkbases. To ensure consistent user experience, we use a **three-tier hybrid system**:
+Modern inline XBRL filings (SEC, ESEF) often don't include linkbases. To ensure consistent user experience while maintaining **100% data accuracy**, we use a **two-tier conservative system**:
 
-1. **XBRL relationships** (`source='xbrl'`, `is_synthetic=FALSE`): From filing linkbases when available
-2. **Dimensional relationships** (`source='dimensional'`, `is_synthetic=TRUE`): Generated from fact breakdowns
-3. **Standard template** (`source='standard'`, `is_synthetic=TRUE`): Common financial statement hierarchy
+1. **XBRL relationships** (`source='xbrl'`, `is_synthetic=FALSE`, `confidence=1.0`): From filing linkbases when available
+2. **Dimensional relationships** (`source='dimensional'`, `is_synthetic=TRUE`, `confidence≥0.995`): Generated ONLY when dimensional facts mathematically sum to consolidated (within 0.5%)
 
-**Priority**: XBRL > Dimensional > Standard (deduplicates by parent-child pair)
+**NO TEMPLATE GUESSING**: We do NOT generate relationships based on assumptions or templates. Every synthetic relationship is mathematically verified against actual reported data.
+
+**Priority**: XBRL > Verified Dimensional (deduplicates by parent-child pair)
 
 **1. Calculation Relationships (`rel_calculation_hierarchy`)**
 
@@ -414,13 +415,15 @@ Net Income (parent) = Revenue (child, weight=1.0) - Expenses (child, weight=-1.0
 ```
 
 **New Fields:**
-- `source`: 'xbrl', 'dimensional', 'standard'
-- `is_synthetic`: TRUE if generated, FALSE if from filing
-- `confidence`: 0.0-1.0 (higher = more confident)
+- `source`: 'xbrl' or 'dimensional' (NO 'standard' - we don't guess)
+- `is_synthetic`: TRUE if generated from data, FALSE if from filing
+- `confidence`: 0.995-1.0 for synthetic (≥99.5% required), 1.0 for XBRL
 
-**Generation Strategy:**
-- **Dimensional**: If Revenue (dimension=NULL) = $100M and iPhone (ProductAxis) = $60M + Services (ProductAxis) = $40M (within 1%), create relationship
-- **Standard**: Apply template like "operating_income = gross_profit - operating_expenses"
+**Generation Strategy (Data-Verified Only):**
+- **Dimensional**: If Revenue (consolidated) = $100M and dimensional breakdowns sum to $99.95M-$100.05M (within 0.5%), create relationship
+- **Verification**: `confidence = 1.0 - |difference|/parent_value`
+- **Minimum threshold**: 99.5% confidence required
+- **NO template guessing**: If data doesn't verify, no relationship created
 
 **Use Cases:**
 - **Drill-down navigation**: Click "Revenue" → show Product/Service breakdown (works for ALL companies)
@@ -442,12 +445,12 @@ Balance Sheet (root)
 ```
 
 **New Fields:**
-- `source`: 'xbrl', 'dimensional', 'standard'
-- `is_synthetic`: TRUE if generated, FALSE if from filing
+- `source`: 'xbrl' or 'dimensional' (NO 'standard')
+- `is_synthetic`: TRUE if generated from data, FALSE if from filing
 
-**Generation Strategy:**
-- **Dimensional**: Similar to calculation, but tracks hierarchical structure
-- **Standard**: Apply statement templates (balance_sheet, income_statement, cash_flow)
+**Generation Strategy (Data-Verified Only):**
+- **Dimensional**: Generated from hierarchical dimensional data (when available)
+- **NO templates**: Presentation relationships are XBRL-only or data-verified dimensional
 
 **Use Cases:**
 - **Statement reconstruction**: Rebuild financial statements (when XBRL provided) or standard view (generated)

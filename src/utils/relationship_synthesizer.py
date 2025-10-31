@@ -90,26 +90,32 @@ class RelationshipSynthesizer:
             consolidated_value = group['consolidated']['value_numeric']
             dimensional_sum = sum(f['value_numeric'] for f in group['dimensional'])
             
-            # Check if sum matches (within 1% tolerance for rounding)
+            # Check if sum matches (within 0.5% tolerance for rounding)
+            # STRICT: We only create relationships we can verify
             if consolidated_value != 0:
                 diff_pct = abs((dimensional_sum - consolidated_value) / consolidated_value)
-                if diff_pct < 0.01:  # Within 1%
-                    # Create calc relationships
+                if diff_pct < 0.005:  # Within 0.5% - very strict
+                    # Create calc relationships (mathematically verified)
                     parent_concept_id = group['consolidated']['concept_id']
                     
-                    for i, child_fact in enumerate(group['dimensional']):
-                        calc_relationships.append({
-                            'filing_id': filing_id,
-                            'parent_concept_id': parent_concept_id,
-                            'child_concept_id': child_fact['concept_id'],
-                            'weight': 1.0,
-                            'order_index': i,
-                            'source': 'dimensional',
-                            'is_synthetic': True,
-                            'confidence': 1.0 - diff_pct  # Higher confidence = closer match
-                        })
-                    
-                    logger.debug(f"Generated calc relationship: {concept} = sum of {len(group['dimensional'])} dimensions")
+                    # Require minimum confidence of 99.5%
+                    relationship_confidence = 1.0 - diff_pct
+                    if relationship_confidence >= 0.995:
+                        for i, child_fact in enumerate(group['dimensional']):
+                            calc_relationships.append({
+                                'filing_id': filing_id,
+                                'parent_concept_id': parent_concept_id,
+                                'child_concept_id': child_fact['concept_id'],
+                                'weight': 1.0,
+                                'order_index': i,
+                                'source': 'dimensional',
+                                'is_synthetic': True,
+                                'confidence': relationship_confidence
+                            })
+                        
+                        logger.debug(f"Generated calc relationship: {concept} = sum of {len(group['dimensional'])} dimensions (confidence={relationship_confidence:.4f})")
+                    else:
+                        logger.debug(f"Skipped {concept}: confidence {relationship_confidence:.4f} < 0.995 threshold")
         
         logger.info(f"Generated {len(calc_relationships)} calculation relationships from dimensional data")
         
@@ -243,6 +249,9 @@ def synthesize_relationships_for_filing(
     """
     Main entry point: synthesize complete set of relationships for a filing
     
+    CONSERVATIVE APPROACH: Only generate relationships we can mathematically verify.
+    NO template-based guessing. Data-driven only.
+    
     Args:
         facts: List of fact dictionaries from filing
         filing_id: Filing ID
@@ -254,22 +263,23 @@ def synthesize_relationships_for_filing(
     """
     synthesizer = RelationshipSynthesizer()
     
-    # Start with XBRL relationships
+    # Start with XBRL relationships (confidence=1.0, verified by company)
     xbrl_calc_rels = xbrl_calc_rels or []
     xbrl_pres_rels = xbrl_pres_rels or []
     
-    # Generate from dimensional data
+    # Generate ONLY from dimensional data (mathematically verified)
+    # These are the ONLY synthetic relationships we create
     dim_calc_rels, dim_pres_rels = synthesizer.generate_from_dimensions(facts, filing_id)
     
-    # Generate from standard hierarchies
-    std_income_rels = synthesizer.generate_from_standard_hierarchy(facts, filing_id, 'income_statement')
-    std_balance_rels = synthesizer.generate_from_standard_hierarchy(facts, filing_id, 'balance_sheet')
-    std_cashflow_rels = synthesizer.generate_from_standard_hierarchy(facts, filing_id, 'cash_flow')
-    std_calc_rels = std_income_rels + std_balance_rels + std_cashflow_rels
+    # NO TEMPLATE GENERATION
+    # We don't guess. If dimensional data doesn't sum correctly, no relationship.
+    # Better to have fewer relationships than incorrect ones.
     
-    # Merge with priority
-    final_calc_rels = synthesizer.merge_relationships(xbrl_calc_rels, dim_calc_rels, std_calc_rels)
+    # Merge: XBRL takes priority, then verified dimensional
+    final_calc_rels = synthesizer.merge_relationships(xbrl_calc_rels, dim_calc_rels, [])
     final_pres_rels = synthesizer.merge_relationships(xbrl_pres_rels, dim_pres_rels, [])
+    
+    logger.info(f"Final relationships: {len(final_calc_rels)} calc ({len(xbrl_calc_rels)} XBRL, {len(dim_calc_rels)} verified dimensional)")
     
     return {
         'calculation': final_calc_rels,
