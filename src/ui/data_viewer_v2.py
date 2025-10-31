@@ -24,9 +24,32 @@ def humanize_label(label):
 
 
 def humanize_camel_case(text):
-    """Add spaces to CamelCase (e.g., 'GeographicalAreasAxis' -> 'Geographical Areas Axis')"""
+    """
+    Add spaces to CamelCase and remove XBRL jargon suffixes.
+    
+    Example: 
+        'GeographicalAreasAxis' -> 'Geographical Areas'
+        'UnitedStatesMember' -> 'United States'
+    """
     if not text:
         return text
+    
+    # Remove common XBRL jargon suffixes (case-sensitive)
+    jargon_suffixes = [
+        'Axis',           # Dimension type (e.g., GeographicalAreasAxis)
+        'Member',         # Dimension value (e.g., UnitedStatesMember)
+        'Domain',         # Dimension domain
+        'LineItems',      # Presentation grouping
+        'Table',          # Presentation table
+        'Abstract',       # Abstract element
+        'TextBlock',      # Text disclosure block
+    ]
+    
+    for suffix in jargon_suffixes:
+        if text.endswith(suffix):
+            text = text[:-len(suffix)]
+            break
+    
     # Insert space before uppercase letters (except at start)
     spaced = re.sub(r'(?<!^)(?=[A-Z])', ' ', text)
     return spaced
