@@ -131,6 +131,56 @@ def health():
         "environment": os.getenv('ENVIRONMENT', 'development')
     })
 
+@app.route('/api/init-db', methods=['POST'])
+def init_database():
+    """Initialize database tables - one-time setup endpoint"""
+    try:
+        from sqlalchemy import create_engine, text
+        engine = create_engine(DATABASE_URL)
+        
+        with engine.connect() as conn:
+            # Create financial_facts table
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS financial_facts (
+                    id SERIAL PRIMARY KEY,
+                    company VARCHAR(10) NOT NULL,
+                    concept VARCHAR(500) NOT NULL,
+                    normalized_label VARCHAR(500),
+                    value NUMERIC,
+                    unit VARCHAR(50),
+                    period_start DATE,
+                    period_end DATE,
+                    fiscal_year_end DATE,
+                    instant_date DATE,
+                    context_id VARCHAR(500),
+                    decimals INTEGER,
+                    taxonomy VARCHAR(100),
+                    filing_type VARCHAR(10),
+                    filing_date DATE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT unique_fact UNIQUE (company, concept, context_id, period_end)
+                )
+            """))
+            
+            # Create indexes
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_company ON financial_facts(company)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_fiscal_year ON financial_facts(fiscal_year_end)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_normalized_label ON financial_facts(normalized_label)"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_company_year ON financial_facts(company, fiscal_year_end)"))
+            
+            conn.commit()
+            
+            return jsonify({
+                "status": "success",
+                "message": "Database tables created successfully"
+            })
+            
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
 @app.route('/api/companies', methods=['GET'])
 def get_companies():
     """Get list of pre-loaded companies and quota status"""
