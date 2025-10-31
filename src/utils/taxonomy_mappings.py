@@ -24,9 +24,18 @@ CONCEPT_MAPPINGS = {
     ],
     
     "cost_of_revenue": [
-        "CostOfGoodsAndServicesSold",
         "CostOfRevenue",
+    ],
+    
+    "cost_of_goods_and_services_sold": [
+        "CostOfGoodsAndServicesSold",
+    ],
+    
+    "cost_of_sales": [
         "CostOfSales",
+    ],
+    
+    "cost_of_goods_sold": [
         "CostOfGoodsSold",
     ],
     
@@ -59,20 +68,28 @@ CONCEPT_MAPPINGS = {
     
     "operating_income": [
         "OperatingIncomeLoss",
-        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesExtraordinaryItemsNoncontrollingInterest",
-        "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
     ],
     
     "interest_expense": [
         "InterestExpense",
         "InterestExpenseDebt",
+    ],
+    
+    "finance_costs": [
         "FinanceCosts",
         "FinanceExpense",
     ],
     
-    "interest_income": [
+    "interest_income_investment": [
         "InvestmentIncomeInterest",
+    ],
+    
+    "finance_income": [
         "FinanceIncome",
+    ],
+    
+    "interest_income": [
+        "InterestIncome",
     ],
     
     "interest_income_expense_net": [
@@ -88,7 +105,13 @@ CONCEPT_MAPPINGS = {
     
     "income_tax_expense": [
         "IncomeTaxExpenseBenefit",
+    ],
+    
+    "income_tax_paid": [
         "IncomeTaxesPaid",
+    ],
+    
+    "current_income_tax_expense": [
         "CurrentIncomeTaxExpenseBenefit",
     ],
     
@@ -131,8 +154,11 @@ CONCEPT_MAPPINGS = {
     
     "cash_and_equivalents": [
         "CashAndCashEquivalentsAtCarryingValue",
-        "Cash",
         "CashAndBankBalancesAtCentralBanks",
+    ],
+    
+    "cash": [
+        "Cash",
     ],
     
     "short_term_investments": [
@@ -177,8 +203,11 @@ CONCEPT_MAPPINGS = {
         "MarketableSecuritiesNoncurrent",
     ],
     
-    "noncurrent_assets": [
+    "noncurrent_assets_total": [
         "AssetsNoncurrent",
+    ],
+    
+    "noncurrent_assets": [
         "NoncurrentAssets",
     ],
     
@@ -199,7 +228,13 @@ CONCEPT_MAPPINGS = {
     
     "short_term_debt": [
         "DebtCurrent",
+    ],
+    
+    "short_term_borrowings": [
         "ShortTermBorrowings",
+    ],
+    
+    "commercial_paper": [
         "CommercialPaper",
     ],
     
@@ -210,8 +245,11 @@ CONCEPT_MAPPINGS = {
     
     "long_term_debt": [
         "LongTermDebt",
-        "LongTermDebtNoncurrent",
         "LongTermBorrowings",
+    ],
+    
+    "long_term_debt_noncurrent": [
+        "LongTermDebtNoncurrent",
     ],
     
     "noncurrent_liabilities": [
@@ -245,10 +283,16 @@ CONCEPT_MAPPINGS = {
     ],
     
     "stockholders_equity": [
-        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
         "StockholdersEquity",
-        "Equity",
         "EquityAttributableToOwnersOfParent",
+    ],
+    
+    "total_equity": [
+        "Equity",
+    ],
+    
+    "stockholders_equity_including_noncontrolling_interest": [
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
     ],
     
     "noncontrolling_interest": [
@@ -292,8 +336,11 @@ CONCEPT_MAPPINGS = {
     
     "dividends_paid": [
         "PaymentsOfDividends",
-        "PaymentsOfDividendsCommonStock",
         "DividendsPaid",
+    ],
+    
+    "dividends_paid_common_stock": [
+        "PaymentsOfDividendsCommonStock",
     ],
     
     "stock_repurchased": [
@@ -414,7 +461,13 @@ CONCEPT_MAPPINGS = {
     
     "borrowings": [
         "Borrowings",
+    ],
+    
+    "other_bank_borrowings": [
         "OtherBankBorrowings",
+    ],
+    
+    "other_borrowings": [
         "OtherBorrowings",
     ],
     
