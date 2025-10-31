@@ -247,14 +247,23 @@ def main():
     )
     
     # Metric filter (multiselect has built-in search)
-    all_concepts = get_normalized_labels()
+    # Get raw labels from database
+    all_concepts_raw = get_normalized_labels()
     
-    selected_concepts = st.sidebar.multiselect(
+    # Create human-readable options with mapping back to raw values
+    concept_display_map = {humanize_label(c): c for c in all_concepts_raw}
+    human_readable_options = sorted(concept_display_map.keys())
+    
+    # Show humanized labels in dropdown
+    selected_concepts_human = st.sidebar.multiselect(
         "Filter by Metrics",
-        options=all_concepts,
+        options=human_readable_options,
         default=[],
         help="Leave empty to see all metrics, or type to search and select specific ones"
     )
+    
+    # Convert back to database format for querying
+    selected_concepts = [concept_display_map[h] for h in selected_concepts_human]
     
     # Debug: Show what was selected
     if selected_concepts:
