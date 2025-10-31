@@ -233,19 +233,20 @@ def main():
     }
     
     hierarchy_choice = st.sidebar.radio(
-        "",
+        "Detail level",
         options=list(hierarchy_options.keys()),
         index=0,  # Default to Level 3+ (comparable totals)
-        help="Choose how detailed you want the metrics to be. 'Comparable metrics' shows standardized totals that all companies report, making cross-company comparison easy."
+        label_visibility="collapsed",  # Hide label (we have the section header)
+        help="Choose how detailed you want the metrics to be. NOTE: This only affects browsing (when no metrics are selected). If you explicitly select metrics, you'll see them regardless of detail level."
     )
     
     # Show helpful description based on selection
     if hierarchy_choice == "Comparable metrics (recommended)":
-        st.sidebar.caption("💡 Shows totals like 'Total Assets' and 'Current Liabilities' - all companies report these, so you can compare easily.")
+        st.sidebar.caption("💡 Shows totals like 'Total Assets' - all companies report these. (Only applies when browsing - selected metrics always show)")
     elif hierarchy_choice == "With subtotals":
-        st.sidebar.caption("💡 Adds section breakdowns like 'Accrued Liabilities' - some companies report these, others don't.")
+        st.sidebar.caption("💡 Adds section breakdowns - some companies report these. (Only applies when browsing)")
     else:
-        st.sidebar.caption("💡 Shows every line item - details vary by company, so comparison may be limited.")
+        st.sidebar.caption("💡 Shows every line item - details vary by company. (Only applies when browsing)")
     
     min_hierarchy_level = hierarchy_options[hierarchy_choice]
     
@@ -402,10 +403,17 @@ def main():
             params['concepts'] = selected_concepts
         
         # Filter by hierarchy level (only in hierarchical view)
-        # CRITICAL: Always allow NULL hierarchy_level (fallback for unmapped concepts)
+        # CRITICAL FIX: If user explicitly selected metrics, show them regardless of hierarchy level
+        # Hierarchy filter should only apply when showing ALL metrics (browsing mode)
         if not show_all_concepts:
-            query += " AND (f.hierarchy_level >= :min_hierarchy OR f.hierarchy_level IS NULL)"
-            params['min_hierarchy'] = min_hierarchy_level
+            if selected_concepts:
+                # User explicitly selected metrics - ignore hierarchy filter (they know what they want)
+                # Still allow NULL hierarchy_level as fallback
+                query += " AND (f.hierarchy_level IS NULL OR f.hierarchy_level >= 1)"
+            else:
+                # No metrics selected = browsing mode - apply hierarchy filter
+                query += " AND (f.hierarchy_level >= :min_hierarchy OR f.hierarchy_level IS NULL)"
+                params['min_hierarchy'] = min_hierarchy_level
         
         # Exclude segments if not requested
         if not show_segments:
@@ -601,15 +609,15 @@ def main():
                     if not plot_df.empty and len(plot_df) > 0:
                         # Convert fiscal_year to string to prevent interpolation (2,023.5 issue)
                         plot_df['fiscal_year_str'] = plot_df['fiscal_year'].astype(str)
-                    fig = px.line(
+                        fig = px.line(
                             plot_df,
                             x='fiscal_year_str',
-                        y='value_numeric',
-                        color='normalized_label',
-                        title="Metrics Over Time"
-                    )
+                            y='value_numeric',
+                            color='normalized_label',
+                            title="Metrics Over Time"
+                        )
                         fig.update_xaxes(type='category')  # Ensure discrete axis
-                    st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, use_container_width=True)
                     else:
                         st.info("No data for selected metrics")
                 else:
