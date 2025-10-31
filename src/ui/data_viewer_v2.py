@@ -222,6 +222,31 @@ def main():
         help="Include product, geography, and other segment-level data"
     )
     
+    # Hierarchy level filter (for cross-company comparison)
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 📊 Metric Granularity")
+    
+    hierarchy_options = {
+        "Comparable totals (Level 3+)": 3,
+        "Include subtotals (Level 2+)": 2,
+        "All detail (Level 1+)": 1
+    }
+    
+    hierarchy_choice = st.sidebar.radio(
+        "Select comparison level",
+        options=list(hierarchy_options.keys()),
+        index=0,  # Default to Level 3+ (comparable totals)
+        help="""
+        **Comparable totals**: Standard metrics all companies report (e.g., Total Current Liabilities)  
+        **Include subtotals**: Adds section subtotals (e.g., Accrued Liabilities)  
+        **All detail**: Shows all granular line items (may differ across companies)
+        """
+    )
+    
+    min_hierarchy_level = hierarchy_options[hierarchy_choice]
+    
+    st.sidebar.markdown("---")
+    
     # Auditor view toggle (in Advanced Options expander)
     with st.sidebar.expander("⚙️ Advanced Options"):
         show_all_concepts = st.checkbox(
@@ -298,22 +323,23 @@ def main():
         WHERE 1=1
             """
         else:
-            # Default: use deduplicated view (cleaner for BI analysis)
-            # The view already has concept_name, normalized_label, fiscal_year as columns
+            # Default: use hierarchical view (with deduplication + hierarchy levels)
+            # The view has concept_name, normalized_label, fiscal_year, hierarchy_level as columns
             query = """
         SELECT 
-            c.ticker as company,
+            f.ticker as company,
             f.concept_name as concept,
             f.normalized_label,
             f.fiscal_year,
             f.value_numeric,
             f.value_text,
             f.unit_measure,
+            f.hierarchy_level,
+            f.parent_normalized_label,
             d.axis_name,
             d.member_name,
             CASE WHEN f.dimension_id IS NULL THEN 'Total' ELSE 'Segment' END as data_type
-        FROM v_facts_deduplicated f
-        JOIN dim_companies c ON f.company_id = c.company_id
+        FROM v_facts_hierarchical f
         LEFT JOIN dim_xbrl_dimensions d ON f.dimension_id = d.dimension_id
         WHERE 1=1
             """
@@ -332,7 +358,8 @@ def main():
         
         # Filter by selected companies
         if selected_companies:
-            query += " AND c.ticker = ANY(:companies)"
+            company_col = "c.ticker" if show_all_concepts else "f.ticker"
+            query += f" AND {company_col} = ANY(:companies)"
             params['companies'] = selected_companies
         
         # Filter by year range
@@ -344,6 +371,11 @@ def main():
         if selected_concepts:
             query += f" AND {normalized_label_col} = ANY(:concepts)"
             params['concepts'] = selected_concepts
+        
+        # Filter by hierarchy level (only in hierarchical view)
+        if not show_all_concepts:
+            query += " AND (f.hierarchy_level >= :min_hierarchy OR f.hierarchy_level IS NULL)"
+            params['min_hierarchy'] = min_hierarchy_level
         
         # Exclude segments if not requested
         if not show_segments:
