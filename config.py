@@ -24,30 +24,25 @@ CONFIG_DIR = PROJECT_ROOT / "config"
 # 3. Superset (analytics): Uses superset_db internal hostname
 #
 
-# Check if we're on Railway (Railway provides these specific env vars)
-if os.getenv('RAILWAY_POSTGRES_HOST'):
-    # Railway PostgreSQL
-    POSTGRES_USER = os.getenv('RAILWAY_POSTGRES_USER')
-    POSTGRES_PASSWORD = os.getenv('RAILWAY_POSTGRES_PASSWORD')
-    POSTGRES_HOST = os.getenv('RAILWAY_POSTGRES_HOST')
-    POSTGRES_PORT = os.getenv('RAILWAY_POSTGRES_PORT', '5432')
-    POSTGRES_DB = os.getenv('RAILWAY_POSTGRES_DB', 'railway')
+# Check if DATABASE_URL is already set (Railway, Heroku, etc.)
+if os.getenv('DATABASE_URL'):
+    DATABASE_URL = os.getenv('DATABASE_URL')
+    DATABASE_URI = DATABASE_URL
 else:
-    # Local or Docker
+    # Local or Docker - build from components
     POSTGRES_USER = os.getenv('POSTGRES_USER', 'superset')
     POSTGRES_PASSWORD = os.getenv('POSTGRES_PASSWORD', 'superset')
     POSTGRES_HOST = os.getenv('POSTGRES_HOST', '127.0.0.1')
     POSTGRES_PORT = os.getenv('POSTGRES_PORT', '5432')
     POSTGRES_DB = os.getenv('POSTGRES_DB', 'finsight_dev')
-
-# Build connection string
-if POSTGRES_PASSWORD:
-    DATABASE_URI = f'postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}'
-else:
-    DATABASE_URI = f'postgresql://{POSTGRES_USER}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}'
-
-# Alias for compatibility
-DATABASE_URL = DATABASE_URI
+    
+    # Build connection string
+    if POSTGRES_PASSWORD:
+        DATABASE_URI = f'postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}'
+    else:
+        DATABASE_URI = f'postgresql://{POSTGRES_USER}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}'
+    
+    DATABASE_URL = DATABASE_URI
 
 # API Keys (optional)
 SEC_API_KEY = os.getenv('SEC_API_KEY', '')
