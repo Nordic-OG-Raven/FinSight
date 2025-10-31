@@ -224,24 +224,28 @@ def main():
     
     # Hierarchy level filter (for cross-company comparison)
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### 📊 Metric Granularity")
+    st.sidebar.markdown("### 📊 What level of detail?")
     
     hierarchy_options = {
-        "Comparable totals (Level 3+)": 3,
-        "Include subtotals (Level 2+)": 2,
-        "All detail (Level 1+)": 1
+        "Comparable metrics (recommended)": 3,
+        "With subtotals": 2,
+        "All details": 1
     }
     
     hierarchy_choice = st.sidebar.radio(
-        "Select comparison level",
+        "",
         options=list(hierarchy_options.keys()),
         index=0,  # Default to Level 3+ (comparable totals)
-        help="""
-        **Comparable totals**: Standard metrics all companies report (e.g., Total Current Liabilities)  
-        **Include subtotals**: Adds section subtotals (e.g., Accrued Liabilities)  
-        **All detail**: Shows all granular line items (may differ across companies)
-        """
+        help="Choose how detailed you want the metrics to be. 'Comparable metrics' shows standardized totals that all companies report, making cross-company comparison easy."
     )
+    
+    # Show helpful description based on selection
+    if hierarchy_choice == "Comparable metrics (recommended)":
+        st.sidebar.caption("💡 Shows totals like 'Total Assets' and 'Current Liabilities' - all companies report these, so you can compare easily.")
+    elif hierarchy_choice == "With subtotals":
+        st.sidebar.caption("💡 Adds section breakdowns like 'Accrued Liabilities' - some companies report these, others don't.")
+    else:
+        st.sidebar.caption("💡 Shows every line item - details vary by company, so comparison may be limited.")
     
     min_hierarchy_level = hierarchy_options[hierarchy_choice]
     
@@ -254,6 +258,31 @@ def main():
             value=False,
             help="Shows all source XBRL concepts including duplicates (e.g., both 'Assets' and 'LiabilitiesAndStockholdersEquity' for the same value). Useful for validation and auditing."
         )
+        
+        st.markdown("---")
+        st.markdown("#### 🔍 SQL Query Tools")
+        
+        # Show generated SQL query
+        show_sql_query = st.checkbox(
+            "SQL query view",
+            value=False,
+            help="View the SQL query that was automatically generated based on your filters"
+        )
+        
+        # Custom SQL query input - will be executed after engine is created
+        st.markdown("**Run custom SQL query:**")
+        custom_sql = st.text_area(
+            "SQL query",
+            height=150,
+            help="Enter your own SQL query. Use 'v_facts_hierarchical' for the main data view, or query any table directly.",
+            placeholder="SELECT ticker, normalized_label, fiscal_year, value_numeric\nFROM v_facts_hierarchical\nWHERE ticker = 'AAPL'\nLIMIT 10;",
+            key="custom_sql_input"
+        )
+        
+        # Button to trigger custom query execution
+        run_custom_query = False
+        if custom_sql:
+            run_custom_query = st.button("Run Query", key="run_custom_query_btn")
     
     # Company filter
     all_companies = get_companies()
@@ -390,19 +419,29 @@ def main():
         ticker_col = "c.ticker" if show_all_concepts else "f.ticker"
         query += f" ORDER BY {ticker_col}, {fiscal_year_col}, {normalized_label_col}"
         
-        # DEBUG OUTPUT - REMOVE LATER
-        st.sidebar.markdown("---")
-        with st.sidebar.expander("🐛 ACTUAL SQL QUERY"):
-            st.code(query, language='sql')
-            st.write("**Parameters:**")
-            for k, v in params.items():
-                st.write(f"- {k}: {v}")
-        
         with engine.connect() as conn:
             df = pd.read_sql(text(query), conn, params=params)
+            
+            # Execute custom SQL query if provided (from Advanced Options)
+            if custom_sql and run_custom_query:
+                try:
+                    custom_df = pd.read_sql(text(custom_sql), conn)
+                    if not custom_df.empty:
+                        st.success(f"✅ Custom query returned {len(custom_df)} rows")
+                        st.dataframe(custom_df, use_container_width=True)
+                    else:
+                        st.warning("⚠️ Custom query returned no results")
+                except Exception as e:
+                    st.error(f"❌ Custom query error: {str(e)}")
     
-    # DEBUG: Show row count
-    st.sidebar.write(f"**Rows returned: {len(df)}**")
+    # Show SQL query view if requested (in main area, not sidebar)
+    if show_sql_query:
+        with st.expander("🔍 SQL Query View", expanded=True):
+            st.code(query, language='sql')
+            st.write("**Query Parameters:**")
+            for k, v in params.items():
+                st.write(f"- `{k}`: {v}")
+            st.write(f"**Rows returned: {len(df)}**")
     
     if df.empty:
         # Show detailed error message
@@ -562,15 +601,15 @@ def main():
                     if not plot_df.empty and len(plot_df) > 0:
                         # Convert fiscal_year to string to prevent interpolation (2,023.5 issue)
                         plot_df['fiscal_year_str'] = plot_df['fiscal_year'].astype(str)
-                        fig = px.line(
+                    fig = px.line(
                             plot_df,
                             x='fiscal_year_str',
-                            y='value_numeric',
-                            color='normalized_label',
-                            title="Metrics Over Time"
-                        )
+                        y='value_numeric',
+                        color='normalized_label',
+                        title="Metrics Over Time"
+                    )
                         fig.update_xaxes(type='category')  # Ensure discrete axis
-                        st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True)
                     else:
                         st.info("No data for selected metrics")
                 else:
@@ -594,6 +633,8 @@ def main():
                         title=f"{humanize_label(selected_concepts[0])} by Company"
                     )
                     st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No data for selected companies and metric")
             else:
                 st.info("Select multiple companies and 1 metric for comparison")
     
