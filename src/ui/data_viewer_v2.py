@@ -389,8 +389,19 @@ def main():
         ticker_col = "c.ticker" if show_all_concepts else "f.ticker"
         query += f" ORDER BY {ticker_col}, {fiscal_year_col}, {normalized_label_col}"
         
+        # DEBUG OUTPUT - REMOVE LATER
+        st.sidebar.markdown("---")
+        with st.sidebar.expander("🐛 ACTUAL SQL QUERY"):
+            st.code(query, language='sql')
+            st.write("**Parameters:**")
+            for k, v in params.items():
+                st.write(f"- {k}: {v}")
+        
         with engine.connect() as conn:
             df = pd.read_sql(text(query), conn, params=params)
+    
+    # DEBUG: Show row count
+    st.sidebar.write(f"**Rows returned: {len(df)}**")
     
     if df.empty:
         # Show detailed error message
