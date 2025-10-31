@@ -18,14 +18,14 @@ DROP VIEW IF EXISTS v_facts_comparable CASCADE;
 -- ============================================================================
 -- v_facts_hierarchical: Facts with hierarchy metadata
 -- ============================================================================
-CREATE VIEW v_facts_hierarchical AS
+CREATE OR REPLACE VIEW v_facts_hierarchical AS
 SELECT 
     f.fact_id,
     f.company_id,
     f.concept_id,
     f.period_id,
     f.filing_id,
-    f.dimension_id,
+    f.dimension_id,  -- REQUIRED for segment filtering
     f.value_numeric,
     f.value_text,
     f.unit_measure,

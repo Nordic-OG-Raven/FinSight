@@ -385,7 +385,9 @@ def main():
         query += f" AND ({normalized_label_col} NOT LIKE '%_note' AND {normalized_label_col} NOT LIKE '%_disclosure%' AND {normalized_label_col} NOT LIKE '%_section_header')"
         query += " AND f.value_numeric IS NOT NULL"  # Only show numeric data
         
-        query += f" ORDER BY c.ticker, {fiscal_year_col}, {normalized_label_col}"
+        # Order by company, year, metric
+        ticker_col = "c.ticker" if show_all_concepts else "f.ticker"
+        query += f" ORDER BY {ticker_col}, {fiscal_year_col}, {normalized_label_col}"
         
         with engine.connect() as conn:
             df = pd.read_sql(text(query), conn, params=params)
