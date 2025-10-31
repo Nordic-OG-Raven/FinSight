@@ -198,14 +198,34 @@ def main():
         value=(2023, 2024)
     )
     
-    # Metric filter
+    # Metric filter with search
     all_concepts = get_normalized_labels()
+    
+    # Add a search box to help users find metrics
+    metric_search = st.sidebar.text_input(
+        "🔍 Search Metrics",
+        placeholder="Type to search (e.g., revenue, cash, debt)...",
+        help="Filter the metric list below"
+    )
+    
+    # Filter options based on search
+    if metric_search:
+        filtered_concepts = [c for c in all_concepts if metric_search.lower() in c.lower()]
+    else:
+        filtered_concepts = all_concepts
+    
     selected_concepts = st.sidebar.multiselect(
         "Filter by Metrics",
-        options=all_concepts,
+        options=filtered_concepts,
         default=[],
         help="Leave empty to see all metrics, or select specific ones"
     )
+    
+    # Debug: Show what was selected
+    if selected_concepts:
+        with st.sidebar.expander("🔍 Selected Metrics Debug"):
+            for concept in selected_concepts:
+                st.code(concept, language=None)
     
     # Load data (unified query)
     with st.spinner("Loading data from warehouse..."):
@@ -262,7 +282,40 @@ def main():
             df = pd.read_sql(text(query), conn, params=params)
     
     if df.empty:
-        st.warning("No data found for selected filters")
+        # Show detailed error message
+        st.error("⚠️ No data found for selected filters")
+        with st.expander("🔍 Debug Info - Why no data?"):
+            st.write("**Your Filters:**")
+            st.write(f"- Companies: {selected_companies if selected_companies else 'All'}")
+            st.write(f"- Fiscal Years: {year_range[0]} to {year_range[1]}")
+            st.write(f"- Metrics: {selected_concepts if selected_concepts else 'All'}")
+            st.write(f"- Show segments: {show_segments}")
+            
+            st.write("\n**Possible causes:**")
+            st.write("1. Selected company doesn't have data for selected metrics")
+            st.write("2. Selected fiscal year range is outside available data")
+            st.write("3. Metric name mismatch (check spelling)")
+            
+            # Show what data IS available for selected company
+            if selected_companies and len(selected_companies) == 1:
+                with engine.connect() as conn:
+                    check_query = text("""
+                    SELECT MIN(fiscal_year) as min_year, MAX(fiscal_year) as max_year,
+                           COUNT(DISTINCT normalized_label) as metric_count
+                    FROM fact_financial_metrics f
+                    JOIN dim_companies c ON f.company_id = c.company_id
+                    JOIN dim_concepts co ON f.concept_id = co.concept_id
+                    JOIN dim_time_periods t ON f.period_id = t.period_id
+                    WHERE c.ticker = :ticker
+                      AND f.value_numeric IS NOT NULL
+                      AND co.normalized_label NOT LIKE '%_note';
+                    """)
+                    result = conn.execute(check_query, {'ticker': selected_companies[0]})
+                    row = result.fetchone()
+                    if row:
+                        st.write(f"\n**{selected_companies[0]} has data:**")
+                        st.write(f"- Years: {row[0]} to {row[1]}")
+                        st.write(f"- Metrics: {row[2]} unique metrics available")
         return
     
     st.success(f"✅ Loaded {len(df):,} facts from warehouse")
@@ -378,17 +431,23 @@ def main():
             if len(selected_companies) == 1 and 'normalized_label' in df.columns:
                 # Time series
                 st.markdown("**Time Series**")
-                metrics_to_plot = selected_concepts[:5] if selected_concepts else df['normalized_label'].value_counts().head(5).index.tolist()
-                plot_df = df[df['normalized_label'].isin(metrics_to_plot)] if metrics_to_plot else df
-                if not plot_df.empty and len(plot_df) > 0:
-                    fig = px.line(
-                        plot_df,
-                        x='fiscal_year',
-                        y='value_numeric',
-                        color='normalized_label',
-                        title="Metrics Over Time"
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
+                # Only show chart if metrics are explicitly selected
+                if selected_concepts:
+                    metrics_to_plot = selected_concepts[:5]  # Max 5 metrics for readability
+                    plot_df = df[df['normalized_label'].isin(metrics_to_plot)]
+                    if not plot_df.empty and len(plot_df) > 0:
+                        fig = px.line(
+                            plot_df,
+                            x='fiscal_year',
+                            y='value_numeric',
+                            color='normalized_label',
+                            title="Metrics Over Time"
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.info("No data for selected metrics")
+                else:
+                    st.info("Select metrics from the filter to visualize")
             else:
                 st.info("Select 1 company to see time series chart")
         
