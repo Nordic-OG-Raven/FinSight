@@ -234,14 +234,84 @@ def main():
     # Data table
     st.subheader("📋 Data Table")
     
-    # Format numeric values
+    # Format data for display
     display_df = df.copy()
+    
+    # Fix normalized_label truncation (limit to 50 chars for display)
+    if 'normalized_label' in display_df.columns:
+        display_df['label'] = display_df['normalized_label'].apply(
+            lambda x: x[:47] + '...' if pd.notnull(x) and len(str(x)) > 50 else x
+        )
+        # Keep full version for tooltips
+        display_df = display_df.drop('normalized_label', axis=1)
+    
+    # Fix member_name truncation
+    if 'member_name' in display_df.columns:
+        display_df['member'] = display_df['member_name'].apply(
+            lambda x: x[:37] + '...' if pd.notnull(x) and len(str(x)) > 40 else x
+        )
+        display_df = display_df.drop('member_name', axis=1)
+    
+    # Fix axis_name truncation
+    if 'axis_name' in display_df.columns:
+        display_df['axis'] = display_df['axis_name'].apply(
+            lambda x: x[:37] + '...' if pd.notnull(x) and len(str(x)) > 40 else x
+        )
+        display_df = display_df.drop('axis_name', axis=1)
+    
+    # Fix unit_measure display (remove curly braces from arrays)
+    if 'unit_measure' in display_df.columns:
+        display_df['unit'] = display_df['unit_measure'].apply(
+            lambda x: str(x).replace('{', '').replace('}', '').replace('[', '').replace(']', '') if pd.notnull(x) else ''
+        )
+        display_df = display_df.drop('unit_measure', axis=1)
+    
+    # Format numeric values
     if 'value_numeric' in display_df.columns:
-        display_df['value_numeric_formatted'] = display_df['value_numeric'].apply(
-            lambda x: f"{x:,.2f}" if pd.notnull(x) else ""
+        display_df['value'] = display_df['value_numeric'].apply(
+            lambda x: f"{x:,.0f}" if pd.notnull(x) and abs(x) >= 1000 else (f"{x:.2f}" if pd.notnull(x) else "")
         )
     
-    st.dataframe(display_df, use_container_width=True, height=400)
+    # Reorder columns for better display
+    column_order = []
+    if 'company' in display_df.columns:
+        column_order.append('company')
+    if 'label' in display_df.columns:
+        column_order.append('label')
+    if 'fiscal_year' in display_df.columns:
+        column_order.append('fiscal_year')
+    if 'value' in display_df.columns:
+        column_order.append('value')
+    if 'unit' in display_df.columns:
+        column_order.append('unit')
+    if 'axis' in display_df.columns:
+        column_order.append('axis')
+    if 'member' in display_df.columns:
+        column_order.append('member')
+    
+    # Add remaining columns
+    for col in display_df.columns:
+        if col not in column_order:
+            column_order.append(col)
+    
+    display_df = display_df[column_order]
+    
+    # Display with custom column config
+    st.dataframe(
+        display_df, 
+        use_container_width=True, 
+        height=500,
+        column_config={
+            "company": st.column_config.TextColumn("Company", width="small"),
+            "label": st.column_config.TextColumn("Metric", width="medium"),
+            "fiscal_year": st.column_config.NumberColumn("Year", width="small"),
+            "value": st.column_config.TextColumn("Value", width="medium"),
+            "unit": st.column_config.TextColumn("Unit", width="small"),
+            "axis": st.column_config.TextColumn("Dimension", width="medium"),
+            "member": st.column_config.TextColumn("Segment", width="medium"),
+        },
+        hide_index=False
+    )
     
     # Visualizations
     if not df.empty and 'value_numeric' in df.columns:
