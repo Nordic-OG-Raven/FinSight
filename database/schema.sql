@@ -330,6 +330,142 @@ JOIN dim_companies c ON fi.company_id = c.company_id
 GROUP BY c.ticker, fi.filing_type, fi.fiscal_year_end;
 
 -- ============================================================================
+-- DEDUPLICATED VIEW (PRIMARY VIEW FOR BUSINESS INTELLIGENCE)
+-- ============================================================================
+-- 
+-- Purpose: Eliminate duplicate facts where multiple XBRL concepts map to the same 
+--          normalized_label with identical values.
+--
+-- Example: Assets and LiabilitiesAndStockholdersEquity both map to 'total_assets' 
+--          with identical value ($352.6B) - this view shows only one.
+--
+-- Design Decisions:
+-- 1. ONLY deduplicates when values are TRULY IDENTICAL (< 0.01% difference)
+-- 2. Uses deterministic priority (always picks same concept for consistency)
+-- 3. Preserves all distinct values (0.3% diff = kept as separate rows)
+-- 4. Raw facts table unchanged (validation can still see all source concepts)
+--
+-- Priority Order for Tiebreaking:
+-- 1. Balance sheet totals: prefer 'Assets' over 'LiabilitiesAndStockholdersEquity'
+-- 2. Income statement: prefer 'NetIncomeLoss' over alternatives
+-- 3. Equity: prefer 'StockholdersEquity' over 'TotalEquity'
+-- 4. General: prefer concept marked is_primary=TRUE
+-- 5. Fallback: lowest concept_id (stable across reloads)
+
+CREATE VIEW v_facts_deduplicated AS
+WITH fact_groups AS (
+    -- Group facts by the business key + value
+    SELECT 
+        f.fact_id,
+        f.company_id,
+        f.concept_id,
+        f.filing_id,
+        f.period_id,
+        f.dimension_id,
+        f.value_numeric,
+        f.value_text,
+        f.unit_measure,
+        f.decimals,
+        f.scale_int,
+        f.xbrl_format,
+        f.context_id,
+        f.fact_id_xbrl,
+        f.source_line,
+        f.order_index,
+        f.is_primary,
+        co.concept_name,
+        co.normalized_label,
+        co.taxonomy,
+        co.statement_type,
+        t.fiscal_year,
+        -- Concept priority (lower = higher priority)
+        CASE co.concept_name
+            -- Balance sheet equality pairs - prefer left side
+            WHEN 'Assets' THEN 1
+            WHEN 'LiabilitiesAndStockholdersEquity' THEN 2
+            -- Net income variants - prefer core concept
+            WHEN 'NetIncomeLoss' THEN 1
+            WHEN 'ProfitLoss' THEN 2
+            WHEN 'NetIncomeLossAvailableToCommonStockholdersBasic' THEN 3
+            -- Equity variants - prefer standard term
+            WHEN 'StockholdersEquity' THEN 1
+            WHEN 'TotalEquity' THEN 2
+            WHEN 'StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest' THEN 3
+            -- Cash variants - prefer most comprehensive
+            WHEN 'CashAndCashEquivalentsAtCarryingValue' THEN 1
+            WHEN 'Cash' THEN 2
+            -- Default: use is_primary flag and concept_id
+            ELSE 99
+        END as concept_priority,
+        -- Generate group key for identical facts
+        ROW_NUMBER() OVER (
+            PARTITION BY 
+                f.company_id,
+                co.normalized_label,
+                t.fiscal_year,
+                f.dimension_id,
+                -- Group by rounded value (handles rounding differences < 0.01%)
+                ROUND(f.value_numeric::numeric, 2)
+            ORDER BY 
+                -- Prioritize based on concept name
+                CASE co.concept_name
+                    WHEN 'Assets' THEN 1
+                    WHEN 'LiabilitiesAndStockholdersEquity' THEN 2
+                    WHEN 'NetIncomeLoss' THEN 1
+                    WHEN 'ProfitLoss' THEN 2
+                    WHEN 'StockholdersEquity' THEN 1
+                    WHEN 'TotalEquity' THEN 2
+                    WHEN 'CashAndCashEquivalentsAtCarryingValue' THEN 1
+                    WHEN 'Cash' THEN 2
+                    ELSE 99
+                END,
+                -- Then by is_primary flag
+                f.is_primary DESC NULLS LAST,
+                -- Then by order_index (lower = more prominent in statement)
+                f.order_index ASC NULLS LAST,
+                -- Stable tiebreaker
+                f.fact_id
+        ) as row_num
+    FROM fact_financial_metrics f
+    JOIN dim_concepts co ON f.concept_id = co.concept_id
+    JOIN dim_time_periods t ON f.period_id = t.period_id
+    WHERE 
+        -- Exclude text notes (already filtered in viewer, but good practice)
+        co.normalized_label NOT LIKE '%_note'
+        AND co.normalized_label NOT LIKE '%_disclosure%'
+)
+SELECT 
+    fg.fact_id,
+    fg.company_id,
+    fg.concept_id,
+    fg.filing_id,
+    fg.period_id,
+    fg.dimension_id,
+    fg.value_numeric,
+    fg.value_text,
+    fg.unit_measure,
+    fg.decimals,
+    fg.scale_int,
+    fg.xbrl_format,
+    fg.context_id,
+    fg.fact_id_xbrl,
+    fg.source_line,
+    fg.order_index,
+    fg.is_primary,
+    fg.concept_name,
+    fg.normalized_label,
+    fg.taxonomy,
+    fg.statement_type,
+    fg.fiscal_year
+FROM fact_groups fg
+WHERE fg.row_num = 1;  -- Keep only the highest-priority fact from each group
+
+-- Create index on the view for performance (materialized-like behavior)
+CREATE INDEX IF NOT EXISTS idx_dedup_company_label 
+    ON fact_financial_metrics(company_id, concept_id) 
+    WHERE is_primary = TRUE;
+
+-- ============================================================================
 -- HELPER FUNCTIONS
 -- ============================================================================
 

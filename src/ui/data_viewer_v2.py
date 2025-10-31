@@ -182,6 +182,14 @@ def main():
         help="Include product, geography, and other segment-level data"
     )
     
+    # Debug toggle for showing all source concepts (in Advanced Options expander)
+    with st.sidebar.expander("⚙️ Advanced Options"):
+        show_all_concepts = st.checkbox(
+            "Show all source concepts (debug)",
+            value=False,
+            help="When OFF (default): Shows deduplicated data for cleaner analysis. When ON: Shows ALL XBRL concepts including duplicates (e.g., both 'Assets' and 'LiabilitiesAndStockholdersEquity' with same value). Useful for validation/auditing."
+        )
+    
     # Company filter
     all_companies = get_companies()
     selected_companies = st.sidebar.multiselect(
@@ -231,7 +239,10 @@ def main():
     with st.spinner("Loading data from warehouse..."):
         engine = create_engine(DATABASE_URI)
         
-        query = """
+        # Use deduplicated view by default, raw table for debug mode
+        if show_all_concepts:
+            # Debug mode: show ALL source concepts (including duplicates)
+            query = """
         SELECT 
             c.ticker as company,
             co.concept_name as concept,
@@ -249,9 +260,39 @@ def main():
         JOIN dim_time_periods t ON f.period_id = t.period_id
         LEFT JOIN dim_xbrl_dimensions d ON f.dimension_id = d.dimension_id
         WHERE 1=1
-        """
+            """
+        else:
+            # Default: use deduplicated view (cleaner for BI analysis)
+            # The view already has concept_name, normalized_label, fiscal_year as columns
+            query = """
+        SELECT 
+            c.ticker as company,
+            f.concept_name as concept,
+            f.normalized_label,
+            f.fiscal_year,
+            f.value_numeric,
+            f.value_text,
+            f.unit_measure,
+            d.axis_name,
+            d.member_name,
+            CASE WHEN f.dimension_id IS NULL THEN 'Total' ELSE 'Segment' END as data_type
+        FROM v_facts_deduplicated f
+        JOIN dim_companies c ON f.company_id = c.company_id
+        LEFT JOIN dim_xbrl_dimensions d ON f.dimension_id = d.dimension_id
+        WHERE 1=1
+            """
         
         params = {}
+        
+        # Set up correct column references based on query type
+        if show_all_concepts:
+            # Raw table uses joined table aliases
+            fiscal_year_col = "t.fiscal_year"
+            normalized_label_col = "co.normalized_label"
+        else:
+            # Deduplicated view has these as direct columns
+            fiscal_year_col = "f.fiscal_year"
+            normalized_label_col = "f.normalized_label"
         
         # Filter by selected companies
         if selected_companies:
@@ -259,13 +300,13 @@ def main():
             params['companies'] = selected_companies
         
         # Filter by year range
-        query += " AND t.fiscal_year >= :start_year AND t.fiscal_year <= :end_year"
+        query += f" AND {fiscal_year_col} >= :start_year AND {fiscal_year_col} <= :end_year"
         params['start_year'] = year_range[0]
         params['end_year'] = year_range[1]
         
         # Filter by selected concepts
         if selected_concepts:
-            query += " AND co.normalized_label = ANY(:concepts)"
+            query += f" AND {normalized_label_col} = ANY(:concepts)"
             params['concepts'] = selected_concepts
         
         # Exclude segments if not requested
@@ -273,10 +314,10 @@ def main():
             query += " AND f.dimension_id IS NULL"
         
         # ALWAYS exclude text notes - users want numbers, not documentation
-        query += " AND (co.normalized_label NOT LIKE '%_note' AND co.normalized_label NOT LIKE '%_disclosure%' AND co.normalized_label NOT LIKE '%_section_header')"
+        query += f" AND ({normalized_label_col} NOT LIKE '%_note' AND {normalized_label_col} NOT LIKE '%_disclosure%' AND {normalized_label_col} NOT LIKE '%_section_header')"
         query += " AND f.value_numeric IS NOT NULL"  # Only show numeric data
         
-        query += " ORDER BY c.ticker, t.fiscal_year, co.normalized_label"
+        query += f" ORDER BY c.ticker, {fiscal_year_col}, {normalized_label_col}"
         
         with engine.connect() as conn:
             df = pd.read_sql(text(query), conn, params=params)
