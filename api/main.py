@@ -220,8 +220,11 @@ def analyze_preloaded(ticker, year):
             # Check if data exists
             query = text("""
                 SELECT COUNT(*) as count
-                FROM financial_facts
-                WHERE company = :ticker AND EXTRACT(YEAR FROM fiscal_year_end) = :year
+                FROM fact_financial_metrics fm
+                JOIN dim_companies c ON fm.company_id = c.company_id
+                JOIN dim_filings f ON fm.filing_id = f.filing_id
+                WHERE c.ticker = :ticker 
+                  AND EXTRACT(YEAR FROM f.fiscal_year_end) = :year
             """)
             result = conn.execute(query, {"ticker": ticker, "year": year})
             count = result.fetchone()[0]
@@ -234,16 +237,25 @@ def analyze_preloaded(ticker, year):
             
             # Fetch key metrics
             metrics_query = text("""
-                SELECT normalized_label, value, unit, period_end
-                FROM financial_facts
-                WHERE company = :ticker 
-                  AND EXTRACT(YEAR FROM fiscal_year_end) = :year
-                  AND normalized_label IN (
+                SELECT 
+                    co.normalized_label, 
+                    fm.value_numeric as value,
+                    fm.unit_measure as unit,
+                    p.end_date as period_end
+                FROM fact_financial_metrics fm
+                JOIN dim_companies c ON fm.company_id = c.company_id
+                JOIN dim_concepts co ON fm.concept_id = co.concept_id
+                JOIN dim_time_periods p ON fm.period_id = p.period_id
+                JOIN dim_filings f ON fm.filing_id = f.filing_id
+                WHERE c.ticker = :ticker 
+                  AND EXTRACT(YEAR FROM f.fiscal_year_end) = :year
+                  AND co.normalized_label IN (
                     'revenue', 'operating_income', 'net_income', 
                     'total_assets', 'total_liabilities', 'total_equity',
                     'operating_cashflow', 'eps_basic', 'eps_diluted'
                   )
-                ORDER BY normalized_label
+                  AND fm.dimension_id IS NULL
+                ORDER BY co.normalized_label
             """)
             
             metrics_result = conn.execute(metrics_query, {"ticker": ticker, "year": year})
