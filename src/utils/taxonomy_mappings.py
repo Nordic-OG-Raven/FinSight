@@ -14,13 +14,16 @@ CONCEPT_MAPPINGS = {
     # ============================================================================
     
     "revenue": [
-        "RevenueFromContractWithCustomerExcludingAssessedTax",
-        "RevenueFromContractWithCustomerIncludingAssessedTax",
-        "Revenues",
-        "Revenue",
+        "Revenues",  # Total revenue (US-GAAP)
+        "Revenue",   # Total revenue (IFRS)
         "SalesRevenueNet",
         "SalesRevenueGoodsNet",
         "SalesRevenueServicesNet",
+    ],
+    
+    "revenue_from_contracts": [
+        "RevenueFromContractWithCustomerExcludingAssessedTax",  # Contract revenue only (component)
+        "RevenueFromContractWithCustomerIncludingAssessedTax",
     ],
     
     "cost_of_revenue": [

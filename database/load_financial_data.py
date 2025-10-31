@@ -111,9 +111,18 @@ class StarSchemaLoader:
         # Determine fiscal year
         fiscal_year = None
         if end_date:
+            # For duration periods (income statement, cash flow), use end date year
             fiscal_year = int(end_date[:4])
         elif instant_date:
-            fiscal_year = int(instant_date[:4])
+            # For instant dates (balance sheet), early-year dates are END of previous fiscal year
+            from datetime import datetime
+            instant_dt = datetime.strptime(instant_date, '%Y-%m-%d')
+            
+            # If instant date is in Jan-Mar, it's likely end of PREVIOUS fiscal year
+            if instant_dt.month <= 3:
+                fiscal_year = instant_dt.year - 1
+            else:
+                fiscal_year = instant_dt.year
         
         # Create new
         self.cur.execute("""
