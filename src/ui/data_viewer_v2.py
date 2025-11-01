@@ -235,60 +235,105 @@ def main():
     st.title("📊 FinSight Financial Data Warehouse")
     st.markdown("Cross-company financial analysis from SEC and ESEF filings")
     
-    # Database statistics
+    # Database statistics - simplified and clearer
     stats = get_database_stats()
     if stats:
-        col1, col2, col3, col4, col5, col6 = st.columns(6)
+        col1, col2, col3 = st.columns(3)
         col1.metric("Companies", f"{stats[0]}")
-        col2.metric("Concepts", f"{stats[1]:,}")
-        col3.metric("Periods", f"{stats[2]:,}")
-        col4.metric("Total Facts", f"{stats[3]:,}")
-        col5.metric("Consolidated", f"{stats[4]:,}")
-        col6.metric("Dimensional", f"{stats[5]:,}")
+        col2.metric("Financial Metrics", f"{stats[1]:,}")
+        col3.metric("Total Data Points", f"{stats[3]:,}")
     
     st.markdown("---")
     
-    # Sidebar filters
-    st.sidebar.header("🔍 Filters")
+    # Sidebar: Customize Your Analysis
+    st.sidebar.header("🎯 Customize Your Analysis")
     
-    # Show segments checkbox (simpler than "view mode")
+    # 1. Company filter
+    all_companies = get_companies()
+    selected_companies = st.sidebar.multiselect(
+        "Companies",
+        options=all_companies,
+        default=all_companies[:5] if len(all_companies) > 5 else all_companies,
+        help="Select one or more companies to analyze"
+    )
+    
+    # 2. Fiscal Year filter
+    year_range = st.sidebar.slider(
+        "Fiscal Year Range",
+        min_value=2020,
+        max_value=2025,
+        value=(2023, 2024),
+        help="Select the range of fiscal years to analyze"
+    )
+    
+    # 3. Metric filter (multiselect has built-in search)
+    # CRITICAL: Only show metrics that have data for selected companies
+    # This prevents "phantom" metrics in dropdown that would return zero results
+    all_concepts_raw = get_normalized_labels_for_companies(
+        selected_companies,
+        start_year=year_range[0],
+        end_year=year_range[1]
+    )
+    
+    # Create human-readable options with mapping back to raw values
+    concept_display_map = {humanize_label(c): c for c in all_concepts_raw}
+    human_readable_options = sorted(concept_display_map.keys())
+    
+    # Show humanized labels in dropdown
+    selected_concepts_human = st.sidebar.multiselect(
+        "Metrics",
+        options=human_readable_options,
+        default=[],
+        help=f"Select specific metrics to analyze. Leave empty to see all metrics. Only shows {len(human_readable_options)} metrics available for selected companies."
+    )
+    
+    # Convert back to database format for querying
+    selected_concepts = [concept_display_map[h] for h in selected_concepts_human]
+    
+    st.sidebar.markdown("---")
+    
+    # 4. Granularity selector (dropdown instead of radio)
+    st.sidebar.markdown("**Granularity**")
+    
+    granularity_options = {
+        "Universal metrics": {
+            "value": 3,
+            "help": "Shows totals like 'Total Assets' - all companies report these, making cross-company comparison easy. (Only applies when browsing - selected metrics always show)"
+        },
+        "Specific metrics": {
+            "value": 2,
+            "help": "Adds section breakdowns like 'Accrued Liabilities' - some companies report these, others don't. (Only applies when browsing)"
+        },
+        "Very very specific metrics": {
+            "value": 1,
+            "help": "Shows every line item - details vary by company, so comparison may be limited. (Only applies when browsing)"
+        }
+    }
+    
+    selected_granularity_label = st.sidebar.selectbox(
+        "",
+        options=list(granularity_options.keys()),
+        index=0,  # Default to "Universal metrics"
+        label_visibility="collapsed",
+        help=granularity_options["Universal metrics"]["help"]
+    )
+    
+    # Update help text dynamically
+    st.sidebar.caption(f"💡 {granularity_options[selected_granularity_label]['help']}")
+    
+    min_hierarchy_level = granularity_options[selected_granularity_label]["value"]
+    
+    # 5. Show segment breakdowns
+    st.sidebar.markdown("---")
     show_segments = st.sidebar.checkbox(
         "Show segment breakdowns",
         value=False,
-        help="Include product, geography, and other segment-level data"
+        help="Include product, geography, and other segment-level data in the analysis"
     )
-    
-    # Hierarchy level filter (for cross-company comparison)
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### 📊 What level of detail?")
-    
-    hierarchy_options = {
-        "Comparable metrics (recommended)": 3,
-        "With subtotals": 2,
-        "All details": 1
-    }
-    
-    hierarchy_choice = st.sidebar.radio(
-        "Detail level",
-        options=list(hierarchy_options.keys()),
-        index=0,  # Default to Level 3+ (comparable totals)
-        label_visibility="collapsed",  # Hide label (we have the section header)
-        help="Choose how detailed you want the metrics to be. NOTE: This only affects browsing (when no metrics are selected). If you explicitly select metrics, you'll see them regardless of detail level."
-    )
-    
-    # Show helpful description based on selection
-    if hierarchy_choice == "Comparable metrics (recommended)":
-        st.sidebar.caption("💡 Shows totals like 'Total Assets' - all companies report these. (Only applies when browsing - selected metrics always show)")
-    elif hierarchy_choice == "With subtotals":
-        st.sidebar.caption("💡 Adds section breakdowns - some companies report these. (Only applies when browsing)")
-    else:
-        st.sidebar.caption("💡 Shows every line item - details vary by company. (Only applies when browsing)")
-    
-    min_hierarchy_level = hierarchy_options[hierarchy_choice]
     
     st.sidebar.markdown("---")
     
-    # Auditor view toggle (in Advanced Options expander)
+    # 6. Advanced Options (moved to bottom)
     with st.sidebar.expander("⚙️ Advanced Options"):
         show_all_concepts = st.checkbox(
             "Auditor view",
@@ -320,52 +365,6 @@ def main():
         run_custom_query = False
         if custom_sql:
             run_custom_query = st.button("Run Query", key="run_custom_query_btn")
-    
-    # Company filter
-    all_companies = get_companies()
-    selected_companies = st.sidebar.multiselect(
-        "Companies",
-        options=all_companies,
-        default=all_companies[:5] if len(all_companies) > 5 else all_companies
-    )
-    
-    # Year filter
-    year_range = st.sidebar.slider(
-        "Fiscal Year Range",
-        min_value=2020,
-        max_value=2025,
-        value=(2023, 2024)
-    )
-    
-    # Metric filter (multiselect has built-in search)
-    # CRITICAL: Only show metrics that have data for selected companies
-    # This prevents "phantom" metrics in dropdown that would return zero results
-    all_concepts_raw = get_normalized_labels_for_companies(
-        selected_companies,
-        start_year=year_range[0],
-        end_year=year_range[1]
-    )
-    
-    # Create human-readable options with mapping back to raw values
-    concept_display_map = {humanize_label(c): c for c in all_concepts_raw}
-    human_readable_options = sorted(concept_display_map.keys())
-    
-    # Show humanized labels in dropdown
-    selected_concepts_human = st.sidebar.multiselect(
-        "Filter by Metrics",
-        options=human_readable_options,
-        default=[],
-        help=f"Only shows metrics with data for selected companies ({len(human_readable_options)} available). Leave empty to see all, or type to search and select specific ones."
-    )
-    
-    # Convert back to database format for querying
-    selected_concepts = [concept_display_map[h] for h in selected_concepts_human]
-    
-    # Debug: Show what was selected
-    if selected_concepts:
-        with st.sidebar.expander("🔍 Selected Metrics Debug"):
-            for concept in selected_concepts:
-                st.code(concept, language=None)
     
     # Load data (unified query)
     with st.spinner("Loading data from warehouse..."):
