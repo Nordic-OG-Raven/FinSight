@@ -99,6 +99,42 @@ def get_normalized_labels():
         return [row[0] for row in result]
 
 
+def get_normalized_labels_for_companies(companies, start_year=None, end_year=None):
+    """
+    Get only normalized labels that have at least 1 data point for the selected companies.
+    CRITICAL: Prevents showing metrics in dropdown that have zero data for selected companies.
+    """
+    if not companies:
+        return get_normalized_labels()  # No companies selected = show all
+    
+    engine = create_engine(DATABASE_URI)
+    with engine.connect() as conn:
+        query = """
+        SELECT DISTINCT dc.normalized_label
+        FROM fact_financial_metrics f
+        JOIN dim_companies c ON f.company_id = c.company_id
+        JOIN dim_concepts dc ON f.concept_id = dc.concept_id
+        LEFT JOIN dim_time_periods t ON f.period_id = t.period_id
+        WHERE c.ticker = ANY(:companies)
+          AND dc.normalized_label IS NOT NULL
+          AND f.dimension_id IS NULL
+          AND f.value_numeric IS NOT NULL
+          AND (dc.normalized_label NOT LIKE '%_note' AND dc.normalized_label NOT LIKE '%_disclosure%' AND dc.normalized_label NOT LIKE '%_section_header')
+        """
+        
+        params = {'companies': companies}
+        
+        if start_year is not None and end_year is not None:
+            query += " AND t.fiscal_year >= :start_year AND t.fiscal_year <= :end_year"
+            params['start_year'] = start_year
+            params['end_year'] = end_year
+        
+        query += " ORDER BY dc.normalized_label"
+        
+        result = conn.execute(text(query), params)
+        return [row[0] for row in result]
+
+
 @st.cache_data(ttl=600)
 def load_consolidated_data(companies=None, start_year=None, end_year=None, concepts=None):
     """Load consolidated facts (no dimensional breakdowns)"""
@@ -302,8 +338,13 @@ def main():
     )
     
     # Metric filter (multiselect has built-in search)
-    # Get raw labels from database
-    all_concepts_raw = get_normalized_labels()
+    # CRITICAL: Only show metrics that have data for selected companies
+    # This prevents "phantom" metrics in dropdown that would return zero results
+    all_concepts_raw = get_normalized_labels_for_companies(
+        selected_companies,
+        start_year=year_range[0],
+        end_year=year_range[1]
+    )
     
     # Create human-readable options with mapping back to raw values
     concept_display_map = {humanize_label(c): c for c in all_concepts_raw}
@@ -314,7 +355,7 @@ def main():
         "Filter by Metrics",
         options=human_readable_options,
         default=[],
-        help="Leave empty to see all metrics, or type to search and select specific ones"
+        help=f"Only shows metrics with data for selected companies ({len(human_readable_options)} available). Leave empty to see all, or type to search and select specific ones."
     )
     
     # Convert back to database format for querying
