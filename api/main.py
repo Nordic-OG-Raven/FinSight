@@ -475,25 +475,49 @@ def get_available_metrics():
         engine = create_engine(DATABASE_URL)
         
         with engine.connect() as conn:
-            query_str = """
-                SELECT DISTINCT f.normalized_label
-                FROM v_facts_hierarchical f
-                WHERE 1=1
-            """
+            # Check if view exists
+            try:
+                test_query = text("SELECT 1 FROM v_facts_hierarchical LIMIT 1")
+                conn.execute(test_query)
+                use_view = True
+            except:
+                use_view = False
+            
+            if use_view:
+                query_str = """
+                    SELECT DISTINCT f.normalized_label
+                    FROM v_facts_hierarchical f
+                    WHERE 1=1
+                """
+                ticker_col = "f.ticker"
+                year_col = "f.fiscal_year"
+            else:
+                query_str = """
+                    SELECT DISTINCT co.normalized_label
+                    FROM fact_financial_metrics f
+                    JOIN dim_companies c ON f.company_id = c.company_id
+                    JOIN dim_concepts co ON f.concept_id = co.concept_id
+                    JOIN dim_time_periods t ON f.period_id = t.period_id
+                    JOIN dim_filings fi ON f.filing_id = fi.filing_id
+                    WHERE 1=1
+                """
+                ticker_col = "c.ticker"
+                year_col = "EXTRACT(YEAR FROM fi.fiscal_year_end)"
+            
             params = {}
             
             if companies:
-                query_str += " AND f.ticker = ANY(:companies)"
+                query_str += f" AND {ticker_col} = ANY(:companies)"
                 params['companies'] = companies
             
             if start_year is not None:
-                query_str += " AND f.fiscal_year >= :start_year"
+                query_str += f" AND {year_col} >= :start_year"
                 params['start_year'] = start_year
             if end_year is not None:
-                query_str += " AND f.fiscal_year <= :end_year"
+                query_str += f" AND {year_col} <= :end_year"
                 params['end_year'] = end_year
             
-            query_str += " ORDER BY f.normalized_label"
+            query_str += " ORDER BY normalized_label"
             
             query = text(query_str)
             result = conn.execute(query, params)
@@ -559,30 +583,67 @@ def get_data():
                 fiscal_year_col = "t.fiscal_year"
                 normalized_label_col = "co.normalized_label"
             else:
-                # Hierarchical view (deduplicated)
-                query_str = """
-                    SELECT 
-                        f.ticker as company,
-                        f.concept_name as concept,
-                        f.normalized_label,
-                        f.fiscal_year,
-                        f.value_numeric,
-                        f.value_text,
-                        f.unit_measure,
-                        f.hierarchy_level,
-                        d.axis_name,
-                        d.member_name,
-                        CASE WHEN f.dimension_id IS NULL THEN 'Total' ELSE 'Segment' END as data_type,
-                        t.period_label,
-                        t.end_date as period_end
-                    FROM v_facts_hierarchical f
-                    LEFT JOIN dim_xbrl_dimensions d ON f.dimension_id = d.dimension_id
-                    LEFT JOIN dim_time_periods t ON f.period_id = t.period_id
-                    WHERE 1=1
-                """
-                company_col = "f.ticker"
-                fiscal_year_col = "f.fiscal_year"
-                normalized_label_col = "f.normalized_label"
+                # Try hierarchical view first, fallback to raw table if view doesn't exist
+                # Check if view exists by trying to query it
+                try:
+                    test_query = text("SELECT 1 FROM v_facts_hierarchical LIMIT 1")
+                    conn.execute(test_query)
+                    use_view = True
+                except:
+                    use_view = False
+                
+                if use_view:
+                    # Hierarchical view (deduplicated)
+                    query_str = """
+                        SELECT 
+                            f.ticker as company,
+                            f.concept_name as concept,
+                            f.normalized_label,
+                            f.fiscal_year,
+                            f.value_numeric,
+                            f.value_text,
+                            f.unit_measure,
+                            f.hierarchy_level,
+                            d.axis_name,
+                            d.member_name,
+                            CASE WHEN f.dimension_id IS NULL THEN 'Total' ELSE 'Segment' END as data_type,
+                            t.period_label,
+                            COALESCE(t.end_date, t.instant_date) as period_end
+                        FROM v_facts_hierarchical f
+                        LEFT JOIN dim_xbrl_dimensions d ON f.dimension_id = d.dimension_id
+                        LEFT JOIN dim_time_periods t ON f.period_id = t.period_id
+                        WHERE 1=1
+                    """
+                    company_col = "f.ticker"
+                    fiscal_year_col = "f.fiscal_year"
+                    normalized_label_col = "f.normalized_label"
+                else:
+                    # Fallback to raw table with hierarchy_level from dim_concepts
+                    query_str = """
+                        SELECT 
+                            c.ticker as company,
+                            co.concept_name as concept,
+                            co.normalized_label,
+                            t.fiscal_year,
+                            f.value_numeric,
+                            f.value_text,
+                            f.unit_measure,
+                            co.hierarchy_level,
+                            d.axis_name,
+                            d.member_name,
+                            CASE WHEN f.dimension_id IS NULL THEN 'Total' ELSE 'Segment' END as data_type,
+                            t.period_label,
+                            COALESCE(t.end_date, t.instant_date) as period_end
+                        FROM fact_financial_metrics f
+                        JOIN dim_companies c ON f.company_id = c.company_id
+                        JOIN dim_concepts co ON f.concept_id = co.concept_id
+                        JOIN dim_time_periods t ON f.period_id = t.period_id
+                        LEFT JOIN dim_xbrl_dimensions d ON f.dimension_id = d.dimension_id
+                        WHERE 1=1
+                    """
+                    company_col = "c.ticker"
+                    fiscal_year_col = "t.fiscal_year"
+                    normalized_label_col = "co.normalized_label"
             
             params = {}
             
@@ -606,7 +667,10 @@ def get_data():
             
             # Hierarchy level filter (only for hierarchical view)
             if not show_all_concepts:
-                query_str += " AND f.hierarchy_level >= :min_hierarchy_level"
+                if use_view:
+                    query_str += " AND f.hierarchy_level >= :min_hierarchy_level"
+                else:
+                    query_str += " AND co.hierarchy_level >= :min_hierarchy_level"
                 params['min_hierarchy_level'] = min_hierarchy_level
             
             # Segment filter
