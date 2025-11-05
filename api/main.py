@@ -786,7 +786,7 @@ def get_financial_statements(ticker, year):
         engine = create_engine(DATABASE_URL)
         
         with engine.connect() as conn:
-            # Get all metrics organized by statement type
+            # Get all metrics - use statement_type from database (should be populated now)
             query = text("""
                 SELECT 
                     co.statement_type,
@@ -815,39 +815,59 @@ def get_financial_statements(ticker, year):
                   AND EXTRACT(YEAR FROM f.fiscal_year_end) = :year
                   AND fm.dimension_id IS NULL
                   AND fm.value_numeric IS NOT NULL
-                  AND co.statement_type IN ('income_statement', 'balance_sheet', 'cash_flow')
                 ORDER BY 
                     CASE co.statement_type
                         WHEN 'income_statement' THEN 1
                         WHEN 'balance_sheet' THEN 2
                         WHEN 'cash_flow' THEN 3
+                        ELSE 4
                     END,
-                    co.hierarchy_level DESC,
+                    COALESCE(co.hierarchy_level, 0) DESC,
                     co.normalized_label
             """)
             
             result = conn.execute(query, {"ticker": ticker, "year": year})
             rows = result.fetchall()
             
-            # Organize by statement type
+            # Organize by statement type (use database value, fallback to inference if NULL)
             statements = {
                 "income_statement": [],
                 "balance_sheet": [],
                 "cash_flow": []
             }
             
+            def infer_statement_type_fallback(normalized_label: str, period_type: str) -> str:
+                """Fallback inference if database has NULL"""
+                if not normalized_label:
+                    return 'other'
+                label_lower = normalized_label.lower()
+                
+                if any(kw in label_lower for kw in ['asset', 'liabilit', 'equity', 'debt', 'inventory', 'receivable', 'payable', 'cash']) or period_type == 'instant':
+                    return 'balance_sheet'
+                elif any(kw in label_lower for kw in ['revenue', 'income', 'profit', 'earnings', 'eps', 'expense', 'cost']):
+                    return 'income_statement'
+                elif any(kw in label_lower for kw in ['cash_flow', 'cashflow', 'capex']):
+                    return 'cash_flow'
+                return 'other'
+            
             for row in rows:
-                stmt_type = row[0] or 'other'
+                db_stmt_type = row[0]
+                normalized_label = row[1] or ''
+                period_type = row[6] or 'duration'
+                
+                # Use database value, fallback to inference if NULL
+                stmt_type = db_stmt_type if db_stmt_type else infer_statement_type_fallback(normalized_label, period_type)
+                
                 if stmt_type in statements:
                     statements[stmt_type].append({
-                        "normalized_label": row[1],
+                        "normalized_label": normalized_label,
                         "concept_name": row[2],
                         "value": float(row[3]) if row[3] else None,
                         "unit": row[4],
                         "period_date": row[5].isoformat() if row[5] else None,
-                        "period_type": row[6],
+                        "period_type": period_type,
                         "hierarchy_level": int(row[7]) if row[7] else None,
-                        "parent_normalized_label": row[10]
+                        "parent_normalized_label": row[9]
                     })
             
             return jsonify({

@@ -78,15 +78,50 @@ class StarSchemaLoader:
         return company_id
     
     def get_or_create_concept(self, concept_name: str, taxonomy: str, metadata: Dict) -> int:
-        """Get or create concept_id"""
+        """Get or create concept_id, and update statement_type if missing"""
+        # Import taxonomy mappings for statement_type inference
+        try:
+            from src.utils.taxonomy_mappings import get_statement_type
+        except ImportError:
+            get_statement_type = None
+        
+        # Determine statement_type from fact metadata or taxonomy mappings
+        statement_type = metadata.get('statement_type')
+        if not statement_type:
+            # Try to infer from normalized_label using taxonomy mappings
+            normalized_label = metadata.get('normalized_label')
+            if normalized_label and get_statement_type:
+                statement_type = get_statement_type(normalized_label)
+        
+        # Fallback: infer from concept name if still missing
+        if not statement_type:
+            concept_lower = concept_name.lower()
+            if any(term in concept_lower for term in ['asset', 'liability', 'equity', 'receivable', 'payable', 'inventory', 'debt', 'cash']):
+                statement_type = 'balance_sheet'
+            elif any(term in concept_lower for term in ['revenue', 'income', 'expense', 'cost', 'profit', 'earnings', 'eps']):
+                statement_type = 'income_statement'
+            elif any(term in concept_lower for term in ['cashflow', 'operatingactivit', 'investingactivit', 'financingactivit']):
+                statement_type = 'cash_flow'
+            else:
+                statement_type = 'other'
+        
         # Check if exists
         self.cur.execute(
-            "SELECT concept_id FROM dim_concepts WHERE concept_name = %s AND taxonomy = %s",
+            "SELECT concept_id, statement_type FROM dim_concepts WHERE concept_name = %s AND taxonomy = %s",
             (concept_name, taxonomy)
         )
         result = self.cur.fetchone()
         if result:
-            return result[0]
+            concept_id, existing_stmt_type = result[0], result[1]
+            # Update statement_type if it's NULL and we have a value
+            if existing_stmt_type is None and statement_type:
+                self.cur.execute("""
+                    UPDATE dim_concepts 
+                    SET statement_type = %s 
+                    WHERE concept_id = %s
+                """, (statement_type, concept_id))
+                self.conn.commit()
+            return concept_id
         
         # Create new
         self.cur.execute("""
@@ -104,7 +139,7 @@ class StarSchemaLoader:
             metadata.get('concept_period_type'),
             metadata.get('concept_data_type'),
             metadata.get('concept_abstract', False),
-            metadata.get('statement_type', 'other')
+            statement_type
         ))
         
         concept_id = self.cur.fetchone()[0]
