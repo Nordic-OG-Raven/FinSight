@@ -449,6 +449,196 @@ def get_quota():
         }
     })
 
+@app.route('/api/metrics', methods=['POST'])
+def get_available_metrics():
+    """
+    Get available normalized labels (metrics) for selected companies
+    """
+    data = request.json or {}
+    companies = data.get('companies', [])
+    start_year = data.get('start_year')
+    end_year = data.get('end_year')
+    
+    try:
+        from sqlalchemy import create_engine, text
+        engine = create_engine(DATABASE_URL)
+        
+        with engine.connect() as conn:
+            query_str = """
+                SELECT DISTINCT f.normalized_label
+                FROM v_facts_hierarchical f
+                WHERE 1=1
+            """
+            params = {}
+            
+            if companies:
+                query_str += " AND f.ticker = ANY(:companies)"
+                params['companies'] = companies
+            
+            if start_year is not None:
+                query_str += " AND f.fiscal_year >= :start_year"
+                params['start_year'] = start_year
+            if end_year is not None:
+                query_str += " AND f.fiscal_year <= :end_year"
+                params['end_year'] = end_year
+            
+            query_str += " ORDER BY f.normalized_label"
+            
+            query = text(query_str)
+            result = conn.execute(query, params)
+            metrics = [row[0] for row in result if row[0]]
+            
+            return jsonify({
+                "success": True,
+                "metrics": metrics,
+                "count": len(metrics)
+            })
+            
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
+@app.route('/api/data', methods=['POST'])
+def get_data():
+    """
+    Query data warehouse with filters
+    Returns financial facts for visualization and analysis
+    """
+    data = request.json or {}
+    companies = data.get('companies', [])
+    start_year = data.get('start_year')
+    end_year = data.get('end_year')
+    concepts = data.get('concepts', [])  # normalized_label list
+    show_segments = data.get('show_segments', False)
+    min_hierarchy_level = data.get('min_hierarchy_level', 3)  # 1=all, 2=specific, 3=universal
+    show_all_concepts = data.get('show_all_concepts', False)  # auditor view
+    
+    try:
+        from sqlalchemy import create_engine, text
+        engine = create_engine(DATABASE_URL)
+        
+        with engine.connect() as conn:
+            # Build query string
+            if show_all_concepts:
+                # Raw table query
+                query_str = """
+                    SELECT 
+                        c.ticker as company,
+                        co.concept_name as concept,
+                        co.normalized_label,
+                        t.fiscal_year,
+                        f.value_numeric,
+                        f.value_text,
+                        f.unit_measure,
+                        d.axis_name,
+                        d.member_name,
+                        CASE WHEN f.dimension_id IS NULL THEN 'Total' ELSE 'Segment' END as data_type,
+                        t.period_label,
+                        t.end_date as period_end
+                    FROM fact_financial_metrics f
+                    JOIN dim_companies c ON f.company_id = c.company_id
+                    JOIN dim_concepts co ON f.concept_id = co.concept_id
+                    JOIN dim_time_periods t ON f.period_id = t.period_id
+                    LEFT JOIN dim_xbrl_dimensions d ON f.dimension_id = d.dimension_id
+                    WHERE 1=1
+                """
+                company_col = "c.ticker"
+                fiscal_year_col = "t.fiscal_year"
+                normalized_label_col = "co.normalized_label"
+            else:
+                # Hierarchical view (deduplicated)
+                query_str = """
+                    SELECT 
+                        f.ticker as company,
+                        f.concept_name as concept,
+                        f.normalized_label,
+                        f.fiscal_year,
+                        f.value_numeric,
+                        f.value_text,
+                        f.unit_measure,
+                        f.hierarchy_level,
+                        d.axis_name,
+                        d.member_name,
+                        CASE WHEN f.dimension_id IS NULL THEN 'Total' ELSE 'Segment' END as data_type,
+                        t.period_label,
+                        t.end_date as period_end
+                    FROM v_facts_hierarchical f
+                    LEFT JOIN dim_xbrl_dimensions d ON f.dimension_id = d.dimension_id
+                    LEFT JOIN dim_time_periods t ON f.period_id = t.period_id
+                    WHERE 1=1
+                """
+                company_col = "f.ticker"
+                fiscal_year_col = "f.fiscal_year"
+                normalized_label_col = "f.normalized_label"
+            
+            params = {}
+            
+            # Company filter
+            if companies:
+                query_str += f" AND {company_col} = ANY(:companies)"
+                params['companies'] = companies
+            
+            # Year range
+            if start_year is not None:
+                query_str += f" AND {fiscal_year_col} >= :start_year"
+                params['start_year'] = start_year
+            if end_year is not None:
+                query_str += f" AND {fiscal_year_col} <= :end_year"
+                params['end_year'] = end_year
+            
+            # Concept filter
+            if concepts:
+                query_str += f" AND {normalized_label_col} = ANY(:concepts)"
+                params['concepts'] = concepts
+            
+            # Hierarchy level filter (only for hierarchical view)
+            if not show_all_concepts:
+                query_str += " AND f.hierarchy_level >= :min_hierarchy_level"
+                params['min_hierarchy_level'] = min_hierarchy_level
+            
+            # Segment filter
+            if not show_segments:
+                query_str += " AND f.dimension_id IS NULL"
+            
+            query_str += " ORDER BY company, fiscal_year, normalized_label"
+            
+            query = text(query_str)
+            result = conn.execute(query, params)
+            rows = result.fetchall()
+            
+            # Convert to list of dicts
+            data_rows = []
+            for row in rows:
+                data_rows.append({
+                    "company": row[0],
+                    "concept": row[1],
+                    "normalized_label": row[2],
+                    "fiscal_year": int(row[3]) if row[3] else None,
+                    "value_numeric": float(row[4]) if row[4] is not None else None,
+                    "value_text": row[5],
+                    "unit_measure": row[6],
+                    "hierarchy_level": row[7] if len(row) > 7 else None,
+                    "axis_name": row[8] if len(row) > 8 else None,
+                    "member_name": row[9] if len(row) > 9 else None,
+                    "data_type": row[10] if len(row) > 10 else None,
+                    "period_label": row[11] if len(row) > 11 else None,
+                    "period_end": row[12].isoformat() if len(row) > 12 and row[12] else None,
+                })
+            
+            return jsonify({
+                "success": True,
+                "data": data_rows,
+                "count": len(data_rows)
+            })
+            
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
+
 @app.route('/api/admin/load-companies', methods=['POST'])
 def admin_load_companies():
     """Admin endpoint to load companies without quota (for pre-loading)"""
