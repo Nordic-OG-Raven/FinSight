@@ -19,7 +19,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY api/ ./api/
 COPY src/ ./src/
+COPY database/ ./database/
 COPY config.py .
+COPY load_missing_to_railway.py .
 
 # Create data directory
 RUN mkdir -p api/data
