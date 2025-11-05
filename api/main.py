@@ -724,11 +724,12 @@ def get_data():
                 params['concepts'] = concepts
             
             # Hierarchy level filter (only for hierarchical view)
+            # Only apply if hierarchy_level column exists and has values
             if not show_all_concepts:
                 if use_view:
-                    query_str += " AND f.hierarchy_level >= :min_hierarchy_level"
+                    query_str += " AND (f.hierarchy_level IS NULL OR f.hierarchy_level >= :min_hierarchy_level)"
                 else:
-                    query_str += " AND co.hierarchy_level >= :min_hierarchy_level"
+                    query_str += " AND (co.hierarchy_level IS NULL OR co.hierarchy_level >= :min_hierarchy_level)"
                 params['min_hierarchy_level'] = min_hierarchy_level
             
             # Segment filter
