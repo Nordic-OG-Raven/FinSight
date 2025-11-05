@@ -3,6 +3,24 @@
 ## Overview
 This document outlines all beneficial unit tests and validation tests for the FinSight financial data pipeline.
 
+## Status Update (2025-11-03)
+**✅ VALIDATOR INTEGRATION COMPLETE:**
+The following validation checks have been integrated into the pipeline validator (`src/validation/validator.py`):
+- ✅ Accounting Identity Checks (Category 6)
+- ✅ Calculation Relationship Validation (Category 7)
+- ✅ Data Quality Checks (Category 5 - partial)
+
+**📋 VALIDATOR = Pipeline Integration (Runs Automatically)**
+- These checks run automatically in the pipeline after data loading
+- Ensures data quality before data persists
+- Part of the 100% validation score goal
+- All fixes are lasting (work for any company, any data load)
+
+**🔧 UNIT TESTS = Separate (CI/CD)**
+- Function-level tests (test individual functions)
+- Can run with mock data (no DB needed)
+- Tests code logic, not data correctness
+
 ## Test Categories
 
 ### 1. XBRL Parsing Tests (`test_parse_xbrl.py`)
@@ -168,85 +186,55 @@ This document outlines all beneficial unit tests and validation tests for the Fi
 
 ### 5. Data Quality Tests (`test_data_quality.py`)
 
-#### Validation Tests
-- **test_no_user_facing_duplicates()**
-  - Test no duplicate metrics per (company, fiscal_year, dimension)
-  - Verify normalized_label uniqueness at user level
+#### ✅ INTEGRATED INTO VALIDATOR (Pipeline)
+- ✅ **test_no_user_facing_duplicates()** → `_check_user_facing_duplicates()`
+- ✅ **test_normalization_coverage()** → `_check_normalization_coverage()`
+- ✅ **test_numeric_value_range()** → `_check_numeric_value_ranges()`
+- ✅ **test_unit_consistency()** → `_check_unit_consistency()`
+- ✅ **test_normalization_quality()** → `_check_normalization_conflicts()`
 
+#### 🔧 REMAIN AS SEPARATE UNIT TESTS
 - **test_no_database_duplicates()**
   - Test unique constraint enforcement
   - Verify no identical facts (same fact_id tuple)
-
-- **test_normalization_coverage()**
-  - Test 100% of concepts are normalized
-  - Verify no NULL normalized_labels
-
-- **test_normalization_quality()**
-  - Test normalization conflict count < threshold
-  - Verify no high-impact conflicts (revenue, net_income, assets)
 
 - **test_dimensional_data_quality()**
   - Test dimensional facts have valid dimension_id
   - Test axis-member pairs are valid
   - Verify segment names are populated
 
-- **test_numeric_value_range()**
-  - Test no negative values where illogical (assets, revenue)
-  - Test no suspiciously large values (> $10T for most companies)
-  - Flag extreme outliers for review
-
-- **test_unit_consistency()**
-  - Test all monetary values use same currency per filing
-  - Test shares vs monetary units are distinct
-  - Verify scale factors are applied
-
 ---
 
 ### 6. Accounting Identity Tests (`test_accounting_identities.py`)
 
-#### Validation Tests
-- **test_balance_sheet_equation()**
-  - Test `Assets = Liabilities + Equity` for all periods
-  - Tolerance: 1% (accounting for rounding)
-  - Group by company, fiscal_year, period_type (instant)
+#### ✅ INTEGRATED INTO VALIDATOR (Pipeline)
+- ✅ **test_balance_sheet_equation()** → `_check_balance_sheet_equation()`
+- ✅ **test_retained_earnings_rollforward()** → `_check_retained_earnings_rollforward()`
+- ✅ **test_cash_flow_to_balance_sheet()** → `_check_cash_flow_reconciliation()`
+- ✅ **test_gross_profit_margin()** → `_check_gross_profit_margin()`
+- ✅ **test_operating_income_calculation()** → `_check_operating_income_calculation()`
 
+#### 🔧 REMAIN AS SEPARATE UNIT TESTS
 - **test_eps_calculation()**
   - Test `EPS = Net Income / Weighted Average Shares`
   - Test both basic and diluted EPS
   - Tolerance: 3% (rounding in large numbers)
 
-- **test_retained_earnings_rollforward()**
-  - Test `Ending RE = Beginning RE + Net Income - Dividends`
-  - Verify across consecutive periods
-  - Tolerance: 1%
-
-- **test_cash_flow_to_balance_sheet()**
-  - Test `Ending Cash = Beginning Cash + Net Cash Flow`
-  - Verify cash flow statement ties to balance sheet
-  - Tolerance: 1%
-
 - **test_revenue_to_accounts_receivable()**
   - Test Days Sales Outstanding (DSO) is reasonable
   - Flag extreme values (< 0 days, > 365 days)
-
-- **test_gross_profit_margin()**
-  - Test `Gross Profit = Revenue - Cost of Revenue`
-  - Verify margin is within industry norms (0-100%)
-
-- **test_operating_income_calculation()**
-  - Test `Operating Income = Gross Profit - Operating Expenses`
-  - Verify for all periods
 
 ---
 
 ### 7. Relationship Tests (`test_relationships.py`)
 
-#### Validation Tests
-- **test_calculation_relationships()**
-  - Test parent = sum(children) for all calc relationships
-  - Verify weights are correct (+1 or -1)
+#### ✅ INTEGRATED INTO VALIDATOR (Pipeline)
+- ✅ **test_calculation_relationships()** → `_check_calculation_relationships()`
+  - Checks parent = sum(children) for all calc relationships
   - Tolerance: 0.1% (XBRL precision)
+  - Only checks relationships with confidence >= 0.995
 
+#### 🔧 REMAIN AS SEPARATE UNIT TESTS
 - **test_relationship_confidence()**
   - Test all relationships have confidence >= 0.995
   - Verify no low-confidence synthetic relationships

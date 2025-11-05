@@ -59,6 +59,7 @@ def run_pipeline(ticker: str, year: int, filing_type: str = '10-K') -> bool:
         
         facts = result['facts']
         metadata = result['metadata']
+        relationships = result.get('relationships', {})
         logger.info(f"Extracted {len(facts)} facts")
         
         # Step 3: Validate
@@ -78,14 +79,30 @@ def run_pipeline(ticker: str, year: int, filing_type: str = '10-K') -> bool:
         
         logger.info(f"Completeness: {completeness_report.overall_completeness:.1%}")
         
-        # Step 5: Save to database (using storage module)
-        from src.storage.load_to_db import load_facts_to_db
-        load_facts_to_db(
-            facts=facts,
-            ticker=ticker,
-            filing_type=filing_type,
-            metadata=metadata
-        )
+        # Step 5: Save to database (using star schema loader - same as Railway uses)
+        from database.load_financial_data import StarSchemaLoader
+        import json
+        
+        # Create temporary JSON file for the loader (StarSchemaLoader expects JSON files)
+        temp_json = DATA_PROCESSED / f"{ticker}_{year}_{filing_type.replace('-', '')}_temp_facts.json"
+        temp_json.write_text(json.dumps({
+            'company': ticker,
+            'year': year,
+            'filing_type': filing_type,
+            'facts': facts,
+            'metadata': metadata,
+            'relationships': relationships
+        }, indent=2, default=str))
+        
+        # Load using star schema loader (same as Railway uses)
+        # This applies normalization, validation, and loads into correct schema
+        loader = StarSchemaLoader()
+        loader.load_json_file(temp_json)
+        
+        # Clean up temp file
+        temp_json.unlink()
+        
+        loader.close()
         
         logger.info(f"Pipeline completed successfully for {ticker} {year}")
         return True

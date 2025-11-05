@@ -28,20 +28,73 @@ MAX_DB_SIZE_MB = int(os.getenv('MAX_DB_SIZE_MB', 900))
 QUOTA_FILE = Path(__file__).parent / 'data' / 'quota.json'
 QUOTA_FILE.parent.mkdir(exist_ok=True)
 
-# Pre-loaded companies (from your processed data)
-PRELOADED_COMPANIES = [
-    {"ticker": "NVO", "name": "Novo Nordisk", "years": [2024]},
-    {"ticker": "NVDA", "name": "NVIDIA", "years": [2023, 2024, 2025]},
-    {"ticker": "AAPL", "name": "Apple", "years": [2023]},
-    {"ticker": "GOOGL", "name": "Alphabet", "years": [2024]},
-    {"ticker": "MSFT", "name": "Microsoft", "years": [2024]},
-    {"ticker": "JNJ", "name": "Johnson & Johnson", "years": [2024]},
-    {"ticker": "PFE", "name": "Pfizer", "years": [2023]},
-    {"ticker": "LLY", "name": "Eli Lilly", "years": [2023]},
-    {"ticker": "MRNA", "name": "Moderna", "years": [2023]},
-    {"ticker": "SNY", "name": "Sanofi", "years": [2023]},
-    {"ticker": "KO", "name": "Coca-Cola", "years": [2024]},
-]
+# Company name mapping (for display)
+COMPANY_NAMES = {
+    "NVO": "Novo Nordisk",
+    "NVDA": "NVIDIA",
+    "AAPL": "Apple",
+    "GOOGL": "Alphabet",
+    "MSFT": "Microsoft",
+    "JNJ": "Johnson & Johnson",
+    "PFE": "Pfizer",
+    "LLY": "Eli Lilly",
+    "MRNA": "Moderna",
+    "SNY": "Sanofi",
+    "KO": "Coca-Cola",
+    "AMZN": "Amazon",
+    "ASML": "ASML",
+    "BAC": "Bank of America",
+    "CAT": "Caterpillar",
+    "JPM": "JPMorgan Chase",
+    "WMT": "Walmart",
+}
+
+def get_preloaded_companies_from_db():
+    """Dynamically query database for available companies and years"""
+    try:
+        from sqlalchemy import create_engine, text
+        engine = create_engine(DATABASE_URL)
+        
+        with engine.connect() as conn:
+            # Query for companies and their available years
+            query = text("""
+                SELECT 
+                    c.ticker,
+                    EXTRACT(YEAR FROM f.fiscal_year_end)::INTEGER as year
+                FROM fact_financial_metrics fm
+                JOIN dim_companies c ON fm.company_id = c.company_id
+                JOIN dim_filings f ON fm.filing_id = f.filing_id
+                WHERE fm.dimension_id IS NULL
+                GROUP BY c.ticker, EXTRACT(YEAR FROM f.fiscal_year_end)
+                ORDER BY c.ticker, year DESC
+            """)
+            
+            result = conn.execute(query)
+            rows = result.fetchall()
+            
+            # Group by ticker
+            companies_dict = {}
+            for ticker, year in rows:
+                if ticker not in companies_dict:
+                    companies_dict[ticker] = []
+                companies_dict[ticker].append(year)
+            
+            # Format as list with company names
+            companies_list = []
+            for ticker in sorted(companies_dict.keys()):
+                years = sorted(set(companies_dict[ticker]))
+                companies_list.append({
+                    "ticker": ticker,
+                    "name": COMPANY_NAMES.get(ticker, ticker),
+                    "years": years
+                })
+            
+            return companies_list
+            
+    except Exception as e:
+        # Fallback to empty list if database query fails
+        print(f"Error querying companies from database: {e}")
+        return []
 
 # Test tickers that don't count against quota
 TEST_TICKERS = ['TEST', 'DEMO']
@@ -187,8 +240,11 @@ def get_companies():
     quota_ok, count, quota_msg = check_monthly_quota()
     db_ok, db_size, db_msg = check_db_size()
     
+    # Dynamically fetch companies from database
+    preloaded_companies = get_preloaded_companies_from_db()
+    
     return jsonify({
-        "preloaded": PRELOADED_COMPANIES,
+        "preloaded": preloaded_companies,
         "quota": {
             "custom_requests_used": count,
             "custom_requests_limit": MAX_CUSTOM_REQUESTS,

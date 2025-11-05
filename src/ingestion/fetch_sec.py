@@ -111,8 +111,19 @@ class SECFilingDownloader:
                             documents_url = self.BASE_URL + documents_link['href']
                             
                             # Extract accession number from URL
+                            # Format: /Archives/edgar/data/CIK/ACCESSION-NUMBER/index.htm
                             accession_match = re.search(r'/(\d{10}-\d{2}-\d{6})/', documents_url)
-                            accession_number = accession_match.group(1) if accession_match else ''
+                            if not accession_match:
+                                # Try alternative format without dashes
+                                accession_match = re.search(r'/(\d{10}\d{2}\d{6})/', documents_url)
+                                if accession_match:
+                                    # Add dashes to match standard format
+                                    acc_str = accession_match.group(1)
+                                    accession_number = f"{acc_str[:10]}-{acc_str[10:12]}-{acc_str[12:]}"
+                                else:
+                                    accession_number = ''
+                            else:
+                                accession_number = accession_match.group(1)
                             
                             filings.append({
                                 'date': filing_date,
@@ -146,9 +157,9 @@ class SECFilingDownloader:
             
             soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Find the documents table
-            table = soup.find('table', {'class': 'tableFile'})
-            if not table:
+            # Find ALL documents tables (there can be multiple - main filing and XBRL files are often separate)
+            tables = soup.find_all('table', {'class': 'tableFile'})
+            if not tables:
                 logger.warning("Could not find documents table")
                 return {}
             
@@ -162,64 +173,64 @@ class SECFilingDownloader:
                 'schema': []
             }
             
-            for row in table.find_all('tr')[1:]:
-                cols = row.find_all('td')
-                if len(cols) >= 4:
-                    seq = cols[0].text.strip()
-                    doc_type = cols[3].text.strip()
-                    filename = cols[2].text.strip()
-                    
-                    link = cols[2].find('a')
-                    if not link:
-                        continue
-                    
-                    file_url = self.BASE_URL + link['href']
-                    
-                    # Skip exhibits
-                    if 'EX-' in doc_type.upper() or 'exhibit' in filename.lower():
-                        continue
-                    
-                    file_info = {
-                        'filename': filename,
-                        'url': file_url,
-                        'doc_type': doc_type,
-                        'sequence': seq
-                    }
-                    
-                    # Categorize by filename pattern
-                    filename_lower = filename.lower()
-                    
-                    if '_cal.xml' in filename_lower or 'calculation' in filename_lower:
-                        xbrl_files['calculation'].append(file_info)
-                        logger.debug(f"Found calculation linkbase: {filename}")
-                    elif '_pre.xml' in filename_lower or 'presentation' in filename_lower:
-                        xbrl_files['presentation'].append(file_info)
-                        logger.debug(f"Found presentation linkbase: {filename}")
-                    elif '_def.xml' in filename_lower or 'definition' in filename_lower:
-                        xbrl_files['definition'].append(file_info)
-                        logger.debug(f"Found definition linkbase: {filename}")
-                    elif '_lab.xml' in filename_lower or 'label' in filename_lower:
-                        xbrl_files['label'].append(file_info)
-                        logger.debug(f"Found label linkbase: {filename}")
-                    elif filename_lower.endswith('.xsd') or 'schema' in filename_lower:
-                        xbrl_files['schema'].append(file_info)
-                        logger.debug(f"Found schema: {filename}")
-                    elif (filename_lower.endswith('.htm') or filename_lower.endswith('.xml')) and \
-                         not any(x in filename_lower for x in ['_cal', '_def', '_lab', '_pre', '_sch']):
-                        # Instance document
-                        priority = 0
-                        if 'INSTANCE' in doc_type.upper() or '10-K' in doc_type or '20-F' in doc_type:
-                            priority += 50
-                        if seq == '1' or seq == '':
-                            priority += 30
-                        if filename_lower.endswith('_htm.xml'):
-                            priority += 100
+            # Process all tables
+            for table in tables:
+                for row in table.find_all('tr')[1:]:
+                    cols = row.find_all('td')
+                    if len(cols) >= 4:
+                        seq = cols[0].text.strip()
+                        doc_type = cols[3].text.strip()
+                        filename = cols[2].text.strip()
                         
-                        file_info['priority'] = priority
-                        xbrl_files['instance'].append(file_info)
-                        logger.debug(f"Found instance document: {filename} (priority: {priority})")
-            
-            # Sort instance documents by priority
+                        link = cols[2].find('a')
+                        if not link:
+                            continue
+                        
+                        file_url = self.BASE_URL + link['href']
+                        
+                        # Skip exhibits
+                        if 'EX-' in doc_type.upper() or 'exhibit' in filename.lower():
+                            continue
+                        
+                        file_info = {
+                            'filename': filename,
+                            'url': file_url,
+                            'doc_type': doc_type,
+                            'sequence': seq
+                        }
+                        
+                        # Categorize by filename pattern
+                        filename_lower = filename.lower()
+                        
+                        if '_cal.xml' in filename_lower or 'calculation' in filename_lower:
+                            xbrl_files['calculation'].append(file_info)
+                            logger.debug(f"Found calculation linkbase: {filename}")
+                        elif '_pre.xml' in filename_lower or 'presentation' in filename_lower:
+                            xbrl_files['presentation'].append(file_info)
+                            logger.debug(f"Found presentation linkbase: {filename}")
+                        elif '_def.xml' in filename_lower or 'definition' in filename_lower:
+                            xbrl_files['definition'].append(file_info)
+                            logger.debug(f"Found definition linkbase: {filename}")
+                        elif '_lab.xml' in filename_lower or 'label' in filename_lower:
+                            xbrl_files['label'].append(file_info)
+                            logger.debug(f"Found label linkbase: {filename}")
+                        elif filename_lower.endswith('.xsd') or 'schema' in filename_lower:
+                            xbrl_files['schema'].append(file_info)
+                            logger.debug(f"Found schema: {filename}")
+                        elif (filename_lower.endswith('.htm') or filename_lower.endswith('.xml')) and \
+                             not any(x in filename_lower for x in ['_cal', '_def', '_lab', '_pre', '_sch']):
+                            # Instance document
+                            priority = 0
+                            if 'INSTANCE' in doc_type.upper() or '10-K' in doc_type or '20-F' in doc_type:
+                                priority += 50
+                            if seq == '1' or seq == '':
+                                priority += 30
+                            if filename_lower.endswith('_htm.xml'):
+                                priority += 100
+                            
+                            file_info['priority'] = priority
+                            xbrl_files['instance'].append(file_info)
+                            logger.debug(f"Found instance document: {filename} (priority: {priority})")
             if xbrl_files['instance']:
                 xbrl_files['instance'].sort(key=lambda x: x.get('priority', 0), reverse=True)
             
@@ -319,6 +330,11 @@ class SECFilingDownloader:
                 instance_path.write_bytes(response.content)
                 self._rate_limit()
             
+            # SOLUTION: Extract and download schema files referenced in instance document
+            # Schema files are often not in documents table but are required for parsing
+            if instance_path.exists():
+                self._download_referenced_schemas(instance_path, filing_dir, target_filing)
+            
             # Download complete package if requested
             if download_complete_package:
                 # Download linkbase files
@@ -348,6 +364,105 @@ class SECFilingDownloader:
         except Exception as e:
             logger.error(f"Error downloading files: {e}")
             return None
+    
+    def _download_referenced_schemas(self, instance_path: Path, filing_dir: Path, filing_info: Dict):
+        """
+        Extract schema references from instance document and download them.
+        Schemas are often referenced but not listed in documents table.
+        """
+        try:
+            from bs4 import BeautifulSoup
+            import re
+            
+            # Read instance document
+            content = instance_path.read_bytes()
+            
+            # Parse to find schema references
+            soup = BeautifulSoup(content, 'xml')
+            schema_refs = soup.find_all('link:schemaRef') + soup.find_all('schemaRef', {'xlink:type': 'simple'})
+            
+            if not schema_refs:
+                # Try regex as fallback
+                schema_ref_match = re.search(r'xlink:href=["\']([^"\']+\.xsd)["\']', content.decode('utf-8', errors='ignore'))
+                if schema_ref_match:
+                    schema_refs = [{'href': schema_ref_match.group(1)}]
+                else:
+                    return
+            
+            # Extract base URL from instance file path or filing info
+            # Schema files are in the same directory as the instance
+            instance_dir = instance_path.parent
+            instance_filename = instance_path.name
+            
+            # Try to extract from documents_url first
+            docs_url = filing_info.get('documents_url', '')
+            if docs_url:
+                # Extract CIK and accession from documents URL
+                # Format: /Archives/edgar/data/CIK/ACCESSION-NUMBER/index.htm
+                url_match = re.search(r'/Archives/edgar/data/(\d+)/(\d{10}-\d{2}-\d{6})/', docs_url)
+                if url_match:
+                    cik = url_match.group(1)
+                    accession = url_match.group(2).replace('-', '')
+                    base_url = f"{self.BASE_URL}/Archives/edgar/data/{cik}/{accession}/"
+                else:
+                    # Fallback: try to extract from instance file's directory name
+                    # Directory format: TICKER_YEAR_FILINGTYPE_ACCESSION
+                    dir_name = instance_dir.name
+                    acc_match = re.search(r'_(\d{10}\d{2}\d{6})', dir_name)
+                    if acc_match:
+                        accession = acc_match.group(1)
+                        # Try to get CIK from search or use a placeholder (will fail if needed)
+                        cik_match = re.search(r'/data/(\d+)/', docs_url)
+                        if cik_match:
+                            cik = cik_match.group(1)
+                            base_url = f"{self.BASE_URL}/Archives/edgar/data/{cik}/{accession}/"
+                        else:
+                            logger.warning("Could not determine CIK for schema download")
+                            return
+                    else:
+                        logger.warning("Could not determine accession number for schema download")
+                        return
+            else:
+                logger.warning("No documents URL available for schema download")
+                return
+            
+            # Download each referenced schema
+            for schema_ref in schema_refs:
+                if isinstance(schema_ref, dict):
+                    schema_filename = schema_ref.get('href', '')
+                else:
+                    schema_filename = schema_ref.get('xlink:href', '') or schema_ref.get('href', '')
+                
+                if not schema_filename or not schema_filename.endswith('.xsd'):
+                    continue
+                
+                # Handle relative paths
+                if not schema_filename.startswith('http'):
+                    schema_url = base_url + schema_filename
+                else:
+                    schema_url = schema_filename
+                
+                schema_path = filing_dir / schema_filename
+                
+                if schema_path.exists():
+                    logger.debug(f"Schema already exists: {schema_filename}")
+                    continue
+                
+                try:
+                    logger.info(f"Downloading referenced schema: {schema_filename}")
+                    response = self.session.get(schema_url)
+                    if response.status_code == 200:
+                        schema_path.write_bytes(response.content)
+                        self._rate_limit()
+                        logger.debug(f"✅ Downloaded schema: {schema_filename}")
+                    else:
+                        logger.warning(f"Schema not found at {schema_url} (HTTP {response.status_code})")
+                except Exception as e:
+                    logger.warning(f"Failed to download schema {schema_filename}: {e}")
+                    
+        except Exception as e:
+            logger.warning(f"Error extracting/downloading schemas: {e}")
+            # Don't fail the whole download if schema extraction fails
     
     def download_from_url(self, url: str, ticker: str, year: int) -> Optional[Path]:
         """

@@ -29,12 +29,27 @@ if os.getenv('DATABASE_URL'):
     DATABASE_URL = os.getenv('DATABASE_URL')
     DATABASE_URI = DATABASE_URL
 else:
-    # Local or Docker - build from components
-    POSTGRES_USER = os.getenv('POSTGRES_USER', 'superset')
-    POSTGRES_PASSWORD = os.getenv('POSTGRES_PASSWORD', 'superset')
-    POSTGRES_HOST = os.getenv('POSTGRES_HOST', '127.0.0.1')
-    POSTGRES_PORT = os.getenv('POSTGRES_PORT', '5432')
-    POSTGRES_DB = os.getenv('POSTGRES_DB', 'finsight_dev')
+    # Check for Railway PostgreSQL environment variables
+    railway_host = os.getenv('RAILWAY_POSTGRES_HOST')
+    railway_port = os.getenv('RAILWAY_POSTGRES_PORT')
+    railway_user = os.getenv('RAILWAY_POSTGRES_USER')
+    railway_password = os.getenv('RAILWAY_POSTGRES_PASSWORD')
+    railway_db = os.getenv('RAILWAY_POSTGRES_DB')
+    
+    if railway_host and railway_user:
+        # Railway environment detected
+        POSTGRES_HOST = railway_host
+        POSTGRES_PORT = railway_port or '5432'
+        POSTGRES_USER = railway_user
+        POSTGRES_PASSWORD = railway_password
+        POSTGRES_DB = railway_db or 'railway'
+    else:
+        # Local or Docker - build from components
+        POSTGRES_USER = os.getenv('POSTGRES_USER', 'superset')
+        POSTGRES_PASSWORD = os.getenv('POSTGRES_PASSWORD', 'superset')
+        POSTGRES_HOST = os.getenv('POSTGRES_HOST', '127.0.0.1')
+        POSTGRES_PORT = os.getenv('POSTGRES_PORT', '5432')
+        POSTGRES_DB = os.getenv('POSTGRES_DB', 'finsight')  # Changed default from finsight_dev to finsight
     
     # Build connection string
     if POSTGRES_PASSWORD:

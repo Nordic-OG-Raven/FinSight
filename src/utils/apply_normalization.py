@@ -3,10 +3,14 @@ Apply taxonomy normalization to existing data in PostgreSQL star schema.
 
 This script updates the normalized_label column in dim_concepts table.
 """
+import sys
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import psycopg2
-from taxonomy_mappings import get_normalized_label
-import sys
+from src.utils.taxonomy_mappings import get_normalized_label
 import os
 
 

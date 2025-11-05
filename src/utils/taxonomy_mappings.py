@@ -14,33 +14,57 @@ CONCEPT_MAPPINGS = {
     # ============================================================================
     
     "revenue": [
-        "Revenues",  # Total revenue (US-GAAP)
+        "Revenues",  # Total revenue (may include contract + collaborative arrangement revenue)
         "Revenue",   # Total revenue (IFRS)
+        "RevenueFromContractWithCustomerIncludingAssessedTax",  # Total contract revenue INCLUDING assessed tax (alternative format)
         "SalesRevenueNet",
         "SalesRevenueGoodsNet",
         "SalesRevenueServicesNet",
     ],
     
     "revenue_from_contracts": [
-        "RevenueFromContractWithCustomerExcludingAssessedTax",  # Contract revenue only (component)
-        "RevenueFromContractWithCustomerIncludingAssessedTax",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",  # Contract revenue only (component of total revenue, excludes collaborative arrangements)
+    ],
+    
+    "revenue_from_collaborative_arrangements": [
+        "RevenueFromCollaborativeArrangementExcludingRevenueFromContractWithCustomer",  # Collaborative arrangement revenue (component, excludes contract revenue)
+    ],
+    
+    "revenue_from_sale_of_goods": [
+        "RevenueFromSaleOfGoods",  # IFRS variant - product revenue component (SNY uses this as main component)
+    ],
+    
+    "other_revenue": [
+        "OtherRevenue",  # IFRS variant - other revenue component (SNY - sums with RevenueFromSaleOfGoods)
     ],
     
     "cost_of_revenue": [
-        "CostOfRevenue",
-        "CostOfGoodsAndServicesSold",
-        "CostOfSales",  # IFRS
+        "CostOfRevenue",  # Generic cost of revenue
+    ],
+    
+    "cost_of_goods_and_services_sold": [
+        "CostOfGoodsAndServicesSold",  # More specific: goods AND services
+    ],
+    
+    "cost_of_sales": [
+        "CostOfSales",  # IFRS equivalent
         "CostOfGoodsSold",
     ],
     
     "gross_profit": [
         "GrossProfit",
         "GrossProfitLoss",
+        # Note: Can be calculated as revenue - cost_of_revenue for companies that don't report it directly
     ],
     
     "operating_expenses": [
         "OperatingExpenses",
         "OperatingCostsAndExpenses",
+    ],
+    
+    "costs_and_expenses": [
+        "CostsAndExpenses",  # AMZN, WMT use this (total costs, not just operating)
+        "TotalCostsAndExpenses",
     ],
     
     "research_development": [
@@ -65,6 +89,8 @@ CONCEPT_MAPPINGS = {
     
     "operating_income": [
         "OperatingIncomeLoss",
+        "ProfitLossFromOperatingActivities",  # IFRS variant (NVO, SNY)
+        "ProfitLossFromOperatingActivitiesContinuingOperations",
     ],
     
     "interest_expense": [
@@ -114,14 +140,13 @@ CONCEPT_MAPPINGS = {
     
     "net_income": [
         "NetIncomeLoss",
-        "ProfitLoss",  # IFRS equivalent
-        "ProfitLossAttributableToOwnersOfParent",  # IFRS variant
+        "ProfitLossAttributableToOwnersOfParent",  # IFRS variant (excludes NCI)
         "NetIncome",
     ],
     
     "net_income_to_common": [
-        "NetIncomeLossAvailableToCommonStockholdersBasic",
-        "NetIncomeLossAvailableToCommonStockholdersDiluted",
+        "NetIncomeLossAvailableToCommonStockholdersBasic",  # Use basic as canonical (diluted is same value, different share count)
+        "NetIncomeLossAvailableToCommonStockholdersDiluted",  # Map to basic (same underlying net income value)
     ],
     
     "eps_basic": [
@@ -156,7 +181,10 @@ CONCEPT_MAPPINGS = {
     
     "cash_and_equivalents": [
         "CashAndCashEquivalentsAtCarryingValue",
+        "CashAndCashEquivalents",  # IFRS variant (NVO, SNY)
+        "CashAndDueFromBanks",  # Bank-specific (BAC, JPM) - semantically equivalent to cash_and_equivalents
         "CashAndBankBalancesAtCentralBanks",
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashAndRestrictedCashEquivalents",  # When it represents total cash
     ],
     
     "cash": [
@@ -170,9 +198,20 @@ CONCEPT_MAPPINGS = {
     ],
     
     "accounts_receivable": [
-        "AccountsReceivableNet",
-        "AccountsReceivableNetCurrent",
-        "TradeAndOtherCurrentReceivables",
+        "AccountsReceivableNet",  # Total accounts receivable (current + noncurrent)
+        # Bank-specific: Financing receivables are banks' equivalent of accounts receivable
+        # Use the main concept (before allowance), others are components/variants
+        "FinancingReceivableExcludingAccruedInterestBeforeAllowanceForCreditLoss",  # BAC/JPM - main concept
+        # Other variants are components/variants - will get component labels via taxonomy child detection
+        "ReceivablesNet",  # IFRS equivalent - total
+        "TradeReceivables",  # IFRS trade receivables
+        "TradeAndOtherCurrentReceivables",  # IFRS variant
+        "CurrentTradeReceivables",  # IFRS variant (NVO, SNY)
+    ],
+    
+    "accounts_receivable_current": [
+        "AccountsReceivableNetCurrent",  # Current-only accounts receivable
+        "ReceivablesNetCurrent",  # IFRS current-only
     ],
     
     "inventory": [
@@ -187,6 +226,8 @@ CONCEPT_MAPPINGS = {
     
     "property_plant_equipment": [
         "PropertyPlantAndEquipmentNet",
+        "PropertyPlantAndEquipment",  # IFRS variant (SNY)
+        "PropertyPlantAndEquipmentIncludingRightofuseAssets",  # IFRS variant with right-of-use (NVO)
         "PropertyPlantAndEquipmentAndFinanceLeaseRightOfUseAssetAfterAccumulatedDepreciationAndAmortization",
     ],
     
@@ -217,18 +258,35 @@ CONCEPT_MAPPINGS = {
     ],
     
     "total_assets": [
-        "Assets",
-        "LiabilitiesAndStockholdersEquity",  # Balance sheet total (Assets = L + E)
+        "Assets",  # Assets side of balance sheet
+        # Note: LiabilitiesAndStockholdersEquity maps to total_assets_equation (same value, different side)
+    ],
+    
+    "total_assets_equation": [
+        "LiabilitiesAndStockholdersEquity",  # Balance sheet equation (Assets = L + E) - same value as Assets
     ],
     
     # ============================================================================
     # BALANCE SHEET - LIABILITIES
     # ============================================================================
     
+    "accounts_payable_and_accrued_liabilities": [
+        "AccountsPayableAndAccruedLiabilitiesCurrent",  # Combined line item (accounts payable + accrued liabilities)
+    ],
+    
     "accounts_payable": [
         "AccountsPayableCurrent",
-        "AccountsPayableAndAccruedLiabilitiesCurrent",  # KO uses combined line item
+        "AccountsPayableTradeCurrent",  # Trade-only accounts payable (subset of combined)
         "TradeAndOtherCurrentPayables",
+        "AccountsPayableAndOtherAccruedLiabilities",  # Bank-specific (JPM) - semantically equivalent to accounts_payable
+        # AccruedLiabilitiesAndOtherLiabilities removed from explicit mapping
+        # This is a parent concept - when both exist (ASML), causes duplicates
+        # Universal solution: Let it auto-generate to accrued_liabilities_and_other_liabilities
+        # Then calculate accounts_payable from it for companies missing accounts_payable (universal fix)
+        "TradeAndOtherCurrentPayablesToTradeSuppliers",  # IFRS variant (NVO, SNY)
+        "TradePayables",
+        "AccountsPayableTrade",
+        "AccountsPayableTradeCurrent",
     ],
     
     "accrued_liabilities_current": [
@@ -260,13 +318,27 @@ CONCEPT_MAPPINGS = {
     ],
     
     "current_liabilities": [
-        "LiabilitiesCurrent",
-        "CurrentLiabilities",
+        "LiabilitiesCurrent",  # US-GAAP - current liabilities only
+        # CurrentLiabilities removed - handled by context_specific_patterns
+        # (different values, different scope - keep separate)
+        # Bank-specific: Deposit liabilities are COMPONENTS of current liabilities
+        # They will be auto-detected as children and get component labels
+        # (Do NOT map here - let component exclusion handle them)
+    ],
+    
+    "total_liabilities": [
+        "Liabilities",
+        "LiabilitiesTotal",
+        # NOTE: CurrentLiabilities removed - values don't match total or current
+        # Let it auto-generate to 'current_liabilities' (different label) to prevent incorrect merging
+        # Note: For IFRS companies, can be calculated as current_liabilities + noncurrent_liabilities
+        # But we don't map components directly - they need to be calculated in views/queries
     ],
     
     "long_term_debt": [
         "LongTermDebt",
         "LongTermBorrowings",
+        "LongtermBorrowings",  # IFRS variant (NVO)
     ],
     
     "long_term_debt_noncurrent": [
@@ -275,12 +347,11 @@ CONCEPT_MAPPINGS = {
     
     "noncurrent_liabilities": [
         "LiabilitiesNoncurrent",
-        "NoncurrentLiabilities",
-    ],
-    
-    "total_liabilities": [
-        "Liabilities",
-        "LiabilitiesTotal",
+        # NoncurrentLiabilities removed - handled by context_specific_patterns
+        # (different values, different scope - keep separate)
+        # Bank-specific: Long-term debt is noncurrent liability for banks
+        # Note: LongTermDebt maps to long_term_debt, but for validation purposes,
+        # banks with LongTermDebt have noncurrent liabilities (can calculate from total - current)
     ],
     
     # ============================================================================
@@ -307,13 +378,35 @@ CONCEPT_MAPPINGS = {
     ],
     
     "stockholders_equity": [
-        "StockholdersEquity",
-        "EquityAttributableToOwnersOfParent",  # IFRS equivalent
-        "Equity",  # IFRS simple equity
+        "StockholdersEquity",  # US-GAAP (excludes NCI)
+        "TotalEquity",  # Alternative IFRS name for total equity (excludes NCI)
+        "EquityAttributableToOwnersOfParent",  # IFRS (excludes NCI, more specific)
+        # NOTE: "Equity" (IFRS) may include or exclude NCI depending on company
+        #       If Equity > EquityAttributableToOwnersOfParent → includes NCI → map to stockholders_equity_including_noncontrolling_interest
+        #       If Equity ≈ EquityAttributableToOwnersOfParent → excludes NCI → map to stockholders_equity
+        #       For SNY: Equity includes NCI, so it's handled separately
+        #       For NVO: Equity excludes NCI, maps here via equity_total → stockholders_equity (via universal metrics variant)
+    ],
+    
+    "equity_attributable_to_parent": [
+        "EquityAttributableToOwnersOfParent",  # IFRS (excludes NCI, more specific)
+    ],
+    
+    "equity_total": [
+        "Equity",  # IFRS simple equity (may differ from EquityAttributableToOwnersOfParent when NCI exists)
+        # Note: This is used as variant for stockholders_equity when company doesn't have US-GAAP structure
     ],
     
     "stockholders_equity_including_noncontrolling_interest": [
-        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+        "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",  # US-GAAP (includes NCI)
+        "EquityIncludingPortionAttributableToNoncontrollingInterest",  # US-GAAP variant
+        "Equity",  # IFRS simple equity when it includes NCI (SNY case: Equity > EquityAttributableToOwnersOfParent)
+        # NOTE: This requires runtime check - we handle via normalization logic or calculated comparison
+        # For now, map Equity to this when company reports both Equity and EquityAttributableToOwnersOfParent with different values
+    ],
+    
+    "net_income_including_noncontrolling_interest": [
+        "ProfitLoss",  # IFRS/US-GAAP - includes NCI (taxonomy label: "Net Income (Loss), Including Portion Attributable to Noncontrolling Interest")
     ],
     
     "noncontrolling_interest": [
@@ -332,21 +425,30 @@ CONCEPT_MAPPINGS = {
     # ============================================================================
     
     "operating_cash_flow": [
-        "NetCashProvidedByUsedInOperatingActivities",
-        "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
-        "CashFlowsFromUsedInOperatingActivities",
+        "NetCashProvidedByUsedInOperatingActivities",  # Total (includes discontinued operations)
+        "CashFlowsFromUsedInOperatingActivities",  # IFRS variant
+    ],
+    
+    "operating_cash_flow_continuing_operations": [
+        "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",  # Continuing operations only
     ],
     
     "investing_cash_flow": [
-        "NetCashProvidedByUsedInInvestingActivities",
-        "NetCashProvidedByUsedInInvestingActivitiesContinuingOperations",
-        "CashFlowsFromUsedInInvestingActivities",
+        "NetCashProvidedByUsedInInvestingActivities",  # Total (includes discontinued operations)
+        "CashFlowsFromUsedInInvestingActivities",  # IFRS variant
+    ],
+    
+    "investing_cash_flow_continuing_operations": [
+        "NetCashProvidedByUsedInInvestingActivitiesContinuingOperations",  # Continuing operations only
     ],
     
     "financing_cash_flow": [
-        "NetCashProvidedByUsedInFinancingActivities",
-        "NetCashProvidedByUsedInFinancingActivitiesContinuingOperations",
-        "CashFlowsFromUsedInFinancingActivities",
+        "NetCashProvidedByUsedInFinancingActivities",  # Total (includes discontinued operations)
+        "CashFlowsFromUsedInFinancingActivities",  # IFRS variant
+    ],
+    
+    "financing_cash_flow_continuing_operations": [
+        "NetCashProvidedByUsedInFinancingActivitiesContinuingOperations",  # Continuing operations only
     ],
     
     "capex": [
@@ -362,9 +464,12 @@ CONCEPT_MAPPINGS = {
     ],
     
     "stock_repurchased": [
-        "PaymentsForRepurchaseOfCommonStock",
-        "TreasuryStockValueAcquiredCostMethod",
-        "PaymentsForRepurchaseOfEquity",
+        "PaymentsForRepurchaseOfCommonStock",  # Cash flow: payments for repurchases
+        "PaymentsForRepurchaseOfEquity",  # Cash flow variant
+    ],
+    
+    "treasury_stock_value_acquired": [
+        "TreasuryStockValueAcquiredCostMethod",  # Balance sheet: treasury stock at cost (different from cash flow payments)
     ],
     
     "free_cash_flow": [
@@ -430,9 +535,12 @@ CONCEPT_MAPPINGS = {
         "AvailableForSaleDebtSecuritiesAmortizedCostBasis",
     ],
     
+    "equity_securities_fvni_current": [
+        "EquitySecuritiesFvNi",  # Current-only (taxonomy label: "Equity Securities, FV-NI, Current")
+    ],
+    
     "equity_securities_fvni": [
-        "EquitySecuritiesFvNi",
-        "EquitySecuritiesFvNiCurrentAndNoncurrent",  # Total
+        "EquitySecuritiesFvNiCurrentAndNoncurrent",  # Total (current + noncurrent)
     ],
     
     "equity_securities_fvni_noncurrent": [
@@ -614,10 +722,12 @@ CONCEPT_MAPPINGS = {
         "DefinedBenefitPlanNetPeriodicBenefitCost",
     ],
     
-    "pension_discount_rate": [
-        "DefinedBenefitPlanAssumptionsUsedCalculatingBenefitObligationDiscountRate",
-        "DefinedBenefitPlanAssumptionsUsedCalculatingNetPeriodicBenefitCostDiscountRate",
-    ],
+    # Pension discount rate removed - handled by context_specific_patterns
+    # (different contexts: obligation vs periodic cost - keep separate)
+    # "pension_discount_rate": [
+    #     "DefinedBenefitPlanAssumptionsUsedCalculatingBenefitObligationDiscountRate",
+    #     "DefinedBenefitPlanAssumptionsUsedCalculatingNetPeriodicBenefitCostDiscountRate",
+    # ],
     
     "pension_expected_return_rate": [
         "DefinedBenefitPlanAssumptionsUsedCalculatingNetPeriodicBenefitCostExpectedLongTermReturnOnAssets",
@@ -635,10 +745,12 @@ CONCEPT_MAPPINGS = {
         "PropertyPlantAndEquipmentGross",
     ],
     
-    "ppe_net_alternative": [
-        "PropertyPlantAndEquipment",
-        "PropertyPlantAndEquipmentIncludingRightofuseAssets",
-    ],
+    # DEPRECATED: PropertyPlantAndEquipment and PropertyPlantAndEquipmentIncludingRightofuseAssets
+    # now map to property_plant_equipment (see above)
+    # "ppe_net_alternative": [
+    #     "PropertyPlantAndEquipment",
+    #     "PropertyPlantAndEquipmentIncludingRightofuseAssets",
+    # ],
     
     "ppe_useful_life": [
         "PropertyPlantAndEquipmentUsefulLife",
@@ -668,9 +780,12 @@ CONCEPT_MAPPINGS = {
     # INTANGIBLE ASSETS (DETAILED)
     # ============================================================================
     
-    "intangible_assets_alternative": [
-        "IntangibleAssetsOtherThanGoodwill",
-        "OtherIntangibleAssets",
+    "intangible_assets_other_than_goodwill": [
+        "IntangibleAssetsOtherThanGoodwill",  # Explicit "other than goodwill"
+    ],
+    
+    "other_intangible_assets": [
+        "OtherIntangibleAssets",  # Generic "other" category
     ],
     
     "intangible_assets_gross": [
@@ -879,9 +994,10 @@ CONCEPT_MAPPINGS = {
     ],
     
     "oci_total": [
-        "OtherComprehensiveIncomeLossNetOfTaxPortionAttributableToParent",
-        "OtherComprehensiveIncomeLossNetOfTax",
+        "OtherComprehensiveIncomeLossNetOfTax",  # Total OCI
         "OtherComprehensiveIncome",
+        # OtherComprehensiveIncomeLossNetOfTaxPortionAttributableToParent removed
+        # (parent-only portion, different from total - keep separate)
     ],
     
     "oci_tax": [
@@ -938,9 +1054,10 @@ CONCEPT_MAPPINGS = {
         "CashAndCashEquivalentsFairValueDisclosure",
     ],
     
-    "cash_alternative_ifrs": [
-        "CashAndCashEquivalents",
-    ],
+    # DEPRECATED: CashAndCashEquivalents now maps to cash_and_equivalents
+    # "cash_alternative_ifrs": [
+    #     "CashAndCashEquivalents",
+    # ],
     
     # ============================================================================
     # WORKING CAPITAL CHANGES
@@ -983,9 +1100,13 @@ CONCEPT_MAPPINGS = {
         "RightofuseAssets",
     ],
     
+    # NOTE: LeaseLiabilities removed from mapping to avoid ASML duplicate conflict
+    # LeaseLiabilities (IFRS/custom) will auto-generate to 'lease_liabilities'
+    # OperatingLeaseLiability (US-GAAP) maps to 'operating_lease_liability'
+    # They're semantically equivalent but kept separate when both exist (ASML case)
     "operating_lease_liability": [
         "OperatingLeaseLiability",
-        "LeaseLiabilities",
+        # "LeaseLiabilities",  # Removed: auto-generates to 'lease_liabilities' to avoid ASML duplicates
     ],
     
     # ============================================================================
@@ -1107,13 +1228,58 @@ CONCEPT_MAPPINGS = {
 }
 
 
+# Cache for taxonomy parent-child relationships (loaded once, reused)
+_taxonomy_child_to_parent_cache = None
+
+def _load_taxonomy_child_to_parent() -> dict:
+    """Load parent-child relationships from taxonomy calculation linkbase (cached)."""
+    global _taxonomy_child_to_parent_cache
+    
+    if _taxonomy_child_to_parent_cache is not None:
+        return _taxonomy_child_to_parent_cache
+    
+    import json
+    from pathlib import Path
+    
+    # Find taxonomy directory (relative to this file)
+    taxonomy_dir = Path(__file__).parent.parent.parent / 'data' / 'taxonomies'
+    
+    calc_files = list(taxonomy_dir.glob("*/*-calc.json")) + list(taxonomy_dir.glob("*-calc.json"))
+    
+    child_to_parent = {}
+    
+    for calc_file in calc_files:
+        try:
+            with open(calc_file, 'r') as f:
+                data = json.load(f)
+            
+            relationships = data.get('relationships', [])
+            
+            for rel in relationships:
+                parent_name = rel.get('parent_concept', '')
+                child_name = rel.get('child_concept', '')
+                
+                # Remove namespace prefixes if present
+                parent_name = parent_name.split(':')[-1] if ':' in parent_name else parent_name
+                child_name = child_name.split(':')[-1] if ':' in child_name else child_name
+                
+                if parent_name and child_name:
+                    child_to_parent[child_name] = parent_name
+        except Exception:
+            continue  # Skip if file can't be read
+    
+    _taxonomy_child_to_parent_cache = child_to_parent
+    return child_to_parent
+
+
 # Reverse mapping: concept -> normalized_label
 def get_normalized_label(concept: str) -> str | None:
     """
     Get the normalized label for a given concept name.
     
     Uses explicit mappings first, then auto-generates from concept name as fallback.
-    Ensures uniqueness by preserving semantic distinctions, not blindly truncating.
+    IMPORTANT: If concept is a CHILD in taxonomy calculation linkbase and parent is mapped,
+    gives component-specific label to prevent duplicates.
     
     Args:
         concept: XBRL concept name (e.g., 'RevenueFromContractWithCustomerExcludingAssessedTax')
@@ -1124,10 +1290,126 @@ def get_normalized_label(concept: str) -> str | None:
     import re
     import hashlib
     
-    # Try explicit mappings first (curated, high-quality)
-    for normalized, concepts in CONCEPT_MAPPINGS.items():
-        if concept in concepts:
+    # Check explicit mappings FIRST (before child check)
+    # This ensures bank-specific concepts (e.g., CashAndDueFromBanks) map to universal metrics
+    # even if they're children in taxonomy
+    # EXCEPTION: If concept is a PARENT in taxonomy and company also has the child mapped to same label,
+    # don't map the parent (to avoid duplicates)
+    for normalized, concepts_list in CONCEPT_MAPPINGS.items():
+        if concept in concepts_list:
+            # Special case: AccruedLiabilitiesAndOtherLiabilities is a parent that includes AccountsPayableCurrent
+            # If company has both, don't map AccruedLiabilitiesAndOtherLiabilities to accounts_payable
+            # (AccountsPayableCurrent is the actual accounts_payable, AccruedLiabilitiesAndOtherLiabilities is the parent)
+            if concept == 'AccruedLiabilitiesAndOtherLiabilities' and normalized == 'accounts_payable':
+                # Check if this concept is a parent in taxonomy
+                child_to_parent = _load_taxonomy_child_to_parent()
+                # Check if AccountsPayableCurrent is a child of AccruedLiabilitiesAndOtherLiabilities
+                if 'AccountsPayableCurrent' in child_to_parent:
+                    parent_name = child_to_parent['AccountsPayableCurrent']
+                    # If AccountsPayableCurrent is a child of AccruedLiabilitiesAndOtherLiabilities,
+                    # then AccruedLiabilitiesAndOtherLiabilities is a parent - don't map it
+                    # (let it auto-generate to its own label to avoid duplicates)
+                    if parent_name == 'AccruedLiabilitiesAndOtherLiabilities':
+                        # Skip mapping - let it auto-generate
+                        break
             return normalized
+    
+    # Special handling for context-specific variants that should NOT share labels
+    # These are concepts that appear similar but represent different contexts/uses
+    context_specific_patterns = {
+        # Pension discount rate: different contexts (obligation vs periodic cost)
+        'DefinedBenefitPlanAssumptionsUsedCalculatingBenefitObligationDiscountRate': 'pension_discount_rate_obligation',
+        'DefinedBenefitPlanAssumptionsUsedCalculatingNetPeriodicBenefitCostDiscountRate': 'pension_discount_rate_periodic_cost',
+        # Operating lease: LeaseLiabilities (IFRS/custom) vs OperatingLeaseLiability (US-GAAP)
+        # They're semantically the same, but when both exist for same company (ASML), keep separate
+        # to avoid duplicates. LeaseLiabilities will auto-generate to 'lease_liabilities' which is
+        # different from 'operating_lease_liability', but we can also handle explicitly if needed.
+        # CurrentLiabilities vs LiabilitiesCurrent: Different values (47-85% difference) - NOT synonyms
+        # CurrentLiabilities values are much larger, likely different scope or calculation
+        'CurrentLiabilities': 'current_liabilities_ifrs_variant',  # Keep separate to prevent incorrect merging
+        'NoncurrentLiabilities': 'noncurrent_liabilities_ifrs_variant',  # Similar issue - keep separate
+        # OCI: Parent-only portion vs total OCI (different scopes)
+        'OtherComprehensiveIncomeLossNetOfTaxPortionAttributableToParent': 'oci_total_parent_only',  # Keep separate from total OCI
+        # AccruedLiabilitiesAndOtherLiabilities: Parent concept that includes AccountsPayableCurrent
+        # When both exist (ASML), causes duplicates if both map to accounts_payable
+        # Solution: Always map AccruedLiabilitiesAndOtherLiabilities to separate label
+        # Then calculate accounts_payable from it for companies missing accounts_payable (universal fix)
+        'AccruedLiabilitiesAndOtherLiabilities': 'accrued_liabilities_and_other_liabilities',  # Always separate to avoid duplicates
+    }
+    
+    if concept in context_specific_patterns:
+        return context_specific_patterns[concept]
+    
+    # Check if this concept is a CHILD in taxonomy calculation linkbase
+    # If so, generate component-specific label to prevent duplicates with parent
+    # NOTE: Explicit mappings checked FIRST above - this only applies if no explicit mapping exists
+    child_to_parent = _load_taxonomy_child_to_parent()
+    
+    if concept in child_to_parent:
+        parent_name = child_to_parent[concept]
+        
+        # Generate component-specific label for child concept
+        # This ensures child doesn't get same label as parent (preventing duplicates)
+        s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', concept)
+        component_label = re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
+        
+        # Also get what parent's label would be (to ensure uniqueness)
+        parent_label = None
+        
+        # Check explicit mappings first
+        for normalized, concepts_list in CONCEPT_MAPPINGS.items():
+            if parent_name in concepts_list:
+                parent_label = normalized
+                break
+        
+        # If parent not in explicit mappings, generate parent label
+        if parent_label is None:
+            s1_parent = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', parent_name)
+            parent_label = re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1_parent).lower()
+        
+        # Ensure component label is different from parent label
+        if component_label == parent_label:
+            # Add component suffix to ensure uniqueness
+            component_label = f"{component_label}_component"
+        
+        # Return component-specific label (prevents duplicate with parent)
+        # This preserves data accessibility - component has its own queryable label
+        return component_label
+    
+    # Special case: Bank deposit liabilities are components of current_liabilities
+    # Even if not in taxonomy child-to-parent, they should get component labels
+    bank_deposit_patterns = [
+        'InterestBearingDepositLiabilitiesDomestic',
+        'InterestBearingDepositLiabilitiesForeign',
+        'NoninterestBearingDepositLiabilitiesDomestic',
+        'NoninterestBearingDepositLiabilitiesForeign',
+    ]
+    
+    if concept in bank_deposit_patterns:
+        # Generate component-specific label (e.g., interest_bearing_deposit_liabilities_domestic)
+        s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', concept)
+        component_label = re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
+        # This will be different from 'current_liabilities' (e.g., interest_bearing_deposit_liabilities_domestic)
+        return component_label
+    
+    # Special case: Financing receivable variants (components/variants)
+    # Only the main concept maps to accounts_receivable, variants get component labels
+    financing_variants = [
+        'FinancingReceivableExcludingAccruedInterestBeforeAllowanceForCreditLossesNetOfDeferredIncome',
+        'FinancingReceivableAccruedInterestBeforeAllowanceForCreditLoss',
+    ]
+    
+    if concept in financing_variants:
+        # Generate component-specific label
+        s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', concept)
+        component_label = re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
+        # Ensure it's different from accounts_receivable
+        if component_label == 'accounts_receivable' or component_label.startswith('accounts_receivable'):
+            component_label = 'financing_receivable_' + component_label.replace('accounts_receivable', '').strip('_')
+        return component_label
+    
+    # Explicit mappings already checked above (before child check)
+    # This section removed - check moved to top of function for bank concept support
     
     # Fallback: Auto-generate normalized label from concept name
     # This ensures 100% coverage while prioritizing curated mappings for key metrics

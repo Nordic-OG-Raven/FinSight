@@ -76,16 +76,27 @@ This is a **portfolio project** showcasing:
 3. **Data Normalization & Standardization**
    - Normalize units (thousands/millions) and currency across periods
    - Standardize concept labels across US-GAAP, IFRS, local taxonomies
+   - **Taxonomy-Driven Normalization:**
+     - Download official taxonomies (US-GAAP, IFRS, ESEF) with calculation and label linkbases
+     - Extract concept synonyms from taxonomy labels (concepts with identical labels)
+     - Use taxonomy-defined calculation relationships for component-to-total mapping
+     - Manual curation of universal metrics (revenue, equity, liabilities) with accounting standards verification
+     - Deterministic and auditable - every mapping documented and verified
    - Fiscal period alignment (calendar vs fiscal year end)
    - Handle scale conversions and unit consistency
 
 4. **Validation & Quality Assurance**
    - Validate **accounting identities** (Assets = Liabilities + Equity)
    - **Cross-statement validation** (net income → cash flow, etc.)
-   - Detect duplicate or conflicting facts
+   - Detect duplicate or conflicting facts (user-facing duplicates flagged for manual review)
+   - **Universal Metrics Completeness Check:**
+     - Verify all companies have critical metrics (revenue, equity, liabilities, etc.)
+     - Automatically suggest missing mappings from taxonomy labels (development tool)
+     - Flag missing metrics for manual curation (not auto-fixed)
    - Calculate **completeness score** per filing (% of expected facts extracted)
    - Flag anomalies and outliers for review
    - Generate **data quality report** per filing
+   - **Pipeline Integration:** Validation runs automatically after data loading
 
 5. **Data Warehouse (PostgreSQL)**
    - Store ALL extracted facts in **PostgreSQL** (primary storage)
@@ -143,6 +154,12 @@ This is a **portfolio project** showcasing:
 - Multi-language reports (English only in Phase 1)
 - OCR for scanned PDFs (Phase 2 feature)
 - Real-time market data integration
+- **Pure EU companies filing only with ESMA** (not SEC-listed)
+  - ESMA filings are distributed across 27+ national competent authority (NCA) websites
+  - No centralized API like SEC EDGAR
+  - Would require building/maintaining 27+ separate downloaders
+  - Current solution: EU companies listed on US exchanges (20-F filers) work via SEC pipeline
+  - **Future**: European Single Access Point (ESAP) launching 2026 will provide unified access
 
 ---
 

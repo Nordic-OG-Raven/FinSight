@@ -41,10 +41,11 @@ echo ""
 
 # Check if database exists, create if not
 echo "🔍 Checking if database '$DB_NAME' exists..."
-DB_EXISTS=$(docker exec superset_db psql -U "$DB_USER" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME';")
+DB_EXISTS=$(docker exec superset_db psql -U "$DB_USER" -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname='$DB_NAME';" 2>/dev/null || echo "")
 if [ "$DB_EXISTS" != "1" ]; then
     echo "📦 Creating database '$DB_NAME'..."
-    docker exec superset_db psql -U "$DB_USER" -d postgres -c "CREATE DATABASE $DB_NAME;"
+    docker exec superset_db psql -U "$DB_USER" -d postgres -c "CREATE DATABASE $DB_NAME;" 2>/dev/null || \
+    docker exec superset_db psql -U postgres -d postgres -c "CREATE DATABASE $DB_NAME;"
     echo "✅ Database created"
 else
     echo "✅ Database already exists"

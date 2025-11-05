@@ -266,33 +266,9 @@ def main():
         help="Select the range of fiscal years to analyze"
     )
     
-    # 3. Metric filter (multiselect has built-in search)
-    # CRITICAL: Only show metrics that have data for selected companies
-    # This prevents "phantom" metrics in dropdown that would return zero results
-    all_concepts_raw = get_normalized_labels_for_companies(
-        selected_companies,
-        start_year=year_range[0],
-        end_year=year_range[1]
-    )
-    
-    # Create human-readable options with mapping back to raw values
-    concept_display_map = {humanize_label(c): c for c in all_concepts_raw}
-    human_readable_options = sorted(concept_display_map.keys())
-    
-    # Show humanized labels in dropdown
-    selected_concepts_human = st.sidebar.multiselect(
-        "Metrics",
-        options=human_readable_options,
-        default=[],
-        help=f"Select specific metrics to analyze. Leave empty to see all metrics. Only shows {len(human_readable_options)} metrics available for selected companies."
-    )
-    
-    # Convert back to database format for querying
-    selected_concepts = [concept_display_map[h] for h in selected_concepts_human]
-    
     st.sidebar.markdown("---")
     
-    # 4. Granularity selector (dropdown instead of radio)
+    # 3. Granularity selector (dropdown instead of radio) - BEFORE metrics for better UX flow
     st.sidebar.markdown("**Granularity**")
     
     granularity_options = {
@@ -323,6 +299,32 @@ def main():
     
     min_hierarchy_level = granularity_options[selected_granularity_label]["value"]
     
+    st.sidebar.markdown("---")
+    
+    # 4. Metric filter (multiselect has built-in search)
+    # CRITICAL: Only show metrics that have data for selected companies
+    # This prevents "phantom" metrics in dropdown that would return zero results
+    all_concepts_raw = get_normalized_labels_for_companies(
+        selected_companies,
+        start_year=year_range[0],
+        end_year=year_range[1]
+    )
+    
+    # Create human-readable options with mapping back to raw values
+    concept_display_map = {humanize_label(c): c for c in all_concepts_raw}
+    human_readable_options = sorted(concept_display_map.keys())
+    
+    # Show humanized labels in dropdown
+    selected_concepts_human = st.sidebar.multiselect(
+        "Metrics",
+        options=human_readable_options,
+        default=[],
+        help=f"Select specific metrics to analyze. Leave empty to see all metrics. Only shows {len(human_readable_options)} metrics available for selected companies."
+    )
+    
+    # Convert back to database format for querying
+    selected_concepts = [concept_display_map[h] for h in selected_concepts_human]
+    
     # 5. Show segment breakdowns
     st.sidebar.markdown("---")
     show_segments = st.sidebar.checkbox(
@@ -333,7 +335,7 @@ def main():
     
     st.sidebar.markdown("---")
     
-    # 6. Advanced Options (moved to bottom)
+    # 6. Advanced Options (at bottom)
     with st.sidebar.expander("⚙️ Advanced Options"):
         show_all_concepts = st.checkbox(
             "Auditor view",
@@ -408,9 +410,16 @@ def main():
             f.parent_normalized_label,
             d.axis_name,
             d.member_name,
-            CASE WHEN f.dimension_id IS NULL THEN 'Total' ELSE 'Segment' END as data_type
+            CASE WHEN f.dimension_id IS NULL THEN 'Total' ELSE 'Segment' END as data_type,
+            t.period_label,
+            t.start_date as period_start,
+            t.end_date as period_end,
+            t.instant_date as period_instant,
+            t.period_type,
+            f.context_id
         FROM v_facts_hierarchical f
         LEFT JOIN dim_xbrl_dimensions d ON f.dimension_id = d.dimension_id
+        LEFT JOIN dim_time_periods t ON f.period_id = t.period_id
         WHERE 1=1
             """
         
@@ -469,6 +478,19 @@ def main():
         
         with engine.connect() as conn:
             df = pd.read_sql(text(query), conn, params=params)
+            
+            # Check if segments were requested but none exist
+            if show_segments and not df.empty:
+                # Check for segment data using data_type column (or axis_name/member_name columns)
+                has_segments = False
+                if 'data_type' in df.columns:
+                    has_segments = (df['data_type'] == 'Segment').any()
+                elif 'axis_name' in df.columns or 'member_name' in df.columns:
+                    # Check if any segment data exists
+                    has_segments = df['axis_name'].notna().any() if 'axis_name' in df.columns else False
+                
+                if not has_segments:
+                    st.info("ℹ️ **Note:** Segment breakdowns are enabled, but the selected metrics don't have segment-level data in the source filings. Showing consolidated totals only. Try selecting metrics like 'Revenue' or 'Operating Income' which typically have geographic/product breakdowns.")
             
             # Execute custom SQL query if provided (from Advanced Options)
             if custom_sql and run_custom_query:
@@ -536,6 +558,12 @@ def main():
     # Format data for display
     display_df = df.copy()
     
+    # Drop internal/technical columns that users don't need to see
+    columns_to_drop = ['hierarchy_level', 'parent_normalized_label']
+    for col in columns_to_drop:
+        if col in display_df.columns:
+            display_df = display_df.drop(col, axis=1)
+    
     # Humanize normalized_label (snake_case -> Title Case)
     if 'normalized_label' in display_df.columns:
         display_df['label'] = display_df['normalized_label'].apply(
@@ -543,28 +571,56 @@ def main():
         )
         display_df = display_df.drop('normalized_label', axis=1)
     
-    # Handle segment/dimension columns - HIDE them if all values are None (not showing segments)
+    # Add period information if there are multiple periods for same metric (helps differentiate duplicates)
+    show_period_column = False
+    if 'period_label' in display_df.columns:
+        # Only show period column if:
+        # 1. There are multiple rows for same metric/company/year (suggests duplicates that need differentiation)
+        # 2. AND period_label has actual data (not all None/null)
+        has_period_data = display_df['period_label'].notna().any() and not (display_df['period_label'].astype(str) == 'None').all()
+        
+        if has_period_data:
+            if 'fiscal_year' in display_df.columns and 'label' in display_df.columns:
+                period_diff_needed = display_df.groupby(['company', 'label', 'fiscal_year']).size()
+                if (period_diff_needed > 1).any():
+                    show_period_column = True
+    
+    # Handle segment/dimension columns - Replace "None" with empty string for better readability
+    # Only hide columns if ALL values are None (pure consolidated view)
     if 'member_name' in display_df.columns:
         # Check if all values are None/null
-        if display_df['member_name'].isna().all() or (display_df['member_name'] == 'None').all():
+        if display_df['member_name'].isna().all() or (display_df['member_name'].astype(str) == 'None').all():
             display_df = display_df.drop('member_name', axis=1)  # Hide column entirely
         else:
-            # Humanize CamelCase in segment names
+            # Humanize CamelCase in segment names, replace None with empty string
             display_df['segment'] = display_df['member_name'].apply(
-                lambda x: humanize_camel_case(x[:37] + '...') if pd.notnull(x) and len(str(x)) > 40 else humanize_camel_case(x) if pd.notnull(x) else x
+                lambda x: '' if pd.isna(x) or str(x) == 'None' else (humanize_camel_case(x[:37] + '...') if len(str(x)) > 40 else humanize_camel_case(x))
             )
             display_df = display_df.drop('member_name', axis=1)
     
     if 'axis_name' in display_df.columns:
         # Check if all values are None/null
-        if display_df['axis_name'].isna().all() or (display_df['axis_name'] == 'None').all():
+        if display_df['axis_name'].isna().all() or (display_df['axis_name'].astype(str) == 'None').all():
             display_df = display_df.drop('axis_name', axis=1)  # Hide column entirely
         else:
-            # Humanize CamelCase in dimension names
+            # Humanize CamelCase in dimension names, replace None with empty string
             display_df['dimension'] = display_df['axis_name'].apply(
-                lambda x: humanize_camel_case(x[:37] + '...') if pd.notnull(x) and len(str(x)) > 40 else humanize_camel_case(x) if pd.notnull(x) else x
+                lambda x: '' if pd.isna(x) or str(x) == 'None' else (humanize_camel_case(x[:37] + '...') if len(str(x)) > 40 else humanize_camel_case(x))
             )
             display_df = display_df.drop('axis_name', axis=1)
+    
+    # Format period column if needed (only if we determined it should be shown)
+    if show_period_column and 'period_label' in display_df.columns:
+        display_df['period'] = display_df['period_label'].fillna('')
+        display_df = display_df.drop('period_label', axis=1)
+    elif 'period_label' in display_df.columns:
+        # Drop period_label if all values are None or we determined it's not needed
+        display_df = display_df.drop('period_label', axis=1)
+    
+    # Drop other period columns (users don't need raw dates)
+    for col in ['period_start', 'period_end', 'period_instant', 'period_type', 'context_id']:
+        if col in display_df.columns:
+            display_df = display_df.drop(col, axis=1)
     
     # Always drop data_type column - internal use only
     if 'data_type' in display_df.columns:
@@ -597,6 +653,8 @@ def main():
         column_order.append('label')
     if 'fiscal_year' in display_df.columns:
         column_order.append('fiscal_year')
+    if 'period' in display_df.columns:  # Show period when multiple periods exist for same metric
+        column_order.append('period')
     if 'value' in display_df.columns:
         column_order.append('value')
     if 'unit' in display_df.columns:
@@ -613,6 +671,33 @@ def main():
             column_order.append(col)
     
     display_df = display_df[column_order]
+    
+    # Sort to group consolidated totals with their segment breakdowns
+    # Sort by: company, metric (label), fiscal_year, then dimension (None/consolidated first), then segment
+    sort_columns = []
+    if 'company' in display_df.columns:
+        sort_columns.append('company')
+    if 'label' in display_df.columns:
+        sort_columns.append('label')
+    if 'fiscal_year' in display_df.columns:
+        sort_columns.append('fiscal_year')
+    if 'dimension' in display_df.columns:
+        # Sort so empty/consolidated comes first, then segments
+        display_df['_sort_dimension'] = display_df['dimension'].apply(
+            lambda x: 0 if pd.isna(x) or x == '' else 1
+        )
+        sort_columns.append('_sort_dimension')
+        sort_columns.append('dimension')
+    if 'segment' in display_df.columns:
+        sort_columns.append('segment')
+    if 'period' in display_df.columns:
+        sort_columns.append('period')
+    
+    if sort_columns:
+        display_df = display_df.sort_values(by=sort_columns, na_position='first')
+        # Drop temporary sort column
+        if '_sort_dimension' in display_df.columns:
+            display_df = display_df.drop('_sort_dimension', axis=1)
     
     # Display with custom column config
     st.dataframe(

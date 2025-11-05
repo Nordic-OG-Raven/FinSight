@@ -511,6 +511,25 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- ============================================================================
+-- CALCULATED TOTALS VIEWS (for Missing Universal Metrics)
+-- ============================================================================
+-- These views calculate totals from components when companies don't report
+-- them as single line items (especially IFRS companies).
+-- Example: SNY revenue = RevenueFromSaleOfGoods + OtherRevenue
+
+-- Note: This view is created here to ensure it exists after database initialization.
+-- For now, we keep the logic simple - actual calculated totals should be handled
+-- at query time or via materialized views if performance becomes an issue.
+
+-- The calculated totals logic is handled in the UI/data viewer queries
+-- by UNIONing actual facts with calculated values when needed.
+-- This keeps the schema clean and avoids redundant data storage.
+
+-- If performance requires it, we can create materialized views later:
+-- CREATE MATERIALIZED VIEW v_calculated_totals AS ...
+-- REFRESH MATERIALIZED VIEW v_calculated_totals;
+
+-- ============================================================================
 -- GRANTS (for Superset and application access)
 -- ============================================================================
 

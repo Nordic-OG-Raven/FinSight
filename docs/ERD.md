@@ -807,6 +807,53 @@ The system now implements Option 1 (Hierarchical Normalization) to solve the sem
 ✅ 4,046/10,088 facts have hierarchy metadata (40%)
 ✅ All companies report Level 3+ metrics
 
+### Validation Pipeline Integration
+
+**Integrated into ETL Pipeline (`database/load_financial_data.py`):**
+
+1. **Taxonomy Download** (if missing):
+   - Downloads US-GAAP, IFRS, ESEF taxonomies with calculation and label linkbases
+   - Extracts calculation relationships and concept labels
+
+2. **Taxonomy Hierarchy Loading**:
+   - Loads taxonomy calculation relationships into `rel_calculation_hierarchy`
+   - Infers hierarchy levels from taxonomy structure
+
+3. **Hierarchy Population**:
+   - Populates `hierarchy_level` for all concepts
+   - Uses taxonomy relationships + pattern matching fallback
+
+4. **Normalization Application**:
+   - Applies taxonomy mappings from `taxonomy_mappings.py`
+   - Updates `normalized_label` in `dim_concepts`
+
+5. **Taxonomy Synonym Application**:
+   - Applies taxonomy-driven synonyms (concepts with identical labels)
+   - Uses downloaded taxonomy label linkbases
+
+6. **Calculated Totals** (if needed):
+   - Calculates missing universal metric totals from components
+   - Uses taxonomy-defined calculation relationships (standard XBRL approach)
+
+7. **Comprehensive Validation**:
+   - Runs `DatabaseValidator.validate_all()` automatically
+   - Flags missing universal metrics for manual review
+   - Detects user-facing duplicates
+   - Generates data quality report
+
+8. **Mapping Suggestions** (development tool):
+   - `suggest_mappings_from_taxonomy_labels.py` flags potential missing mappings
+   - NOT auto-applied - requires manual curation and accounting standards verification
+   - Integrated to run after validation to suggest improvements
+
+**Key Principle:** All fixes are **lasting** - integrated into pipeline, not one-off scripts.
+When data is cleared/reloaded or new companies added, pipeline automatically handles:
+- Taxonomy normalization
+- Hierarchy population
+- Synonym application
+- Calculated totals
+- Validation checks
+
 ### Testing
 
 Visit http://localhost:8502/ and try:

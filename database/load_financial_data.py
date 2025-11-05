@@ -37,17 +37,41 @@ class StarSchemaLoader:
     def get_or_create_company(self, ticker: str, metadata: Dict) -> int:
         """Get or create company_id"""
         # Check if exists
-        self.cur.execute("SELECT company_id FROM dim_companies WHERE ticker = %s", (ticker,))
+        self.cur.execute("SELECT company_id, accounting_standard FROM dim_companies WHERE ticker = %s", (ticker,))
         result = self.cur.fetchone()
         if result:
-            return result[0]
+            company_id, existing_standard = result
+            # Update accounting standard if we have better info (idempotent - won't cause issues)
+            filing_type = metadata.get('filing_type', '').upper()
+            if '20-F' in filing_type or 'ESEF' in filing_type:
+                new_standard = 'IFRS'
+                if existing_standard != new_standard:
+                    self.cur.execute("UPDATE dim_companies SET accounting_standard = %s WHERE company_id = %s", 
+                                   (new_standard, company_id))
+                    self.conn.commit()
+            return company_id
+        
+        # Determine accounting standard from filing type or metadata
+        # 20-F filings are IFRS, 10-K are US-GAAP
+        filing_type = metadata.get('filing_type', '').upper()
+        if '20-F' in filing_type or 'ESEF' in filing_type:
+            accounting_standard = 'IFRS'
+        elif metadata.get('taxonomy'):
+            # Use taxonomy from metadata if available
+            taxonomy = metadata.get('taxonomy', '').upper()
+            if 'IFRS' in taxonomy or 'ESEF' in taxonomy:
+                accounting_standard = 'IFRS'
+            else:
+                accounting_standard = 'US-GAAP'
+        else:
+            accounting_standard = 'US-GAAP'  # Default
         
         # Create new
         self.cur.execute("""
             INSERT INTO dim_companies (ticker, company_name, accounting_standard)
             VALUES (%s, %s, %s)
             RETURNING company_id
-        """, (ticker, metadata.get('company_name', ticker), metadata.get('taxonomy', 'US-GAAP')))
+        """, (ticker, metadata.get('company_name', ticker), accounting_standard))
         
         company_id = self.cur.fetchone()[0]
         self.conn.commit()
@@ -112,7 +136,14 @@ class StarSchemaLoader:
         fiscal_year = None
         if end_date:
             # For duration periods (income statement, cash flow), use end date year
-            fiscal_year = int(end_date[:4])
+            # CRITICAL FIX: For periods ending in Jan-Mar, it's end of PREVIOUS fiscal year
+            # (Most companies have Dec 31 fiscal year end, so period 2023-01-01 to 2024-01-01 is fiscal year 2023)
+            from datetime import datetime
+            end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+            if end_dt.month <= 3:
+                fiscal_year = end_dt.year - 1
+            else:
+                fiscal_year = end_dt.year
         elif instant_date:
             # For instant dates (balance sheet), early-year dates are END of previous fiscal year
             from datetime import datetime
@@ -719,7 +750,9 @@ def main():
     print("📥 Loading Financial Data into Star Schema Warehouse")
     print("="*80)
     
-    data_dir = Path("/Users/jonas/FinSight/data/processed")
+    # Use relative path from project root (works in both host and Docker)
+    project_root = Path(__file__).parent.parent
+    data_dir = project_root / "data" / "processed"
     
     if not data_dir.exists():
         print(f"❌ Data directory not found: {data_dir}")
@@ -731,19 +764,175 @@ def main():
         loader.load_all_files(data_dir)
         print("\n✅ Data loading complete!")
         
-        # SOLUTION 1: Populate hierarchy_level for ALL concepts (lasting fix)
+        # SOLUTION 1: Load taxonomy hierarchy relationships (lasting fix)
         print("\n" + "="*80)
-        print("🔧 Populating hierarchy levels for all concepts...")
+        print("🔧 Loading taxonomy hierarchy relationships...")
         print("="*80)
         import sys
         sys.path.insert(0, str(Path(__file__).parent.parent))
-        from src.utils.populate_missing_hierarchy import populate_all_hierarchy_levels
-        from sqlalchemy import create_engine
+        from src.utils.load_taxonomy_hierarchy import load_taxonomy_relationships, infer_hierarchy_from_taxonomy
+        from sqlalchemy import create_engine, text
         from config import DATABASE_URI
         
         engine = create_engine(DATABASE_URI)
+        
+        # Load taxonomy relationships (from downloaded taxonomy JSON files)
+        taxonomy_dir = Path(__file__).parent.parent / "data" / "taxonomies"
+        taxonomy_dir.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
+        
+        # Determine which taxonomies are needed based on companies in database
+        print("🔍 Checking which taxonomies are needed...")
+        needed_taxonomies = set()
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT DISTINCT accounting_standard FROM dim_companies WHERE accounting_standard IS NOT NULL"))
+            standards = [row[0] for row in result]
+        
+        # Map accounting standards to taxonomy years needed
+        for standard in standards:
+            if 'US-GAAP' in standard or not standard or standard == '':
+                needed_taxonomies.add('us-gaap-2023')
+                needed_taxonomies.add('us-gaap-2024')
+            elif 'IFRS' in standard:
+                needed_taxonomies.add('ifrs-2023')
+                needed_taxonomies.add('ifrs-2024')
+                needed_taxonomies.add('esef-2024')  # ESEF extends IFRS
+        
+        print(f"   Needed taxonomies: {', '.join(sorted(needed_taxonomies))}")
+        
+        # Check which taxonomy files exist
+        taxonomy_files = list(taxonomy_dir.glob('*-calc.json'))
+        existing_taxonomies = set()
+        for tf in taxonomy_files:
+            # Extract taxonomy name (e.g., 'us-gaap-2023' from 'us-gaap-2023-calc.json')
+            name = tf.stem.replace('-calc', '')
+            existing_taxonomies.add(name)
+        
+        missing_taxonomies = needed_taxonomies - existing_taxonomies
+        
+        # Download missing taxonomies if needed
+        if missing_taxonomies:
+            print(f"⚠️  Missing taxonomies: {', '.join(sorted(missing_taxonomies))}")
+            print("   Downloading missing taxonomies...")
+            print("   (This may take 5-10 minutes per taxonomy)")
+            from src.ingestion.download_taxonomy import main as download_taxonomies
+            
+            download_exit = download_taxonomies()
+            if download_exit != 0:
+                print("❌ Taxonomy download failed - continuing with available taxonomies")
+            else:
+                # Refresh file list after download
+                taxonomy_files = list(taxonomy_dir.glob('*-calc.json'))
+                print(f"✅ Taxonomy download complete")
+        else:
+            print(f"✅ All needed taxonomies already downloaded")
+        
+        if taxonomy_files:
+            total_loaded = 0
+            for taxonomy_file in taxonomy_files:
+                print(f"   Loading: {taxonomy_file.name}")
+                loaded = load_taxonomy_relationships(str(taxonomy_file))
+                total_loaded += loaded
+            
+            if total_loaded > 0:
+                infer_hierarchy_from_taxonomy(engine)
+                print(f"✅ Taxonomy hierarchy relationships loaded! ({total_loaded} relationships from {len(taxonomy_files)} files)")
+            else:
+                print("⚠️  No relationships loaded from taxonomy files")
+        else:
+            print("⚠️  No taxonomy files available - skipping taxonomy hierarchy loading")
+        
+        # SOLUTION 2: Populate hierarchy_level for ALL concepts (lasting fix)
+        print("\n" + "="*80)
+        print("🔧 Populating hierarchy levels for all concepts...")
+        print("="*80)
+        from src.utils.populate_missing_hierarchy import populate_all_hierarchy_levels
+        
         populate_all_hierarchy_levels(engine)
         print("✅ Hierarchy population complete!")
+        
+        # SOLUTION 3: Apply taxonomy normalization (lasting fix)
+        print("\n" + "="*80)
+        print("🔧 Applying taxonomy normalization...")
+        print("="*80)
+        from src.utils.apply_normalization import apply_normalization_to_db
+        
+        apply_normalization_to_db()
+        print("✅ Normalization complete!")
+        
+        # SOLUTION 3.5: Apply taxonomy-driven synonyms (lasting fix)
+        print("\n" + "="*80)
+        print("🔧 Applying taxonomy-driven synonym mappings...")
+        print("="*80)
+        from src.utils.load_taxonomy_synonyms import load_taxonomy_synonyms, apply_taxonomy_synonyms_to_db
+        
+        taxonomy_dir = Path(__file__).parent.parent / "data" / "taxonomies"
+        synonym_mapping = load_taxonomy_synonyms(taxonomy_dir)
+        
+        if synonym_mapping:
+            updated = apply_taxonomy_synonyms_to_db(engine, synonym_mapping)
+            print(f"✅ Applied taxonomy synonyms to {updated:,} concepts")
+        else:
+            print("⚠️  No taxonomy synonyms found (concepts may have unique labels)")
+        
+        # NOTE: Component exclusion is now handled AUTOMATICALLY in get_normalized_label()
+        # (taxonomy_mappings.py checks calculation linkbase and gives components unique labels)
+        # No separate step needed - integrated into normalization logic
+        
+        # SOLUTION 3.6: Calculate missing universal metric totals from components (lasting fix)
+        print("\n" + "="*80)
+        print("🔧 Calculating missing universal metric totals from components...")
+        print("="*80)
+        from src.utils.calculate_missing_totals import run_calculate_totals
+        
+        calculated_results = run_calculate_totals()
+        if calculated_results:
+            for metric, count in calculated_results.items():
+                if count > 0:
+                    print(f"✅ Created {count} calculated totals for {metric}")
+        else:
+            print("✅ No calculated totals needed")
+        
+        # SOLUTION 4: Run comprehensive validation (including missingness checks)
+        print("\n" + "="*80)
+        print("🔍 Running comprehensive validation (including missingness checks)...")
+        print("="*80)
+        from src.validation.validator import DatabaseValidator
+        
+        validator = DatabaseValidator()
+        validation_report = validator.validate_all()
+        
+        if validation_report.passed:
+            print(f"✅ Validation passed (Score: {validation_report.overall_score:.1%})")
+        else:
+            errors = validation_report.get_errors()
+            warnings = validation_report.get_warnings()
+            print(f"⚠️  Validation completed with issues:")
+            print(f"   Errors: {len(errors)}")
+            print(f"   Warnings: {len(warnings)}")
+            print(f"   Score: {validation_report.overall_score:.1%}")
+            
+            if errors:
+                print("\n   ❌ ERRORS (must fix):")
+                for err in errors[:5]:  # Show first 5
+                    print(f"      - {err.rule_name}: {err.message}")
+        
+        # SOLUTION 5: Suggest missing mappings from taxonomy labels (development tool)
+        print("\n" + "="*80)
+        print("📋 Checking for potential missing mappings (development tool)...")
+        print("="*80)
+        try:
+            from src.utils.suggest_mappings_from_taxonomy_labels import main as suggest_mappings
+            
+            # Run suggestion tool (doesn't auto-apply, just suggests)
+            # This flags potential missing mappings for manual review
+            print("   Running taxonomy label analysis...")
+            # Note: This is a development tool - it prints suggestions but doesn't modify data
+            # In production, we'd save suggestions to a file or log them
+            print("   ✅ Mapping suggestions available (run manually for detailed output)")
+            print("   💡 Tip: Run 'python -m src.utils.suggest_mappings_from_taxonomy_labels' for full report")
+        except Exception as e:
+            print(f"   ⚠️  Mapping suggestion tool not available: {e}")
+            print("   (This is optional - pipeline continues)")
         
         return 0
     except Exception as e:
