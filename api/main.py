@@ -327,7 +327,7 @@ def analyze_preloaded(ticker, year):
                             WHEN 'cash_flow' THEN 3
                             ELSE 4
                         END,
-                        co.hierarchy_level DESC NULLS LAST,
+                        COALESCE(co.hierarchy_level, 0) DESC,
                         co.normalized_label
                 """)
             else:
