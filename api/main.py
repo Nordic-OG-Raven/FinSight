@@ -291,13 +291,17 @@ def analyze_preloaded(ticker, year):
                     "message": f"No data for {ticker} {year}. Try custom analysis or select a pre-loaded company."
                 }), 404
             
-            # Fetch key metrics
+            # Fetch ALL metrics (not just hardcoded 9)
+            # Use COALESCE to handle both duration (end_date) and instant (instant_date) periods
             metrics_query = text("""
                 SELECT 
                     co.normalized_label, 
                     fm.value_numeric as value,
                     fm.unit_measure as unit,
-                    p.end_date as period_end
+                    COALESCE(p.end_date, p.instant_date) as period_end,
+                    p.period_type,
+                    co.statement_type,
+                    co.hierarchy_level
                 FROM fact_financial_metrics fm
                 JOIN dim_companies c ON fm.company_id = c.company_id
                 JOIN dim_concepts co ON fm.concept_id = co.concept_id
@@ -305,13 +309,17 @@ def analyze_preloaded(ticker, year):
                 JOIN dim_filings f ON fm.filing_id = f.filing_id
                 WHERE c.ticker = :ticker 
                   AND EXTRACT(YEAR FROM f.fiscal_year_end) = :year
-                  AND co.normalized_label IN (
-                    'revenue', 'operating_income', 'net_income', 
-                    'total_assets', 'total_liabilities', 'total_equity',
-                    'operating_cashflow', 'eps_basic', 'eps_diluted'
-                  )
                   AND fm.dimension_id IS NULL
-                ORDER BY co.normalized_label
+                  AND fm.value_numeric IS NOT NULL
+                ORDER BY 
+                    CASE co.statement_type
+                        WHEN 'income_statement' THEN 1
+                        WHEN 'balance_sheet' THEN 2
+                        WHEN 'cash_flow' THEN 3
+                        ELSE 4
+                    END,
+                    co.hierarchy_level DESC,
+                    co.normalized_label
             """)
             
             metrics_result = conn.execute(metrics_query, {"ticker": ticker, "year": year})
@@ -321,7 +329,10 @@ def analyze_preloaded(ticker, year):
                 metrics[row[0]] = {
                     "value": float(row[1]) if row[1] else None,
                     "unit": row[2],
-                    "period_end": row[3].isoformat() if row[3] else None
+                    "period_end": row[3].isoformat() if row[3] else None,
+                    "period_type": row[4],
+                    "statement_type": row[5],
+                    "hierarchy_level": int(row[6]) if row[6] else None
                 }
             
             return jsonify({
@@ -637,6 +648,96 @@ def get_data():
         return jsonify({
             "success": False,
             "error": str(e)
+        }), 500
+
+@app.route('/api/statements/<ticker>/<int:year>', methods=['GET'])
+def get_financial_statements(ticker, year):
+    """
+    Get full financial statements (Income Statement, Balance Sheet, Cash Flow)
+    Organized by statement type and hierarchy level
+    """
+    ticker = ticker.upper()
+    
+    try:
+        from sqlalchemy import create_engine, text
+        engine = create_engine(DATABASE_URL)
+        
+        with engine.connect() as conn:
+            # Get all metrics organized by statement type
+            query = text("""
+                SELECT 
+                    co.statement_type,
+                    co.normalized_label,
+                    co.concept_name,
+                    fm.value_numeric,
+                    fm.unit_measure,
+                    COALESCE(p.end_date, p.instant_date) as period_date,
+                    p.period_type,
+                    co.hierarchy_level,
+                    co.parent_concept_id,
+                    CASE 
+                        WHEN co.parent_concept_id IS NULL THEN NULL
+                        ELSE (
+                            SELECT normalized_label 
+                            FROM dim_concepts 
+                            WHERE concept_id = co.parent_concept_id
+                        )
+                    END as parent_normalized_label
+                FROM fact_financial_metrics fm
+                JOIN dim_companies c ON fm.company_id = c.company_id
+                JOIN dim_concepts co ON fm.concept_id = co.concept_id
+                JOIN dim_time_periods p ON fm.period_id = p.period_id
+                JOIN dim_filings f ON fm.filing_id = f.filing_id
+                WHERE c.ticker = :ticker 
+                  AND EXTRACT(YEAR FROM f.fiscal_year_end) = :year
+                  AND fm.dimension_id IS NULL
+                  AND fm.value_numeric IS NOT NULL
+                  AND co.statement_type IN ('income_statement', 'balance_sheet', 'cash_flow')
+                ORDER BY 
+                    CASE co.statement_type
+                        WHEN 'income_statement' THEN 1
+                        WHEN 'balance_sheet' THEN 2
+                        WHEN 'cash_flow' THEN 3
+                    END,
+                    co.hierarchy_level DESC,
+                    co.normalized_label
+            """)
+            
+            result = conn.execute(query, {"ticker": ticker, "year": year})
+            rows = result.fetchall()
+            
+            # Organize by statement type
+            statements = {
+                "income_statement": [],
+                "balance_sheet": [],
+                "cash_flow": []
+            }
+            
+            for row in rows:
+                stmt_type = row[0] or 'other'
+                if stmt_type in statements:
+                    statements[stmt_type].append({
+                        "normalized_label": row[1],
+                        "concept_name": row[2],
+                        "value": float(row[3]) if row[3] else None,
+                        "unit": row[4],
+                        "period_date": row[5].isoformat() if row[5] else None,
+                        "period_type": row[6],
+                        "hierarchy_level": int(row[7]) if row[7] else None,
+                        "parent_normalized_label": row[10]
+                    })
+            
+            return jsonify({
+                "company": ticker,
+                "year": year,
+                "statements": statements,
+                "count": sum(len(v) for v in statements.values())
+            })
+            
+    except Exception as e:
+        return jsonify({
+            "error": "database_error",
+            "message": str(e)
         }), 500
 
 @app.route('/api/admin/load-companies', methods=['POST'])
