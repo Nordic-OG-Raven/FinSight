@@ -293,34 +293,72 @@ def analyze_preloaded(ticker, year):
             
             # Fetch ALL metrics (not just hardcoded 9)
             # Use COALESCE to handle both duration (end_date) and instant (instant_date) periods
-            metrics_query = text("""
-                SELECT 
-                    co.normalized_label, 
-                    fm.value_numeric as value,
-                    fm.unit_measure as unit,
-                    COALESCE(p.end_date, p.instant_date) as period_end,
-                    p.period_type,
-                    co.statement_type,
-                    co.hierarchy_level
-                FROM fact_financial_metrics fm
-                JOIN dim_companies c ON fm.company_id = c.company_id
-                JOIN dim_concepts co ON fm.concept_id = co.concept_id
-                JOIN dim_time_periods p ON fm.period_id = p.period_id
-                JOIN dim_filings f ON fm.filing_id = f.filing_id
-                WHERE c.ticker = :ticker 
-                  AND EXTRACT(YEAR FROM f.fiscal_year_end) = :year
-                  AND fm.dimension_id IS NULL
-                  AND fm.value_numeric IS NOT NULL
-                ORDER BY 
-                    CASE co.statement_type
-                        WHEN 'income_statement' THEN 1
-                        WHEN 'balance_sheet' THEN 2
-                        WHEN 'cash_flow' THEN 3
-                        ELSE 4
-                    END,
-                    co.hierarchy_level DESC,
-                    co.normalized_label
-            """)
+            # Check if hierarchy_level column exists (handle schema migration gracefully)
+            try:
+                check_col = text("SELECT hierarchy_level FROM dim_concepts LIMIT 1")
+                conn.execute(check_col)
+                has_hierarchy = True
+            except:
+                has_hierarchy = False
+            
+            if has_hierarchy:
+                metrics_query = text("""
+                    SELECT 
+                        co.normalized_label, 
+                        fm.value_numeric as value,
+                        fm.unit_measure as unit,
+                        COALESCE(p.end_date, p.instant_date) as period_end,
+                        p.period_type,
+                        co.statement_type,
+                        co.hierarchy_level
+                    FROM fact_financial_metrics fm
+                    JOIN dim_companies c ON fm.company_id = c.company_id
+                    JOIN dim_concepts co ON fm.concept_id = co.concept_id
+                    JOIN dim_time_periods p ON fm.period_id = p.period_id
+                    JOIN dim_filings f ON fm.filing_id = f.filing_id
+                    WHERE c.ticker = :ticker 
+                      AND EXTRACT(YEAR FROM f.fiscal_year_end) = :year
+                      AND fm.dimension_id IS NULL
+                      AND fm.value_numeric IS NOT NULL
+                    ORDER BY 
+                        CASE co.statement_type
+                            WHEN 'income_statement' THEN 1
+                            WHEN 'balance_sheet' THEN 2
+                            WHEN 'cash_flow' THEN 3
+                            ELSE 4
+                        END,
+                        co.hierarchy_level DESC NULLS LAST,
+                        co.normalized_label
+                """)
+            else:
+                # Fallback for older schema without hierarchy_level
+                metrics_query = text("""
+                    SELECT 
+                        co.normalized_label, 
+                        fm.value_numeric as value,
+                        fm.unit_measure as unit,
+                        COALESCE(p.end_date, p.instant_date) as period_end,
+                        p.period_type,
+                        co.statement_type,
+                        NULL as hierarchy_level
+                    FROM fact_financial_metrics fm
+                    JOIN dim_companies c ON fm.company_id = c.company_id
+                    JOIN dim_concepts co ON fm.concept_id = co.concept_id
+                    JOIN dim_time_periods p ON fm.period_id = p.period_id
+                    JOIN dim_filings f ON fm.filing_id = f.filing_id
+                    WHERE c.ticker = :ticker 
+                      AND EXTRACT(YEAR FROM f.fiscal_year_end) = :year
+                      AND fm.dimension_id IS NULL
+                      AND fm.value_numeric IS NOT NULL
+                    ORDER BY 
+                        CASE co.statement_type
+                            WHEN 'income_statement' THEN 1
+                            WHEN 'balance_sheet' THEN 2
+                            WHEN 'cash_flow' THEN 3
+                            ELSE 4
+                        END,
+                        co.normalized_label
+                """)
             
             metrics_result = conn.execute(metrics_query, {"ticker": ticker, "year": year})
             
@@ -802,6 +840,109 @@ def get_financial_statements(ticker, year):
         return jsonify({
             "error": "database_error",
             "message": str(e)
+        }), 500
+
+@app.route('/api/admin/migrate-schema', methods=['POST'])
+def migrate_schema():
+    """Admin endpoint to run database schema migration"""
+    auth_key = request.headers.get('X-Admin-Key')
+    if auth_key != os.getenv('ADMIN_KEY', 'change-me-in-production'):
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    try:
+        from sqlalchemy import create_engine, text
+        engine = create_engine(DATABASE_URL)
+        
+        migration_sql = """
+        -- Add hierarchy_level if missing
+        DO $$ 
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name = 'dim_concepts' 
+                AND column_name = 'hierarchy_level'
+            ) THEN
+                ALTER TABLE dim_concepts ADD COLUMN hierarchy_level INTEGER;
+            END IF;
+        END $$;
+        
+        -- Add parent_concept_id if missing
+        DO $$ 
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name = 'dim_concepts' 
+                AND column_name = 'parent_concept_id'
+            ) THEN
+                ALTER TABLE dim_concepts ADD COLUMN parent_concept_id INTEGER REFERENCES dim_concepts(concept_id) ON DELETE SET NULL;
+            END IF;
+        END $$;
+        
+        -- Add is_calculated if missing
+        DO $$ 
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name = 'dim_concepts' 
+                AND column_name = 'is_calculated'
+            ) THEN
+                ALTER TABLE dim_concepts ADD COLUMN is_calculated BOOLEAN DEFAULT FALSE;
+            END IF;
+        END $$;
+        
+        -- Add calculation_weight if missing
+        DO $$ 
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name = 'dim_concepts' 
+                AND column_name = 'calculation_weight'
+            ) THEN
+                ALTER TABLE dim_concepts ADD COLUMN calculation_weight DECIMAL(10,4) DEFAULT 1.0;
+            END IF;
+        END $$;
+        
+        -- Add statement_type if missing
+        DO $$ 
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name = 'dim_concepts' 
+                AND column_name = 'statement_type'
+            ) THEN
+                ALTER TABLE dim_concepts ADD COLUMN statement_type VARCHAR(50);
+            END IF;
+        END $$;
+        
+        CREATE INDEX IF NOT EXISTS idx_concepts_hierarchy_level ON dim_concepts(hierarchy_level);
+        CREATE INDEX IF NOT EXISTS idx_concepts_parent ON dim_concepts(parent_concept_id);
+        CREATE INDEX IF NOT EXISTS idx_concepts_statement ON dim_concepts(statement_type);
+        """
+        
+        with engine.connect() as conn:
+            conn.execute(text(migration_sql))
+            conn.commit()
+            
+            # Verify columns
+            verify_query = text("""
+                SELECT column_name, data_type 
+                FROM information_schema.columns
+                WHERE table_name = 'dim_concepts'
+                ORDER BY ordinal_position
+            """)
+            result = conn.execute(verify_query)
+            columns = [{"name": row[0], "type": row[1]} for row in result]
+            
+            return jsonify({
+                "success": True,
+                "message": "Schema migration completed",
+                "columns": columns
+            })
+            
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "error": str(e)
         }), 500
 
 @app.route('/api/admin/load-companies', methods=['POST'])
