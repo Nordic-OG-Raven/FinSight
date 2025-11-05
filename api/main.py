@@ -815,6 +815,7 @@ def get_financial_statements(ticker, year):
                   AND EXTRACT(YEAR FROM f.fiscal_year_end) = :year
                   AND fm.dimension_id IS NULL
                   AND fm.value_numeric IS NOT NULL
+                  AND EXTRACT(YEAR FROM COALESCE(p.end_date, p.instant_date)) = :year
                 ORDER BY 
                     CASE co.statement_type
                         WHEN 'income_statement' THEN 1
