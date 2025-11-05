@@ -919,11 +919,8 @@ def migrate_schema():
         CREATE INDEX IF NOT EXISTS idx_concepts_statement ON dim_concepts(statement_type);
         """
         
-        with engine.connect() as conn:
-            # Use autocommit for DDL statements
-            conn.execute(text("COMMIT"))  # Start transaction
+        with engine.begin() as conn:  # Use begin() for autocommit
             conn.execute(text(migration_sql))
-            conn.execute(text("COMMIT"))
             
             # Verify columns
             verify_query = text("""
