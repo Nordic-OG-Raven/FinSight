@@ -449,6 +449,40 @@ def get_quota():
         }
     })
 
+@app.route('/api/admin/load-companies', methods=['POST'])
+def admin_load_companies():
+    """Admin endpoint to load companies without quota (for pre-loading)"""
+    # Simple auth check - can be improved later
+    auth_key = request.headers.get('X-Admin-Key')
+    if auth_key != os.getenv('ADMIN_KEY', 'change-me-in-production'):
+        return jsonify({"error": "Unauthorized"}), 401
+    
+    data = request.json
+    companies = data.get('companies', [])
+    
+    results = []
+    for company_data in companies:
+        ticker = company_data.get('ticker', '').upper()
+        year = company_data.get('year')
+        filing_type = company_data.get('filing_type', '10-K')
+        
+        try:
+            success = run_pipeline(ticker=ticker, year=year, filing_type=filing_type)
+            results.append({
+                "ticker": ticker,
+                "year": year,
+                "success": success
+            })
+        except Exception as e:
+            results.append({
+                "ticker": ticker,
+                "year": year,
+                "success": False,
+                "error": str(e)
+            })
+    
+    return jsonify({"results": results})
+
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=os.getenv('ENVIRONMENT') != 'production')
