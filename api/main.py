@@ -364,14 +364,18 @@ def analyze_preloaded(ticker, year):
             
             metrics = {}
             for row in metrics_result:
-                # Handle NULL values safely
-                stmt_type = row[5] if row[5] else 'other'
+                # Handle NULL values safely - ensure all values are JSON-serializable
+                normalized_label = row[0] if row[0] else 'unknown'
+                stmt_type = str(row[5]) if row[5] else 'other'
                 hierarchy = int(row[6]) if row[6] is not None else None
-                metrics[row[0]] = {
-                    "value": float(row[1]) if row[1] else None,
-                    "unit": row[2],
-                    "period_end": row[3].isoformat() if row[3] else None,
-                    "period_type": row[4] if row[4] else None,
+                period_end = row[3].isoformat() if row[3] else None
+                period_type = str(row[4]) if row[4] else None
+                
+                metrics[normalized_label] = {
+                    "value": float(row[1]) if row[1] is not None else None,
+                    "unit": str(row[2]) if row[2] else '',
+                    "period_end": period_end,
+                    "period_type": period_type,
                     "statement_type": stmt_type,
                     "hierarchy_level": hierarchy
                 }
