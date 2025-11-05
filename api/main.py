@@ -350,11 +350,10 @@ def analyze_preloaded(ticker, year):
                       AND fm.dimension_id IS NULL
                       AND fm.value_numeric IS NOT NULL
                     ORDER BY 
-                        CASE co.statement_type
-                            WHEN 'income_statement' THEN 1
-                            WHEN 'balance_sheet' THEN 2
-                            WHEN 'cash_flow' THEN 3
-                            ELSE 4
+                        CASE WHEN co.statement_type = 'income_statement' THEN 1
+                             WHEN co.statement_type = 'balance_sheet' THEN 2
+                             WHEN co.statement_type = 'cash_flow' THEN 3
+                             ELSE 4
                         END,
                         co.normalized_label
                 """)
@@ -511,12 +510,15 @@ def get_available_metrics():
         from sqlalchemy import create_engine, text
         engine = create_engine(DATABASE_URL)
         
-        with engine.connect() as conn:
-            # Check if view exists
+        with engine.begin() as conn:  # Use begin() for proper transaction handling
+            # Check if view exists (use separate connection to avoid transaction issues)
             try:
-                test_query = text("SELECT 1 FROM v_facts_hierarchical LIMIT 1")
-                conn.execute(test_query)
+                test_engine = create_engine(DATABASE_URL)
+                with test_engine.connect() as test_conn:
+                    test_query = text("SELECT 1 FROM v_facts_hierarchical LIMIT 1")
+                    test_conn.execute(test_query)
                 use_view = True
+                test_engine.dispose()
             except:
                 use_view = False
             
@@ -591,7 +593,7 @@ def get_data():
         from sqlalchemy import create_engine, text
         engine = create_engine(DATABASE_URL)
         
-        with engine.connect() as conn:
+        with engine.begin() as conn:  # Use begin() for proper transaction handling
             # Build query string
             if show_all_concepts:
                 # Raw table query
@@ -621,11 +623,14 @@ def get_data():
                 normalized_label_col = "co.normalized_label"
             else:
                 # Try hierarchical view first, fallback to raw table if view doesn't exist
-                # Check if view exists by trying to query it
+                # Check if view exists by trying to query it (use separate connection to avoid transaction issues)
                 try:
-                    test_query = text("SELECT 1 FROM v_facts_hierarchical LIMIT 1")
-                    conn.execute(test_query)
+                    test_engine = create_engine(DATABASE_URL)
+                    with test_engine.connect() as test_conn:
+                        test_query = text("SELECT 1 FROM v_facts_hierarchical LIMIT 1")
+                        test_conn.execute(test_query)
                     use_view = True
+                    test_engine.dispose()
                 except:
                     use_view = False
                 
