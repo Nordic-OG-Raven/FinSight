@@ -920,8 +920,10 @@ def migrate_schema():
         """
         
         with engine.connect() as conn:
+            # Use autocommit for DDL statements
+            conn.execute(text("COMMIT"))  # Start transaction
             conn.execute(text(migration_sql))
-            conn.commit()
+            conn.execute(text("COMMIT"))
             
             # Verify columns
             verify_query = text("""
