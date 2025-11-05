@@ -321,11 +321,10 @@ def analyze_preloaded(ticker, year):
                       AND fm.dimension_id IS NULL
                       AND fm.value_numeric IS NOT NULL
                     ORDER BY 
-                        CASE co.statement_type
-                            WHEN 'income_statement' THEN 1
-                            WHEN 'balance_sheet' THEN 2
-                            WHEN 'cash_flow' THEN 3
-                            ELSE 4
+                        CASE WHEN co.statement_type = 'income_statement' THEN 1
+                             WHEN co.statement_type = 'balance_sheet' THEN 2
+                             WHEN co.statement_type = 'cash_flow' THEN 3
+                             ELSE 4
                         END,
                         COALESCE(co.hierarchy_level, 0) DESC,
                         co.normalized_label
