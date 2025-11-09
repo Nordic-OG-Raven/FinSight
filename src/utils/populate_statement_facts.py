@@ -683,10 +683,15 @@ def populate_statement_facts(filing_id: Optional[int] = None):
                                     -- Component-specific sign correction
                                     CASE 
                                         -- For treasury shares: positive (reducing negative balance increases equity)
+                                        -- Check if ANY dimension in this group is TreasurySharesMember
                                         WHEN EXISTS (
-                                            SELECT 1 FROM dim_xbrl_dimensions d_check
-                                            WHERE d_check.dimension_id = fm_dim.dimension_id
+                                            SELECT 1 FROM fact_financial_metrics fm_check
+                                            JOIN dim_xbrl_dimensions d_check ON fm_check.dimension_id = d_check.dimension_id
+                                            WHERE fm_check.filing_id = si.filing_id
+                                              AND fm_check.concept_id = si.concept_id
+                                              AND fm_check.period_id = fm_dim.period_id
                                               AND d_check.dimension_json->'ComponentsOfEquityAxis'->>'member' = 'TreasurySharesMember'
+                                              AND ABS(fm_check.value_numeric) > 0.001
                                         ) THEN
                                             ABS(MAX(fm_dim.value_numeric))  -- Positive for treasury shares
                                         -- For other components: negative (outflow from equity)
@@ -740,10 +745,15 @@ def populate_statement_facts(filing_id: Optional[int] = None):
                           AND (fm_cons.value_numeric IS NULL OR ABS(fm_cons.value_numeric) < 0.001)
                           AND ABS(fm_dim.value_numeric) > 0.001
                           AND co.normalized_label NOT IN ('balance_at_the_beginning_of_the_year_equity', 'balance_at_the_end_of_the_year_equity')
+                          -- Check if ANY dimension in this group has ComponentsOfEquityAxis (using aggregated check)
                           AND NOT EXISTS (
-                              SELECT 1 FROM dim_xbrl_dimensions d2 
-                              WHERE d2.dimension_id = fm_dim.dimension_id 
+                              SELECT 1 FROM fact_financial_metrics fm_check
+                              JOIN dim_xbrl_dimensions d2 ON fm_check.dimension_id = d2.dimension_id
+                              WHERE fm_check.filing_id = si.filing_id
+                                AND fm_check.concept_id = si.concept_id
+                                AND fm_check.period_id = fm_dim.period_id
                                 AND d2.dimension_json ? 'ComponentsOfEquityAxis'
+                                AND ABS(fm_check.value_numeric) > 0.001
                           )
                         GROUP BY si.filing_id, si.concept_id, fm_dim.period_id, si.display_order, si.is_header, co.hierarchy_level, co.parent_concept_id, si.statement_type, co.normalized_label
                         
