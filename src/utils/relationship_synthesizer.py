@@ -179,12 +179,21 @@ class RelationshipSynthesizer:
         
         # Priority 1: XBRL (mark as not synthetic)
         for rel in xbrl_rels:
-            pair = (rel['parent_concept_id'], rel['child_concept_id'])
-            if pair not in seen_pairs:
+            # XBRL relationships may have concept names or IDs
+            # If they have names, we'll skip merging here and let the loader handle conversion
+            if 'parent_concept_id' in rel and 'child_concept_id' in rel:
+                pair = (rel['parent_concept_id'], rel['child_concept_id'])
+                if pair not in seen_pairs:
+                    rel['source'] = 'xbrl'
+                    rel['is_synthetic'] = False
+                    merged.append(rel)
+                    seen_pairs.add(pair)
+            elif 'parent_concept' in rel or 'child_concept' in rel:
+                # XBRL relationships with concept names - pass through as-is
+                # The loader will convert names to IDs
                 rel['source'] = 'xbrl'
                 rel['is_synthetic'] = False
                 merged.append(rel)
-                seen_pairs.add(pair)
         
         # Priority 2: Dimensional (generated from actual data)
         for rel in dimensional_rels:

@@ -4,6 +4,11 @@
 -- ============================================================================
 
 -- Drop existing tables (in correct order due to foreign keys)
+DROP TABLE IF EXISTS fact_comprehensive_income CASCADE;
+DROP TABLE IF EXISTS fact_cash_flow CASCADE;
+DROP TABLE IF EXISTS fact_balance_sheet CASCADE;
+DROP TABLE IF EXISTS fact_income_statement CASCADE;
+DROP TABLE IF EXISTS rel_statement_items CASCADE;
 DROP TABLE IF EXISTS rel_footnote_references CASCADE;
 DROP TABLE IF EXISTS rel_presentation_hierarchy CASCADE;
 DROP TABLE IF EXISTS rel_calculation_hierarchy CASCADE;
@@ -52,6 +57,7 @@ CREATE TABLE dim_concepts (
     parent_concept_id INTEGER REFERENCES dim_concepts(concept_id) ON DELETE SET NULL,
     is_calculated BOOLEAN DEFAULT FALSE, -- TRUE if value derived from children
     calculation_weight DECIMAL(10,4) DEFAULT 1.0, -- 1.0 for addition, -1.0 for subtraction
+    preferred_label VARCHAR(500), -- Human-readable label from taxonomy or generic mapping (populated during ETL)
     
     UNIQUE(concept_name, taxonomy)
 );
@@ -204,6 +210,8 @@ CREATE TABLE rel_presentation_hierarchy (
     order_index INTEGER NOT NULL, -- Order within statement section
     preferred_label VARCHAR(100), -- Label role (e.g., 'http://www.xbrl.org/2003/role/label')
     statement_type VARCHAR(50), -- balance_sheet, income_statement, cash_flow, etc.
+    role_uri VARCHAR(500), -- CRITICAL: XBRL role URI from presentationLink (e.g., 'http://www.xbrl.org/role/statement/IncomeStatement')
+                          -- Used to distinguish main statement items from detailed breakdowns
     arcrole VARCHAR(200), -- XBRL arcrole URI (usually parent-child)
     priority INTEGER DEFAULT 0,
     source VARCHAR(20) DEFAULT 'xbrl', -- 'xbrl', 'dimensional', 'standard'
@@ -227,6 +235,106 @@ CREATE TABLE rel_footnote_references (
     UNIQUE(filing_id, fact_id, concept_id, footnote_label)
 );
 
+-- Statement items metadata (Approach 2: Statement Metadata Table)
+-- Pre-computed statement-level metadata: which concepts belong to which statements,
+-- their display order, and whether they are main items or headers.
+-- Populated during ETL to simplify API queries.
+CREATE TABLE rel_statement_items (
+    statement_item_id SERIAL PRIMARY KEY,
+    filing_id INTEGER NOT NULL REFERENCES dim_filings(filing_id) ON DELETE CASCADE,
+    concept_id INTEGER NOT NULL REFERENCES dim_concepts(concept_id) ON DELETE CASCADE,
+    statement_type VARCHAR(50) NOT NULL,  -- income_statement, balance_sheet, etc.
+    display_order INTEGER NOT NULL,  -- Corrected order (handles EPS, headers, etc.)
+    is_header BOOLEAN DEFAULT FALSE,
+    is_main_item BOOLEAN DEFAULT TRUE,  -- Main statement item (not detail/disclosure)
+    role_uri VARCHAR(500),  -- For reference (from presentation hierarchy)
+    source VARCHAR(20),  -- 'xbrl' or 'standard'
+    side VARCHAR(20) CHECK (side IN ('assets', 'liabilities_equity')),  -- For balance sheet: left side (assets) or right side (liabilities_equity)
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(filing_id, concept_id, statement_type)
+);
+
+-- Statement-specific fact tables (Approach 2: Denormalized for Performance)
+-- Pre-filtered and pre-ordered facts for each statement type.
+-- Only main statement items are stored here (detail items stay in fact_financial_metrics).
+-- Populated during ETL to enable simple, fast API queries.
+CREATE TABLE fact_income_statement (
+    income_statement_id SERIAL PRIMARY KEY,
+    filing_id INTEGER NOT NULL REFERENCES dim_filings(filing_id) ON DELETE CASCADE,
+    concept_id INTEGER NOT NULL REFERENCES dim_concepts(concept_id) ON DELETE CASCADE,
+    period_id INTEGER NOT NULL REFERENCES dim_time_periods(period_id) ON DELETE CASCADE,
+    value_numeric NUMERIC(20, 2),
+    unit_measure VARCHAR(20),
+    display_order INTEGER NOT NULL,  -- Pre-computed order from XBRL
+    is_header BOOLEAN DEFAULT FALSE,
+    hierarchy_level INTEGER,
+    parent_concept_id INTEGER REFERENCES dim_concepts(concept_id) ON DELETE SET NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(filing_id, concept_id, period_id)
+);
+
+CREATE TABLE fact_balance_sheet (
+    balance_sheet_id SERIAL PRIMARY KEY,
+    filing_id INTEGER NOT NULL REFERENCES dim_filings(filing_id) ON DELETE CASCADE,
+    concept_id INTEGER NOT NULL REFERENCES dim_concepts(concept_id) ON DELETE CASCADE,
+    period_id INTEGER NOT NULL REFERENCES dim_time_periods(period_id) ON DELETE CASCADE,
+    value_numeric NUMERIC(20, 2),
+    unit_measure VARCHAR(20),
+    display_order INTEGER NOT NULL,
+    is_header BOOLEAN DEFAULT FALSE,
+    hierarchy_level INTEGER,
+    parent_concept_id INTEGER REFERENCES dim_concepts(concept_id) ON DELETE SET NULL,
+    side VARCHAR(20) CHECK (side IN ('assets', 'liabilities_equity')),  -- Left side (assets) or right side (liabilities_equity)
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(filing_id, concept_id, period_id)
+);
+
+CREATE TABLE fact_cash_flow (
+    cash_flow_id SERIAL PRIMARY KEY,
+    filing_id INTEGER NOT NULL REFERENCES dim_filings(filing_id) ON DELETE CASCADE,
+    concept_id INTEGER NOT NULL REFERENCES dim_concepts(concept_id) ON DELETE CASCADE,
+    period_id INTEGER NOT NULL REFERENCES dim_time_periods(period_id) ON DELETE CASCADE,
+    value_numeric NUMERIC(20, 2),
+    unit_measure VARCHAR(20),
+    display_order INTEGER NOT NULL,
+    is_header BOOLEAN DEFAULT FALSE,
+    hierarchy_level INTEGER,
+    parent_concept_id INTEGER REFERENCES dim_concepts(concept_id) ON DELETE SET NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(filing_id, concept_id, period_id)
+);
+
+CREATE TABLE fact_comprehensive_income (
+    comprehensive_income_id SERIAL PRIMARY KEY,
+    filing_id INTEGER NOT NULL REFERENCES dim_filings(filing_id) ON DELETE CASCADE,
+    concept_id INTEGER NOT NULL REFERENCES dim_concepts(concept_id) ON DELETE CASCADE,
+    period_id INTEGER NOT NULL REFERENCES dim_time_periods(period_id) ON DELETE CASCADE,
+    value_numeric NUMERIC(20, 2),
+    unit_measure VARCHAR(20),
+    display_order INTEGER NOT NULL,
+    is_header BOOLEAN DEFAULT FALSE,
+    hierarchy_level INTEGER,
+    parent_concept_id INTEGER REFERENCES dim_concepts(concept_id) ON DELETE SET NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(filing_id, concept_id, period_id)
+);
+
+CREATE TABLE fact_equity_statement (
+    equity_statement_id SERIAL PRIMARY KEY,
+    filing_id INTEGER NOT NULL REFERENCES dim_filings(filing_id) ON DELETE CASCADE,
+    concept_id INTEGER NOT NULL REFERENCES dim_concepts(concept_id) ON DELETE CASCADE,
+    period_id INTEGER NOT NULL REFERENCES dim_time_periods(period_id) ON DELETE CASCADE,
+    value_numeric NUMERIC(20, 2),
+    unit_measure VARCHAR(20),
+    display_order INTEGER NOT NULL,
+    is_header BOOLEAN DEFAULT FALSE,
+    hierarchy_level INTEGER,
+    parent_concept_id INTEGER REFERENCES dim_concepts(concept_id) ON DELETE SET NULL,
+    equity_component VARCHAR(50),  -- 'share_capital', 'treasury_shares', 'retained_earnings', 'other_reserves', NULL for totals
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(filing_id, concept_id, period_id, equity_component)
+);
+
 -- ============================================================================
 -- INDEXES
 -- ============================================================================
@@ -248,6 +356,7 @@ CREATE INDEX idx_fact_concept_period ON fact_financial_metrics(concept_id, perio
 CREATE INDEX idx_companies_ticker ON dim_companies(ticker);
 CREATE INDEX idx_companies_sector ON dim_companies(sector);
 CREATE INDEX idx_concepts_normalized ON dim_concepts(normalized_label);
+CREATE INDEX idx_concepts_preferred_label ON dim_concepts(preferred_label);
 CREATE INDEX idx_concepts_statement ON dim_concepts(statement_type);
 CREATE INDEX idx_periods_fiscal_year ON dim_time_periods(fiscal_year);
 CREATE INDEX idx_periods_end_date ON dim_time_periods(end_date);
@@ -270,6 +379,38 @@ CREATE INDEX idx_pres_statement ON rel_presentation_hierarchy(statement_type);
 CREATE INDEX idx_footnote_filing ON rel_footnote_references(filing_id);
 CREATE INDEX idx_footnote_fact ON rel_footnote_references(fact_id);
 CREATE INDEX idx_footnote_concept ON rel_footnote_references(concept_id);
+
+-- Statement items indexes
+CREATE INDEX idx_statement_items_filing ON rel_statement_items(filing_id);
+CREATE INDEX idx_statement_items_concept ON rel_statement_items(concept_id);
+CREATE INDEX idx_statement_items_type_order ON rel_statement_items(statement_type, display_order);
+CREATE INDEX idx_statement_items_main ON rel_statement_items(filing_id, is_main_item, statement_type, display_order);
+
+-- Statement-specific fact table indexes
+CREATE INDEX idx_income_statement_filing ON fact_income_statement(filing_id);
+CREATE INDEX idx_income_statement_concept ON fact_income_statement(concept_id);
+CREATE INDEX idx_income_statement_period ON fact_income_statement(period_id);
+CREATE INDEX idx_income_statement_order ON fact_income_statement(filing_id, display_order);
+
+CREATE INDEX idx_balance_sheet_filing ON fact_balance_sheet(filing_id);
+CREATE INDEX idx_balance_sheet_concept ON fact_balance_sheet(concept_id);
+CREATE INDEX idx_balance_sheet_period ON fact_balance_sheet(period_id);
+CREATE INDEX idx_balance_sheet_order ON fact_balance_sheet(filing_id, display_order);
+
+CREATE INDEX idx_cash_flow_filing ON fact_cash_flow(filing_id);
+CREATE INDEX idx_cash_flow_concept ON fact_cash_flow(concept_id);
+CREATE INDEX idx_cash_flow_period ON fact_cash_flow(period_id);
+CREATE INDEX idx_cash_flow_order ON fact_cash_flow(filing_id, display_order);
+
+CREATE INDEX idx_comprehensive_income_filing ON fact_comprehensive_income(filing_id);
+CREATE INDEX idx_comprehensive_income_concept ON fact_comprehensive_income(concept_id);
+CREATE INDEX idx_comprehensive_income_period ON fact_comprehensive_income(period_id);
+CREATE INDEX idx_comprehensive_income_order ON fact_comprehensive_income(filing_id, display_order);
+
+CREATE INDEX idx_equity_statement_filing ON fact_equity_statement(filing_id);
+CREATE INDEX idx_equity_statement_concept ON fact_equity_statement(concept_id);
+CREATE INDEX idx_equity_statement_period ON fact_equity_statement(period_id);
+CREATE INDEX idx_equity_statement_order ON fact_equity_statement(filing_id, display_order);
 
 -- ============================================================================
 -- VIEWS FOR COMMON QUERIES

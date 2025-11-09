@@ -274,12 +274,16 @@ Examples:
     if args.save_json:
         output_file = args.output / f"{args.ticker}_{args.year}_{args.filing_type.replace('-', '')}_facts.json"
         
+        # Get relationships from parse result
+        relationships = result.get('relationships', {})
+        
         output_data = {
             'company': args.ticker,
             'year': args.year,
             'filing_type': args.filing_type,
             'facts': facts,
             'metadata': metadata,
+            'relationships': relationships,  # CRITICAL: Include relationships for database loading
             'validation': validation_report.to_dict(),
             'completeness': completeness_report.to_dict(),
             'extraction_timestamp': datetime.now().isoformat(),

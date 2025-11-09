@@ -105,30 +105,51 @@ class StarSchemaLoader:
             else:
                 statement_type = 'other'
         
+        # Get preferred label using generic mapping (LASTING - part of ETL pipeline)
+        try:
+            from src.utils.concept_label_mapping import get_humanized_label
+            # Get statement_type from metadata if available (for context-specific mapping)
+            stmt_type = metadata.get('statement_type')
+            preferred_label = get_humanized_label(concept_name, metadata.get('normalized_label'), stmt_type)
+        except ImportError:
+            preferred_label = None
+        
         # Check if exists
         self.cur.execute(
-            "SELECT concept_id, statement_type FROM dim_concepts WHERE concept_name = %s AND taxonomy = %s",
+            "SELECT concept_id, statement_type, preferred_label FROM dim_concepts WHERE concept_name = %s AND taxonomy = %s",
             (concept_name, taxonomy)
         )
         result = self.cur.fetchone()
         if result:
-            concept_id, existing_stmt_type = result[0], result[1]
+            concept_id, existing_stmt_type, existing_preferred_label = result[0], result[1], result[2]
             # Update statement_type if it's NULL and we have a value
+            # Update preferred_label if it's NULL and we have a value (LASTING - ensures labels are populated on reload)
+            # This ensures that when balance sheet mappings are added to concept_label_mapping.py, existing concepts get updated on next ETL run
+            updates = []
+            params = []
             if existing_stmt_type is None and statement_type:
-                self.cur.execute("""
+                updates.append("statement_type = %s")
+                params.append(statement_type)
+            if existing_preferred_label is None and preferred_label:
+                updates.append("preferred_label = %s")
+                params.append(preferred_label)
+            
+            if updates:
+                params.append(concept_id)
+                self.cur.execute(f"""
                     UPDATE dim_concepts 
-                    SET statement_type = %s 
+                    SET {', '.join(updates)}
                     WHERE concept_id = %s
-                """, (statement_type, concept_id))
+                """, tuple(params))
                 self.conn.commit()
             return concept_id
         
-        # Create new
+        # Create new (preferred_label already calculated above)
         self.cur.execute("""
             INSERT INTO dim_concepts (
                 concept_name, taxonomy, normalized_label, concept_type,
-                balance_type, period_type, data_type, is_abstract, statement_type
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                balance_type, period_type, data_type, is_abstract, statement_type, preferred_label
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING concept_id
         """, (
             concept_name,
@@ -139,7 +160,8 @@ class StarSchemaLoader:
             metadata.get('concept_period_type'),
             metadata.get('concept_data_type'),
             metadata.get('concept_abstract', False),
-            statement_type
+            statement_type,
+            preferred_label
         ))
         
         concept_id = self.cur.fetchone()[0]
@@ -413,6 +435,9 @@ class StarSchemaLoader:
         facts_loaded = 0
         facts_with_dims = 0
         
+        # Track facts by concept and period for completeness validation
+        facts_by_concept_period = {}  # (concept_name, period_year) -> count
+        
         for fact in facts:
             try:
                 # Get or create concept
@@ -430,6 +455,17 @@ class StarSchemaLoader:
                     fact.get('instant_date')
                 )
                 
+                # Track for completeness validation
+                concept_name = fact.get('concept')
+                period_end = fact.get('period_end')
+                instant_date = fact.get('instant_date')
+                date_str = period_end or instant_date
+                if date_str and concept_name:
+                    year = date_str[:4] if len(date_str) >= 4 else None
+                    if year:
+                        key = (concept_name, year)
+                        facts_by_concept_period[key] = facts_by_concept_period.get(key, 0) + 1
+                
                 # Get or create dimension
                 dimension_id = self.get_or_create_dimension(fact.get('dimensions'))
                 if dimension_id:
@@ -446,6 +482,39 @@ class StarSchemaLoader:
             except Exception as e:
                 print(f"      ⚠️  Skipped fact {fact.get('concept')}: {e}")
                 continue
+        
+        # Validate completeness: Check if concepts have data for all years
+        self.conn.commit()
+        concepts_by_year = {}
+        for (concept, year), count in facts_by_concept_period.items():
+            if concept not in concepts_by_year:
+                concepts_by_year[concept] = set()
+            concepts_by_year[concept].add(year)
+        
+        # Find concepts missing data for some years
+        all_years = set()
+        for years in concepts_by_year.values():
+            all_years.update(years)
+        all_years = sorted(all_years, reverse=True)
+        expected_years = all_years[:3] if len(all_years) > 3 else all_years
+        
+        incomplete_concepts = []
+        for concept, years in concepts_by_year.items():
+            missing_years = [y for y in expected_years if y not in years]
+            if missing_years:
+                incomplete_concepts.append((concept, sorted(years, reverse=True), missing_years))
+        
+        if incomplete_concepts:
+            print(f"\n      ⚠️  COMPLETENESS WARNING: {len(incomplete_concepts)} concepts missing data for some years")
+            print(f"         Expected years: {expected_years}")
+            print(f"         Sample incomplete concepts (showing first 10):")
+            for concept, years, missing in incomplete_concepts[:10]:
+                print(f"           {concept[:60]:<60} | Has: {years}, Missing: {missing}")
+            if len(incomplete_concepts) > 10:
+                print(f"           ... and {len(incomplete_concepts) - 10} more")
+            print(f"         This may indicate incomplete parsing. Re-parse the filing to ensure all facts are extracted.")
+        else:
+            print(f"\n      ✅ Completeness check passed: All concepts have data for all expected years")
         
         # Load relationships with synthesis
         from src.utils.relationship_synthesizer import synthesize_relationships_for_filing
@@ -509,6 +578,42 @@ class StarSchemaLoader:
         if xbrl_relationships.get('footnotes'):
             footnote_count = self.load_footnote_references(filing_id, xbrl_relationships['footnotes'], facts, data.get('metadata', {}))
             print(f"   ✅ Loaded {footnote_count} footnote references")
+        
+        # Populate standard presentation order for this filing if XBRL hierarchy is missing
+        # This ensures all filings have presentation hierarchy (XBRL or standard fallback)
+        # CRITICAL: This is now integrated into the pipeline, not a separate script
+        from sqlalchemy import create_engine, text
+        from config import DATABASE_URI
+        engine = create_engine(DATABASE_URI)
+        
+        # Check if this filing has any presentation hierarchy
+        with engine.connect() as conn:
+            check_query = text("""
+                SELECT COUNT(*) 
+                FROM rel_presentation_hierarchy 
+                WHERE filing_id = :filing_id
+            """)
+            result = conn.execute(check_query, {'filing_id': filing_id})
+            existing_count = result.fetchone()[0]
+        
+        # If no presentation hierarchy exists, populate standard order
+        # Note: populate_standard_presentation_order processes all filings but uses ON CONFLICT DO NOTHING
+        # so it's safe to call and will only insert missing relationships
+        if existing_count == 0:
+            print(f"   🔧 No XBRL presentation hierarchy found - populating standard presentation order...")
+            from src.utils.populate_standard_presentation_order import populate_standard_presentation_order
+            populate_standard_presentation_order(engine)
+            print(f"   ✅ Standard presentation order populated")
+        
+        # Populate rel_statement_items table (Approach 2: Statement Metadata Table)
+        print(f"   🔧 Populating statement items metadata...")
+        from src.utils.populate_statement_items import populate_statement_items
+        populate_statement_items(filing_id=filing_id)
+        
+        # Populate statement-specific fact tables (Approach 2: Denormalized for Performance)
+        print(f"   🔧 Populating statement-specific fact tables...")
+        from src.utils.populate_statement_facts import populate_statement_facts
+        populate_statement_facts(filing_id=filing_id)
         
         self.conn.commit()
         print(f"   ✅ Loaded {facts_loaded} facts ({facts_with_dims} with dimensions)")
@@ -596,16 +701,66 @@ class StarSchemaLoader:
         """Load presentation hierarchy relationships"""
         loaded = 0
         
+        def strip_namespace(concept_name: str) -> str:
+            """Strip namespace prefix from concept name (e.g., 'ifrs-full_Revenue' -> 'Revenue')"""
+            if not concept_name:
+                return concept_name
+            # Remove common namespace prefixes
+            for prefix in ['ifrs-full_', 'dei_', 'nvo_', 'us-gaap_', 'srt_', 'currency_', 'country_']:
+                if concept_name.startswith(prefix):
+                    return concept_name[len(prefix):]
+            return concept_name
+        
         for rel in pres_rels:
             try:
-                # Get child concept ID
-                child_taxonomy = self._identify_taxonomy_from_namespace(rel.get('child_namespace'))
+                # Get child concept ID - try with namespace prefix first, then without
+                child_namespace = rel.get('child_namespace')
+                child_taxonomy = self._identify_taxonomy_from_namespace(child_namespace)
+                child_concept_name = rel.get('child_concept', '')
+                child_concept_name_stripped = strip_namespace(child_concept_name)
                 
-                self.cur.execute("""
-                    SELECT concept_id FROM dim_concepts 
-                    WHERE concept_name = %s AND taxonomy = %s
-                """, (rel['child_concept'], child_taxonomy))
-                child_result = self.cur.fetchone()
+                # Infer taxonomy from concept name prefix if namespace is missing
+                if child_taxonomy == 'unknown' and child_concept_name:
+                    if child_concept_name.startswith('dei_'):
+                        child_taxonomy = 'DEI'
+                    elif child_concept_name.startswith('ifrs-full_'):
+                        child_taxonomy = 'IFRS'
+                    elif child_concept_name.startswith('nvo_'):
+                        child_taxonomy = 'custom'  # Company-specific
+                    elif child_concept_name.startswith('us-gaap_'):
+                        child_taxonomy = 'US-GAAP'
+                
+                # Try exact match first, then stripped match
+                # If taxonomy is unknown, try without taxonomy constraint
+                if child_taxonomy != 'unknown':
+                    self.cur.execute("""
+                        SELECT concept_id FROM dim_concepts 
+                        WHERE (concept_name = %s OR concept_name = %s) AND taxonomy = %s
+                    """, (child_concept_name, child_concept_name_stripped, child_taxonomy))
+                    child_result = self.cur.fetchone()
+                else:
+                    # Try without taxonomy constraint
+                    self.cur.execute("""
+                        SELECT concept_id FROM dim_concepts 
+                        WHERE concept_name = %s OR concept_name = %s
+                    """, (child_concept_name, child_concept_name_stripped))
+                    child_result = self.cur.fetchone()
+                
+                if not child_result:
+                    # Try matching by normalized_label as fallback
+                    if child_taxonomy != 'unknown':
+                        self.cur.execute("""
+                            SELECT concept_id FROM dim_concepts 
+                            WHERE normalized_label = %s AND taxonomy = %s
+                        """, (child_concept_name_stripped.lower().replace('_', ' '), child_taxonomy))
+                        child_result = self.cur.fetchone()
+                    else:
+                        # Try without taxonomy constraint
+                        self.cur.execute("""
+                            SELECT concept_id FROM dim_concepts 
+                            WHERE normalized_label = %s
+                        """, (child_concept_name_stripped.lower().replace('_', ' '),))
+                        child_result = self.cur.fetchone()
                 
                 if not child_result:
                     continue  # Skip if concept doesn't exist
@@ -615,12 +770,54 @@ class StarSchemaLoader:
                 # Get parent concept ID if present
                 parent_concept_id = None
                 if rel.get('parent_concept'):
-                    parent_taxonomy = self._identify_taxonomy_from_namespace(rel.get('parent_namespace'))
-                    self.cur.execute("""
-                        SELECT concept_id FROM dim_concepts 
-                        WHERE concept_name = %s AND taxonomy = %s
-                    """, (rel['parent_concept'], parent_taxonomy))
-                    parent_result = self.cur.fetchone()
+                    parent_namespace = rel.get('parent_namespace')
+                    parent_taxonomy = self._identify_taxonomy_from_namespace(parent_namespace)
+                    parent_concept_name = rel.get('parent_concept', '')
+                    parent_concept_name_stripped = strip_namespace(parent_concept_name)
+                    
+                    # Infer taxonomy from concept name prefix if namespace is missing
+                    if parent_taxonomy == 'unknown' and parent_concept_name:
+                        if parent_concept_name.startswith('dei_'):
+                            parent_taxonomy = 'DEI'
+                        elif parent_concept_name.startswith('ifrs-full_'):
+                            parent_taxonomy = 'IFRS'
+                        elif parent_concept_name.startswith('nvo_'):
+                            parent_taxonomy = 'custom'
+                        elif parent_concept_name.startswith('us-gaap_'):
+                            parent_taxonomy = 'US-GAAP'
+                    
+                    # Try exact match first, then stripped match
+                    # If taxonomy is unknown, try without taxonomy constraint
+                    if parent_taxonomy != 'unknown':
+                        self.cur.execute("""
+                            SELECT concept_id FROM dim_concepts 
+                            WHERE (concept_name = %s OR concept_name = %s) AND taxonomy = %s
+                        """, (parent_concept_name, parent_concept_name_stripped, parent_taxonomy))
+                        parent_result = self.cur.fetchone()
+                    else:
+                        # Try without taxonomy constraint
+                        self.cur.execute("""
+                            SELECT concept_id FROM dim_concepts 
+                            WHERE concept_name = %s OR concept_name = %s
+                        """, (parent_concept_name, parent_concept_name_stripped))
+                        parent_result = self.cur.fetchone()
+                    
+                    if not parent_result:
+                        # Try matching by normalized_label as fallback
+                        if parent_taxonomy != 'unknown':
+                            self.cur.execute("""
+                                SELECT concept_id FROM dim_concepts 
+                                WHERE normalized_label = %s AND taxonomy = %s
+                            """, (parent_concept_name_stripped.lower().replace('_', ' '), parent_taxonomy))
+                            parent_result = self.cur.fetchone()
+                        else:
+                            # Try without taxonomy constraint
+                            self.cur.execute("""
+                                SELECT concept_id FROM dim_concepts 
+                                WHERE normalized_label = %s
+                            """, (parent_concept_name_stripped.lower().replace('_', ' '),))
+                            parent_result = self.cur.fetchone()
+                    
                     if parent_result:
                         parent_concept_id = parent_result[0]
                 
@@ -628,10 +825,11 @@ class StarSchemaLoader:
                 self.cur.execute("""
                     INSERT INTO rel_presentation_hierarchy (
                         filing_id, parent_concept_id, child_concept_id,
-                        order_index, preferred_label, statement_type, arcrole, priority,
+                        order_index, preferred_label, statement_type, role_uri, arcrole, priority,
                         source, is_synthetic
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (filing_id, parent_concept_id, child_concept_id, order_index) DO NOTHING
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (filing_id, parent_concept_id, child_concept_id, order_index) DO UPDATE
+                    SET role_uri = EXCLUDED.role_uri
                 """, (
                     filing_id,
                     parent_concept_id,
@@ -639,6 +837,7 @@ class StarSchemaLoader:
                     rel.get('order_index'),
                     rel.get('preferred_label'),
                     rel.get('statement_type', 'other'),
+                    rel.get('role_uri'),  # CRITICAL: Store role URI for filtering main vs detail items
                     rel.get('arcrole'),
                     rel.get('priority', 0),
                     rel.get('source', 'xbrl'),
@@ -926,6 +1125,15 @@ def main():
                     print(f"✅ Created {count} calculated totals for {metric}")
         else:
             print("✅ No calculated totals needed")
+        
+        # SOLUTION 4: Populate standard presentation order for concepts missing XBRL hierarchy (lasting fix)
+        print("\n" + "="*80)
+        print("🔧 Populating standard presentation order...")
+        print("="*80)
+        from src.utils.populate_standard_presentation_order import populate_standard_presentation_order
+        
+        populate_standard_presentation_order(engine)
+        print("✅ Standard presentation order population complete!")
         
         # SOLUTION 4: Run comprehensive validation (including missingness checks)
         print("\n" + "="*80)

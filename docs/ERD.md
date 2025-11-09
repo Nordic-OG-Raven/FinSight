@@ -178,6 +178,77 @@
 │ UK (filing_id, fact_id,          │
 │     concept_id, footnote_label)  │
 └──────────────────────────────────┘
+
+┌──────────────────────────────────┐
+│  rel_statement_items             │
+├──────────────────────────────────┤
+│ PK statement_item_id (SERIAL)   │
+│ FK filing_id → dim_filings       │
+│ FK concept_id → dim_concepts      │
+│    statement_type VARCHAR(50)     │  -- income_statement, balance_sheet, etc.
+│    display_order INTEGER          │  -- Corrected order (handles EPS, headers)
+│    is_header BOOLEAN              │  -- TRUE for header items (e.g., "Earnings per share")
+│    is_main_item BOOLEAN           │  -- TRUE for main statement items (not detail/disclosure)
+│    role_uri VARCHAR(500)          │  -- For reference (from presentation hierarchy)
+│    source VARCHAR(20)             │  -- 'xbrl' or 'standard'
+│    created_at TIMESTAMP           │
+│ UK (filing_id, concept_id,        │
+│     statement_type)               │
+└──────────────────────────────────┘
+
+┌──────────────────────────────────┐
+│  fact_income_statement            │
+├──────────────────────────────────┤
+│ PK income_statement_id (SERIAL)  │
+│ FK filing_id → dim_filings       │
+│ FK concept_id → dim_concepts      │
+│ FK period_id → dim_time_periods   │
+│    value_numeric NUMERIC(20,2)    │
+│    unit_measure VARCHAR(20)       │
+│    display_order INTEGER          │  -- Pre-computed order from XBRL
+│    is_header BOOLEAN              │
+│    hierarchy_level INTEGER        │
+│ FK parent_concept_id →           │
+│    dim_concepts (NULL OK)         │
+│    created_at TIMESTAMP           │
+│ UK (filing_id, concept_id,        │
+│     period_id)                    │
+└──────────────────────────────────┘
+
+┌──────────────────────────────────┐
+│  fact_balance_sheet               │
+├──────────────────────────────────┤
+│ PK balance_sheet_id (SERIAL)     │
+│ (Same structure as               │
+│  fact_income_statement)          │
+└──────────────────────────────────┘
+
+┌──────────────────────────────────┐
+│  fact_cash_flow                   │
+├──────────────────────────────────┤
+│ PK cash_flow_id (SERIAL)         │
+│ (Same structure as               │
+│  fact_income_statement)          │
+└──────────────────────────────────┘
+
+┌──────────────────────────────────┐
+│  fact_comprehensive_income       │
+├──────────────────────────────────┤
+│ PK comprehensive_income_id       │
+│   (SERIAL)                       │
+│ (Same structure as               │
+│  fact_income_statement)          │
+└──────────────────────────────────┘
+
+┌──────────────────────────────────┐
+│  fact_equity_statement           │
+├──────────────────────────────────┤
+│ PK equity_statement_id (SERIAL) │
+│ (Same structure as               │
+│  fact_income_statement)          │
+│ NOTE: Not yet implemented in    │
+│       schema.sql (future)        │
+└──────────────────────────────────┘
 ```
 
 ## Relationships
@@ -214,6 +285,41 @@
 - **Many-to-One** → `fact_financial_metrics` (via `fact_id`, nullable)
 - **Many-to-One** → `dim_concepts` (via `concept_id`, nullable)
 
+**rel_statement_items**
+- **Many-to-One** → `dim_filings` (via `filing_id`)
+- **Many-to-One** → `dim_concepts` (via `concept_id`)
+
+**fact_income_statement**
+- **Many-to-One** → `dim_filings` (via `filing_id`)
+- **Many-to-One** → `dim_concepts` (via `concept_id`)
+- **Many-to-One** → `dim_time_periods` (via `period_id`)
+- **Many-to-One** → `dim_concepts` (via `parent_concept_id`, nullable)
+
+**fact_balance_sheet**
+- **Many-to-One** → `dim_filings` (via `filing_id`)
+- **Many-to-One** → `dim_concepts` (via `concept_id`)
+- **Many-to-One** → `dim_time_periods` (via `period_id`)
+- **Many-to-One** → `dim_concepts` (via `parent_concept_id`, nullable)
+
+**fact_cash_flow**
+- **Many-to-One** → `dim_filings` (via `filing_id`)
+- **Many-to-One** → `dim_concepts` (via `concept_id`)
+- **Many-to-One** → `dim_time_periods` (via `period_id`)
+- **Many-to-One** → `dim_concepts` (via `parent_concept_id`, nullable)
+
+**fact_comprehensive_income**
+- **Many-to-One** → `dim_filings` (via `filing_id`)
+- **Many-to-One** → `dim_concepts` (via `concept_id`)
+- **Many-to-One** → `dim_time_periods` (via `period_id`)
+- **Many-to-One** → `dim_concepts` (via `parent_concept_id`, nullable)
+
+**fact_equity_statement** (Future Implementation)
+- **Many-to-One** → `dim_filings` (via `filing_id`)
+- **Many-to-One** → `dim_concepts` (via `concept_id`)
+- **Many-to-One** → `dim_time_periods` (via `period_id`)
+- **Many-to-One** → `dim_concepts` (via `parent_concept_id`, nullable)
+- **Note**: Statement of Changes in Equity - not yet implemented in schema.sql
+
 ## Key Constraints
 
 ### Primary Keys (Auto-increment SERIAL)
@@ -237,6 +343,24 @@
 - `rel_footnote_references.filing_id` → `dim_filings.filing_id`
 - `rel_footnote_references.fact_id` → `fact_financial_metrics.fact_id` (nullable)
 - `rel_footnote_references.concept_id` → `dim_concepts.concept_id` (nullable)
+- `rel_statement_items.filing_id` → `dim_filings.filing_id`
+- `rel_statement_items.concept_id` → `dim_concepts.concept_id`
+- `fact_income_statement.filing_id` → `dim_filings.filing_id`
+- `fact_income_statement.concept_id` → `dim_concepts.concept_id`
+- `fact_income_statement.period_id` → `dim_time_periods.period_id`
+- `fact_income_statement.parent_concept_id` → `dim_concepts.concept_id` (nullable)
+- `fact_balance_sheet.filing_id` → `dim_filings.filing_id`
+- `fact_balance_sheet.concept_id` → `dim_concepts.concept_id`
+- `fact_balance_sheet.period_id` → `dim_time_periods.period_id`
+- `fact_balance_sheet.parent_concept_id` → `dim_concepts.concept_id` (nullable)
+- `fact_cash_flow.filing_id` → `dim_filings.filing_id`
+- `fact_cash_flow.concept_id` → `dim_concepts.concept_id`
+- `fact_cash_flow.period_id` → `dim_time_periods.period_id`
+- `fact_cash_flow.parent_concept_id` → `dim_concepts.concept_id` (nullable)
+- `fact_comprehensive_income.filing_id` → `dim_filings.filing_id`
+- `fact_comprehensive_income.concept_id` → `dim_concepts.concept_id`
+- `fact_comprehensive_income.period_id` → `dim_time_periods.period_id`
+- `fact_comprehensive_income.parent_concept_id` → `dim_concepts.concept_id` (nullable)
 
 ### Unique Constraints (Business Keys)
 
@@ -275,6 +399,25 @@
 
 **rel_footnote_references:**
 - `UNIQUE(filing_id, fact_id, concept_id, footnote_label)` - One footnote reference per fact/concept-label combo per filing
+
+**rel_statement_items:**
+- `UNIQUE(filing_id, concept_id, statement_type)` - One statement item per concept per statement type per filing
+
+**fact_income_statement:**
+- `UNIQUE(filing_id, concept_id, period_id)` - One fact per concept per period per filing
+
+**fact_balance_sheet:**
+- `UNIQUE(filing_id, concept_id, period_id)` - One fact per concept per period per filing
+
+**fact_cash_flow:**
+- `UNIQUE(filing_id, concept_id, period_id)` - One fact per concept per period per filing
+
+**fact_comprehensive_income:**
+- `UNIQUE(filing_id, concept_id, period_id)` - One fact per concept per period per filing
+
+**fact_equity_statement:** (Future Implementation)
+- `UNIQUE(filing_id, concept_id, period_id)` - One fact per concept per period per filing
+- **Note**: Not yet implemented in schema.sql
 
 ## Data Flow
 

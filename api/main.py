@@ -17,6 +17,7 @@ from contextlib import contextmanager
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.main import run_pipeline
+from src.utils.concept_label_mapping import get_humanized_label
 from config import DATABASE_URL
 
 app = Flask(__name__)
@@ -316,6 +317,10 @@ def analyze_preloaded(ticker, year):
                     JOIN dim_concepts co ON fm.concept_id = co.concept_id
                     JOIN dim_time_periods p ON fm.period_id = p.period_id
                     JOIN dim_filings f ON fm.filing_id = f.filing_id
+                    LEFT JOIN rel_presentation_hierarchy ph ON 
+                        ph.filing_id = f.filing_id 
+                        AND ph.child_concept_id = co.concept_id
+                        AND ph.parent_concept_id IS NOT DISTINCT FROM co.parent_concept_id
                     WHERE c.ticker = :ticker 
                       AND EXTRACT(YEAR FROM f.fiscal_year_end) = :year
                       AND fm.dimension_id IS NULL
@@ -328,6 +333,13 @@ def analyze_preloaded(ticker, year):
                             WHEN co.statement_type = 'cash_flow' THEN 3
                             ELSE 4
                         END,
+                        -- Two-tier ordering: XBRL first, then standard templates
+                        CASE 
+                            WHEN ph.source = 'xbrl' THEN 1
+                            WHEN ph.source = 'standard' THEN 2
+                            ELSE 3
+                        END,
+                        COALESCE(ph.order_index, 999999),
                         COALESCE(co.hierarchy_level, 0) DESC,
                         co.normalized_label
                 """)
@@ -777,7 +789,7 @@ def get_data():
 def get_financial_statements(ticker, year):
     """
     Get full financial statements (Income Statement, Balance Sheet, Cash Flow)
-    Organized by statement type and hierarchy level
+    Returns multi-year data for all period years available in the filing
     """
     ticker = ticker.upper()
     
@@ -786,55 +798,396 @@ def get_financial_statements(ticker, year):
         engine = create_engine(DATABASE_URL)
         
         with engine.connect() as conn:
-            # Get all metrics - use statement_type from database (should be populated now)
-            query = text("""
-                SELECT 
-                    co.statement_type,
-                    co.normalized_label,
-                    co.concept_name,
-                    fm.value_numeric,
-                    fm.unit_measure,
-                    COALESCE(p.end_date, p.instant_date) as period_date,
-                    p.period_type,
-                    co.hierarchy_level,
-                    co.parent_concept_id,
+            # First, find all period years available in this filing
+            years_query = text("""
+                SELECT DISTINCT 
                     CASE 
-                        WHEN co.parent_concept_id IS NULL THEN NULL
-                        ELSE (
-                            SELECT normalized_label 
-                            FROM dim_concepts 
-                            WHERE concept_id = co.parent_concept_id
-                        )
-                    END as parent_normalized_label
+                        -- For duration periods: use period_start year as fiscal year
+                        WHEN p.period_type = 'duration' AND p.start_date IS NOT NULL THEN 
+                            EXTRACT(YEAR FROM p.start_date)::INTEGER
+                        -- For instant periods in January: use previous year as fiscal year
+                        WHEN p.period_type = 'instant' AND p.instant_date IS NOT NULL AND EXTRACT(MONTH FROM p.instant_date) = 1 THEN
+                            EXTRACT(YEAR FROM p.instant_date)::INTEGER - 1
+                        -- For duration periods ending in January: use period_end year - 1 as fiscal year
+                        WHEN p.period_type = 'duration' AND p.end_date IS NOT NULL AND EXTRACT(MONTH FROM p.end_date) = 1 THEN
+                            EXTRACT(YEAR FROM p.end_date)::INTEGER - 1
+                        -- Default: use period_end or instant_date year
+                        ELSE EXTRACT(YEAR FROM COALESCE(p.end_date, p.instant_date))::INTEGER
+                    END as period_year
                 FROM fact_financial_metrics fm
                 JOIN dim_companies c ON fm.company_id = c.company_id
-                JOIN dim_concepts co ON fm.concept_id = co.concept_id
                 JOIN dim_time_periods p ON fm.period_id = p.period_id
                 JOIN dim_filings f ON fm.filing_id = f.filing_id
                 WHERE c.ticker = :ticker 
                   AND EXTRACT(YEAR FROM f.fiscal_year_end) = :year
                   AND fm.dimension_id IS NULL
                   AND fm.value_numeric IS NOT NULL
-                  AND EXTRACT(YEAR FROM COALESCE(p.end_date, p.instant_date)) = :year
+                ORDER BY period_year DESC
+            """)
+            years_result = conn.execute(years_query, {"ticker": ticker, "year": year})
+            available_years = [row[0] for row in years_result.fetchall()]
+            
+            if not available_years:
+                return jsonify({
+                    "error": "not_found",
+                    "message": f"No data found for {ticker} filing year {year}"
+                }), 404
+            
+            # Use all available years (or limit to most recent 3 if there are more)
+            years = available_years[:3] if len(available_years) > 3 else available_years
+            
+            # Get accounting standard for this company
+            accounting_standard_query = text("""
+                SELECT accounting_standard 
+                FROM dim_companies 
+                WHERE ticker = :ticker
+            """)
+            standard_result = conn.execute(accounting_standard_query, {"ticker": ticker})
+            standard_row = standard_result.fetchone()
+            accounting_standard = standard_row[0] if standard_row and standard_row[0] else 'US-GAAP'  # Default to US-GAAP
+            
+            # Get fiscal year end date for date display
+            fiscal_year_end_query = text("""
+                SELECT f.fiscal_year_end
+                FROM dim_filings f
+                JOIN dim_companies c ON f.company_id = c.company_id
+                WHERE c.ticker = :ticker
+                  AND EXTRACT(YEAR FROM f.fiscal_year_end) = :year
+                LIMIT 1
+            """)
+            fiscal_result = conn.execute(fiscal_year_end_query, {"ticker": ticker, "year": year})
+            fiscal_row = fiscal_result.fetchone()
+            fiscal_year_end = fiscal_row[0] if fiscal_row and fiscal_row[0] else None
+            
+            # ULTRA-SIMPLE QUERY using statement-specific fact tables (Approach 2: Denormalized)
+            # These tables are pre-filtered, pre-ordered, and pre-separated by statement type
+            # No complex joins or filtering needed - just query the appropriate table
+            
+            # Build UNION query for all statement types
+            queries = []
+            
+            # Income statement
+            queries.append(f"""
+                SELECT 
+                    'income_statement' as statement_type,
+                    co.normalized_label,
+                    co.concept_name,
+                    co.preferred_label,
+                    fis.value_numeric,
+                    fis.unit_measure,
+                    COALESCE(p.end_date, p.instant_date) as period_date,
+                    CASE 
+                        WHEN p.period_type = 'duration' AND p.start_date IS NOT NULL THEN 
+                            EXTRACT(YEAR FROM p.start_date)::INTEGER
+                        WHEN p.period_type = 'instant' AND p.instant_date IS NOT NULL AND EXTRACT(MONTH FROM p.instant_date) = 1 THEN
+                            EXTRACT(YEAR FROM p.instant_date)::INTEGER - 1
+                        WHEN p.period_type = 'duration' AND p.end_date IS NOT NULL AND EXTRACT(MONTH FROM p.end_date) = 1 THEN
+                            EXTRACT(YEAR FROM p.end_date)::INTEGER - 1
+                        ELSE EXTRACT(YEAR FROM COALESCE(p.end_date, p.instant_date))::INTEGER
+                    END as period_year,
+                    p.period_type,
+                    fis.hierarchy_level,
+                    fis.parent_concept_id,
+                    CASE 
+                        WHEN fis.parent_concept_id IS NULL THEN NULL
+                        ELSE (
+                            SELECT normalized_label 
+                            FROM dim_concepts 
+                            WHERE concept_id = fis.parent_concept_id
+                        )
+                    END as parent_normalized_label,
+                    fis.display_order as presentation_order_index,
+                    'xbrl' as presentation_source,
+                    fis.is_header,
+                    NULL as side,  -- Not applicable for income statement
+                    NULL as equity_component  -- Not applicable for income statement
+                FROM fact_income_statement fis
+                JOIN dim_concepts co ON fis.concept_id = co.concept_id
+                JOIN dim_time_periods p ON fis.period_id = p.period_id
+                JOIN dim_filings f ON fis.filing_id = f.filing_id
+                JOIN dim_companies c ON f.company_id = c.company_id
+                WHERE c.ticker = :ticker 
+                  AND EXTRACT(YEAR FROM f.fiscal_year_end) = :year
+                  AND (
+                      CASE 
+                          WHEN p.period_type = 'duration' AND p.start_date IS NOT NULL THEN 
+                              EXTRACT(YEAR FROM p.start_date)::INTEGER
+                          WHEN p.period_type = 'instant' AND p.instant_date IS NOT NULL AND EXTRACT(MONTH FROM p.instant_date) = 1 THEN
+                              EXTRACT(YEAR FROM p.instant_date)::INTEGER - 1
+                          WHEN p.period_type = 'duration' AND p.end_date IS NOT NULL AND EXTRACT(MONTH FROM p.end_date) = 1 THEN
+                              EXTRACT(YEAR FROM p.end_date)::INTEGER - 1
+                          ELSE EXTRACT(YEAR FROM COALESCE(p.end_date, p.instant_date))::INTEGER
+                      END
+                  ) = ANY(:years)
+            """)
+            
+            # Balance sheet
+            queries.append(f"""
+                SELECT 
+                    'balance_sheet' as statement_type,
+                    co.normalized_label,
+                    co.concept_name,
+                    co.preferred_label,
+                    fbs.value_numeric,
+                    fbs.unit_measure,
+                    COALESCE(p.end_date, p.instant_date) as period_date,
+                    CASE 
+                        WHEN p.period_type = 'duration' AND p.start_date IS NOT NULL THEN 
+                            EXTRACT(YEAR FROM p.start_date)::INTEGER
+                        WHEN p.period_type = 'instant' AND p.instant_date IS NOT NULL AND EXTRACT(MONTH FROM p.instant_date) = 1 THEN
+                            EXTRACT(YEAR FROM p.instant_date)::INTEGER - 1
+                        WHEN p.period_type = 'duration' AND p.end_date IS NOT NULL AND EXTRACT(MONTH FROM p.end_date) = 1 THEN
+                            EXTRACT(YEAR FROM p.end_date)::INTEGER - 1
+                        ELSE EXTRACT(YEAR FROM COALESCE(p.end_date, p.instant_date))::INTEGER
+                    END as period_year,
+                    p.period_type,
+                    fbs.hierarchy_level,
+                    fbs.parent_concept_id,
+                    CASE 
+                        WHEN fbs.parent_concept_id IS NULL THEN NULL
+                        ELSE (
+                            SELECT normalized_label 
+                            FROM dim_concepts 
+                            WHERE concept_id = fbs.parent_concept_id
+                        )
+                    END as parent_normalized_label,
+                    fbs.display_order as presentation_order_index,
+                    'xbrl' as presentation_source,
+                    fbs.is_header,
+                    fbs.side,  -- Left side (assets) or right side (liabilities_equity)
+                    NULL as equity_component  -- Not applicable for balance sheet
+                FROM fact_balance_sheet fbs
+                JOIN dim_concepts co ON fbs.concept_id = co.concept_id
+                JOIN dim_time_periods p ON fbs.period_id = p.period_id
+                JOIN dim_filings f ON fbs.filing_id = f.filing_id
+                JOIN dim_companies c ON f.company_id = c.company_id
+                WHERE c.ticker = :ticker
+                  AND EXTRACT(YEAR FROM f.fiscal_year_end) = :year
+                  AND (
+                      CASE 
+                          WHEN p.period_type = 'duration' AND p.start_date IS NOT NULL THEN 
+                              EXTRACT(YEAR FROM p.start_date)::INTEGER
+                          WHEN p.period_type = 'instant' AND p.instant_date IS NOT NULL AND EXTRACT(MONTH FROM p.instant_date) = 1 THEN
+                              EXTRACT(YEAR FROM p.instant_date)::INTEGER - 1
+                          WHEN p.period_type = 'duration' AND p.end_date IS NOT NULL AND EXTRACT(MONTH FROM p.end_date) = 1 THEN
+                              EXTRACT(YEAR FROM p.end_date)::INTEGER - 1
+                          ELSE EXTRACT(YEAR FROM COALESCE(p.end_date, p.instant_date))::INTEGER
+                      END
+                  ) = ANY(:years)
+            """)
+            
+            # Cash flow
+            queries.append(f"""
+                SELECT 
+                    'cash_flow' as statement_type,
+                    co.normalized_label,
+                    co.concept_name,
+                    co.preferred_label,
+                    fcf.value_numeric,
+                    fcf.unit_measure,
+                    COALESCE(p.end_date, p.instant_date) as period_date,
+                    CASE 
+                        WHEN p.period_type = 'duration' AND p.start_date IS NOT NULL THEN 
+                            EXTRACT(YEAR FROM p.start_date)::INTEGER
+                        WHEN p.period_type = 'instant' AND p.instant_date IS NOT NULL AND EXTRACT(MONTH FROM p.instant_date) = 1 THEN
+                            EXTRACT(YEAR FROM p.instant_date)::INTEGER - 1
+                        WHEN p.period_type = 'duration' AND p.end_date IS NOT NULL AND EXTRACT(MONTH FROM p.end_date) = 1 THEN
+                            EXTRACT(YEAR FROM p.end_date)::INTEGER - 1
+                        ELSE EXTRACT(YEAR FROM COALESCE(p.end_date, p.instant_date))::INTEGER
+                    END as period_year,
+                    p.period_type,
+                    fcf.hierarchy_level,
+                    fcf.parent_concept_id,
+                    CASE 
+                        WHEN fcf.parent_concept_id IS NULL THEN NULL
+                        ELSE (
+                            SELECT normalized_label 
+                            FROM dim_concepts 
+                            WHERE concept_id = fcf.parent_concept_id
+                        )
+                    END as parent_normalized_label,
+                    fcf.display_order as presentation_order_index,
+                    'xbrl' as presentation_source,
+                    fcf.is_header,
+                    NULL as side,  -- Not applicable for cash flow
+                    NULL as equity_component  -- Not applicable for cash flow
+                FROM fact_cash_flow fcf
+                JOIN dim_concepts co ON fcf.concept_id = co.concept_id
+                JOIN dim_time_periods p ON fcf.period_id = p.period_id
+                JOIN dim_filings f ON fcf.filing_id = f.filing_id
+                JOIN dim_companies c ON f.company_id = c.company_id
+                WHERE c.ticker = :ticker
+                  AND EXTRACT(YEAR FROM f.fiscal_year_end) = :year
+                  AND (
+                      CASE 
+                          WHEN p.period_type = 'duration' AND p.start_date IS NOT NULL THEN 
+                              EXTRACT(YEAR FROM p.start_date)::INTEGER
+                          WHEN p.period_type = 'instant' AND p.instant_date IS NOT NULL AND EXTRACT(MONTH FROM p.instant_date) = 1 THEN
+                              EXTRACT(YEAR FROM p.instant_date)::INTEGER - 1
+                          WHEN p.period_type = 'duration' AND p.end_date IS NOT NULL AND EXTRACT(MONTH FROM p.end_date) = 1 THEN
+                              EXTRACT(YEAR FROM p.end_date)::INTEGER - 1
+                          ELSE EXTRACT(YEAR FROM COALESCE(p.end_date, p.instant_date))::INTEGER
+                      END
+                  ) = ANY(:years)
+            """)
+            
+            # Comprehensive income
+            queries.append(f"""
+                SELECT 
+                    'comprehensive_income' as statement_type,
+                    co.normalized_label,
+                    co.concept_name,
+                    co.preferred_label,
+                    fci.value_numeric,
+                    fci.unit_measure,
+                    COALESCE(p.end_date, p.instant_date) as period_date,
+                    CASE 
+                        WHEN p.period_type = 'duration' AND p.start_date IS NOT NULL THEN 
+                            EXTRACT(YEAR FROM p.start_date)::INTEGER
+                        WHEN p.period_type = 'instant' AND p.instant_date IS NOT NULL AND EXTRACT(MONTH FROM p.instant_date) = 1 THEN
+                            EXTRACT(YEAR FROM p.instant_date)::INTEGER - 1
+                        WHEN p.period_type = 'duration' AND p.end_date IS NOT NULL AND EXTRACT(MONTH FROM p.end_date) = 1 THEN
+                            EXTRACT(YEAR FROM p.end_date)::INTEGER - 1
+                        ELSE EXTRACT(YEAR FROM COALESCE(p.end_date, p.instant_date))::INTEGER
+                    END as period_year,
+                    p.period_type,
+                    fci.hierarchy_level,
+                    fci.parent_concept_id,
+                    CASE 
+                        WHEN fci.parent_concept_id IS NULL THEN NULL
+                        ELSE (
+                            SELECT normalized_label 
+                            FROM dim_concepts 
+                            WHERE concept_id = fci.parent_concept_id
+                        )
+                    END as parent_normalized_label,
+                    fci.display_order as presentation_order_index,
+                    'xbrl' as presentation_source,
+                    fci.is_header,
+                    NULL as side,  -- Not applicable for comprehensive income
+                    NULL as equity_component  -- Not applicable for comprehensive income
+                FROM fact_comprehensive_income fci
+                JOIN dim_concepts co ON fci.concept_id = co.concept_id
+                JOIN dim_time_periods p ON fci.period_id = p.period_id
+                JOIN dim_filings f ON fci.filing_id = f.filing_id
+                JOIN dim_companies c ON f.company_id = c.company_id
+                WHERE c.ticker = :ticker
+                  AND EXTRACT(YEAR FROM f.fiscal_year_end) = :year
+                  AND (
+                      CASE 
+                          WHEN p.period_type = 'duration' AND p.start_date IS NOT NULL THEN 
+                              EXTRACT(YEAR FROM p.start_date)::INTEGER
+                          WHEN p.period_type = 'instant' AND p.instant_date IS NOT NULL AND EXTRACT(MONTH FROM p.instant_date) = 1 THEN
+                              EXTRACT(YEAR FROM p.instant_date)::INTEGER - 1
+                          WHEN p.period_type = 'duration' AND p.end_date IS NOT NULL AND EXTRACT(MONTH FROM p.end_date) = 1 THEN
+                              EXTRACT(YEAR FROM p.end_date)::INTEGER - 1
+                          ELSE EXTRACT(YEAR FROM COALESCE(p.end_date, p.instant_date))::INTEGER
+                      END
+                  ) = ANY(:years)
+            """)
+            
+            # Equity statement
+            queries.append(f"""
+                SELECT 
+                    'equity_statement' as statement_type,
+                    co.normalized_label,
+                    co.concept_name,
+                    co.preferred_label,
+                    fes.value_numeric,
+                    fes.unit_measure,
+                    COALESCE(p.end_date, p.instant_date) as period_date,
+                    CASE 
+                        WHEN p.period_type = 'duration' AND p.start_date IS NOT NULL THEN 
+                            EXTRACT(YEAR FROM p.start_date)::INTEGER
+                        WHEN p.period_type = 'instant' AND p.instant_date IS NOT NULL AND EXTRACT(MONTH FROM p.instant_date) = 1 THEN
+                            EXTRACT(YEAR FROM p.instant_date)::INTEGER - 1
+                        WHEN p.period_type = 'duration' AND p.end_date IS NOT NULL AND EXTRACT(MONTH FROM p.end_date) = 1 THEN
+                            EXTRACT(YEAR FROM p.end_date)::INTEGER - 1
+                        ELSE EXTRACT(YEAR FROM COALESCE(p.end_date, p.instant_date))::INTEGER
+                    END as period_year,
+                    p.period_type,
+                    fes.hierarchy_level,
+                    fes.parent_concept_id,
+                    CASE 
+                        WHEN fes.parent_concept_id IS NULL THEN NULL
+                        ELSE (
+                            SELECT normalized_label 
+                            FROM dim_concepts 
+                            WHERE concept_id = fes.parent_concept_id
+                        )
+                    END as parent_normalized_label,
+                    fes.display_order as presentation_order_index,
+                    'xbrl' as presentation_source,
+                    fes.is_header,
+                    NULL as side,  -- Not applicable for equity statement
+                    fes.equity_component  -- Equity component breakdown: 'share_capital', 'treasury_shares', 'retained_earnings', 'other_reserves', NULL for totals
+                FROM fact_equity_statement fes
+                JOIN dim_concepts co ON fes.concept_id = co.concept_id
+                JOIN dim_time_periods p ON fes.period_id = p.period_id
+                JOIN dim_filings f ON fes.filing_id = f.filing_id
+                JOIN dim_companies c ON f.company_id = c.company_id
+                WHERE c.ticker = :ticker
+                  AND EXTRACT(YEAR FROM f.fiscal_year_end) = :year
+                  AND (
+                      CASE 
+                          WHEN p.period_type = 'duration' AND p.start_date IS NOT NULL THEN 
+                              EXTRACT(YEAR FROM p.start_date)::INTEGER
+                          WHEN p.period_type = 'instant' AND p.instant_date IS NOT NULL AND EXTRACT(MONTH FROM p.instant_date) = 1 THEN
+                              EXTRACT(YEAR FROM p.instant_date)::INTEGER - 1
+                          WHEN p.period_type = 'duration' AND p.end_date IS NOT NULL AND EXTRACT(MONTH FROM p.end_date) = 1 THEN
+                              EXTRACT(YEAR FROM p.end_date)::INTEGER - 1
+                          ELSE EXTRACT(YEAR FROM COALESCE(p.end_date, p.instant_date))::INTEGER
+                      END
+                  ) = ANY(:years)
+            """)
+            
+            # Combine all queries with UNION ALL
+            # Wrap in subquery to allow ORDER BY with expressions
+            # Note: Using f-strings in queries is safe here because we're not using user input
+            combined_query = f"""
+                SELECT * FROM (
+                    {" UNION ALL ".join(queries)}
+                ) AS combined_results
                 ORDER BY 
-                    CASE co.statement_type
+                    CASE statement_type
                         WHEN 'income_statement' THEN 1
                         WHEN 'balance_sheet' THEN 2
                         WHEN 'cash_flow' THEN 3
-                        ELSE 4
+                        WHEN 'comprehensive_income' THEN 4
+                        ELSE 5
                     END,
-                    COALESCE(co.hierarchy_level, 0) DESC,
-                    co.normalized_label
-            """)
+                    presentation_order_index,
+                    hierarchy_level DESC NULLS LAST,
+                    normalized_label
+            """
+            query = text(combined_query)
             
-            result = conn.execute(query, {"ticker": ticker, "year": year})
+            # Execute query with parameters
+            result = conn.execute(query, {
+                "ticker": ticker, 
+                "year": year,
+                "years": years
+            })
             rows = result.fetchall()
             
-            # Organize by statement type (use database value, fallback to inference if NULL)
+            # Get accounting standard for this company
+            accounting_standard_query = text("""
+                SELECT accounting_standard 
+                FROM dim_companies 
+                WHERE ticker = :ticker
+            """)
+            standard_result = conn.execute(accounting_standard_query, {"ticker": ticker})
+            standard_row = standard_result.fetchone()
+            accounting_standard = standard_row[0] if standard_row and standard_row[0] else 'US-GAAP'  # Default to US-GAAP
+            
+            # Organize by statement type and year
+            # Separate comprehensive income items from income statement for proper presentation
             statements = {
                 "income_statement": [],
+                "comprehensive_income": [],  # OCI items
                 "balance_sheet": [],
-                "cash_flow": []
+                "cash_flow": [],
+                "equity_statement": []  # Statement of Changes in Equity
             }
             
             def infer_statement_type_fallback(normalized_label: str, period_type: str) -> str:
@@ -851,29 +1204,122 @@ def get_financial_statements(ticker, year):
                     return 'cash_flow'
                 return 'other'
             
+            # CRITICAL FIX: Use column names instead of positional indices
+            # SQLAlchemy Row objects support both dict-like and attribute access
             for row in rows:
-                db_stmt_type = row[0]
-                normalized_label = row[1] or ''
-                period_type = row[6] or 'duration'
-                
-                # Use database value, fallback to inference if NULL
-                stmt_type = db_stmt_type if db_stmt_type else infer_statement_type_fallback(normalized_label, period_type)
-                
-                if stmt_type in statements:
-                    statements[stmt_type].append({
+                try:
+                    # Convert row to dict for safe access (SQLAlchemy Row supports this)
+                    row_dict = dict(row._mapping) if hasattr(row, '_mapping') else dict(row)
+                    
+                    db_stmt_type = row_dict.get('statement_type', '')
+                    normalized_label = row_dict.get('normalized_label', '') or ''
+                    period_type = row_dict.get('period_type', 'duration') or 'duration'
+                    
+                    # Safely extract period_year
+                    try:
+                        period_year_val = row_dict.get('period_year')
+                    except Exception:
+                        period_year_val = None
+                    
+                    try:
+                        period_year = int(float(period_year_val)) if period_year_val is not None and period_year_val != '' else year
+                    except (ValueError, TypeError):
+                        period_year = year
+                    
+                    # Use database value, fallback to inference if NULL
+                    stmt_type = db_stmt_type if db_stmt_type else infer_statement_type_fallback(normalized_label, period_type)
+                    
+                    # Separate comprehensive income items (OCI) from income statement
+                    if stmt_type == 'comprehensive_income':
+                        final_stmt_type = 'comprehensive_income'
+                    else:
+                        label_lower = normalized_label.lower()
+                        is_oci = any(term in label_lower for term in [
+                            'other_comprehensive_income', 'comprehensive_income', 'oci',
+                            'remeasurement', 'exchange_rate_adjustment', 'cash_flow_hedge',
+                            'reclassification', 'fair_value_hedge'
+                        ]) and stmt_type == 'income_statement'
+                        final_stmt_type = 'comprehensive_income' if is_oci else stmt_type
+                    
+                    # Extract using column names (type-safe, self-documenting)
+                    hierarchy_level_val = row_dict.get('hierarchy_level')
+                    hierarchy_level = int(hierarchy_level_val) if hierarchy_level_val is not None and hierarchy_level_val != '' else None
+                    
+                    # CRITICAL: Use column name, not index
+                    presentation_order_index_val = row_dict.get('presentation_order_index')
+                    if presentation_order_index_val is not None:
+                        try:
+                            presentation_order_index = int(presentation_order_index_val)
+                        except (ValueError, TypeError):
+                            presentation_order_index = None
+                    else:
+                        presentation_order_index = None
+                    
+                    # CRITICAL: Use column name, not index
+                    is_header_val = row_dict.get('is_header')
+                    if isinstance(is_header_val, bool):
+                        is_header = is_header_val
+                    elif is_header_val is not None:
+                        # Handle non-boolean values (shouldn't happen, but be safe)
+                        is_header = bool(is_header_val)
+                    else:
+                        is_header = False
+                    
+                    # Get preferred_label from database (LASTING - populated during ETL)
+                    preferred_label = row_dict.get('preferred_label')
+                    # Fallback to runtime mapping if not in database (for backward compatibility)
+                    if not preferred_label:
+                        preferred_label = get_humanized_label(
+                            row_dict.get('concept_name', ''),
+                            normalized_label
+                        )
+                    
+                    if final_stmt_type in statements:
+                        item = {
                         "normalized_label": normalized_label,
-                        "concept_name": row[2],
-                        "value": float(row[3]) if row[3] else None,
-                        "unit": row[4],
-                        "period_date": row[5].isoformat() if row[5] else None,
+                        "concept_name": row_dict.get('concept_name', ''),
+                        "preferred_label": preferred_label,  # LASTING - from database, populated during ETL
+                        "value": float(row_dict.get('value_numeric')) if row_dict.get('value_numeric') is not None else None,
+                        "unit": row_dict.get('unit_measure', ''),
+                        "period_date": row_dict.get('period_date').isoformat() if row_dict.get('period_date') else None,
+                        "period_year": period_year,
                         "period_type": period_type,
-                        "hierarchy_level": int(row[7]) if row[7] else None,
-                        "parent_normalized_label": row[9]
-                    })
+                        "hierarchy_level": hierarchy_level,
+                        "parent_normalized_label": row_dict.get('parent_normalized_label'),
+                        "presentation_order_index": presentation_order_index,
+                        "presentation_source": row_dict.get('presentation_source', 'xbrl'),
+                        "is_header": is_header,
+                        "side": row_dict.get('side'),  # For balance sheet: 'assets' or 'liabilities_equity'
+                        "equity_component": row_dict.get('equity_component')  # For equity statement: 'share_capital', 'treasury_shares', 'retained_earnings', 'other_reserves', NULL for totals
+                    }
+                    statements[final_stmt_type].append(item)
+                except Exception as e:
+                    # Skip rows with errors, log them
+                    import traceback
+                    print(f"Error processing row: {e}")
+                    print(f"Row length: {len(row)}, row preview: {row[:5] if len(row) > 5 else row}")
+                    print(traceback.format_exc())
+                    continue
+            
+            # Sort each statement by display_order (already computed in rel_statement_items)
+            # CRITICAL: Sort by presentation_order_index first, then by hierarchy_level, then by normalized_label
+            for statement_type in statements:
+                statements[statement_type].sort(key=lambda x: (
+                    x.get('presentation_order_index') if x.get('presentation_order_index') is not None else 999999,
+                    -(x.get('hierarchy_level') if x.get('hierarchy_level') is not None else 0),  # DESC
+                    x.get('normalized_label', '')
+                ))
+            
+            # CRITICAL: Headers are already in fact tables with is_header=True
+            # Skip the post-processing header extraction - it's interfering with our data
+            # Headers are now populated directly in fact tables, so no post-processing needed
             
             return jsonify({
                 "company": ticker,
                 "year": year,
+                "years": years,
+                "accounting_standard": accounting_standard,
+                "fiscal_year_end": fiscal_year_end.isoformat() if fiscal_year_end else None,
                 "statements": statements,
                 "count": sum(len(v) for v in statements.values())
             })
@@ -1021,6 +1467,6 @@ def admin_load_companies():
     return jsonify({"results": results})
 
 if __name__ == '__main__':
-    port = int(os.getenv('PORT', 5000))
+    port = int(os.getenv('PORT', 5001))
     app.run(host='0.0.0.0', port=port, debug=os.getenv('ENVIRONMENT') != 'production')
 

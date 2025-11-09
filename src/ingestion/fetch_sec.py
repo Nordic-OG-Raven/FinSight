@@ -338,12 +338,14 @@ class SECFilingDownloader:
             # Download complete package if requested
             if download_complete_package:
                 # Download linkbase files
+                linkbase_downloaded = 0
                 for category in ['calculation', 'presentation', 'definition', 'label', 'schema']:
                     for file_info in xbrl_files.get(category, []):
                         file_path = filing_dir / file_info['filename']
                         
                         if file_path.exists():
                             logger.debug(f"Already exists: {file_info['filename']}")
+                            linkbase_downloaded += 1
                             continue
                         
                         try:
@@ -351,10 +353,64 @@ class SECFilingDownloader:
                             response = self.session.get(file_info['url'])
                             response.raise_for_status()
                             file_path.write_bytes(response.content)
+                            linkbase_downloaded += 1
                             self._rate_limit()
                         except Exception as e:
                             logger.warning(f"Failed to download {file_info['filename']}: {e}")
                             continue
+                
+                # CRITICAL: Also check for linkbase files referenced in the HTML/instance document
+                # For inline XBRL, linkbases may be referenced but not in the documents table
+                if instance_path.exists():
+                    # Try to extract linkbase references from the instance document
+                    try:
+                        with open(instance_path, 'r', encoding='utf-8', errors='ignore') as f:
+                            content = f.read(50000)  # Read first 50KB
+                            import re
+                            # Find linkbase references (e.g., nvo-20241231_pre.xml)
+                            linkbase_refs = re.findall(r'xlink:href="([^"]*_(?:pre|cal|def|lab)\.xml)"', content, re.IGNORECASE)
+                            for linkbase_ref in set(linkbase_refs):
+                                linkbase_path = filing_dir / linkbase_ref
+                                if not linkbase_path.exists():
+                                    # Try to construct URL and download
+                                    # Linkbase files are typically in the same directory as the instance
+                                    base_url = target_filing.get('url', '').rsplit('/', 1)[0] if target_filing.get('url') else ''
+                                    if base_url:
+                                        linkbase_url = f"{base_url}/{linkbase_ref}"
+                                        try:
+                                            logger.info(f"Downloading referenced linkbase: {linkbase_ref}")
+                                            response = self.session.get(linkbase_url)
+                                            response.raise_for_status()
+                                            linkbase_path.write_bytes(response.content)
+                                            linkbase_downloaded += 1
+                                            self._rate_limit()
+                                        except Exception as e:
+                                            # If that fails, try alternative URL pattern (accession without dashes)
+                                            # EDGAR sometimes uses accession number without dashes for linkbases
+                                            if 'Archives/edgar/data' in base_url:
+                                                # Extract CIK and accession from base_url
+                                                parts = base_url.split('/')
+                                                if len(parts) >= 6:
+                                                    cik = parts[5]
+                                                    accession_with_dashes = parts[6]
+                                                    accession_no_dashes = accession_with_dashes.replace('-', '')
+                                                    alt_base_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_no_dashes}"
+                                                    alt_linkbase_url = f"{alt_base_url}/{linkbase_ref}"
+                                                    try:
+                                                        logger.info(f"Trying alternative URL: {alt_linkbase_url}")
+                                                        response = self.session.get(alt_linkbase_url)
+                                                        response.raise_for_status()
+                                                        linkbase_path.write_bytes(response.content)
+                                                        linkbase_downloaded += 1
+                                                        self._rate_limit()
+                                                    except Exception as e2:
+                                                        logger.debug(f"Could not download {linkbase_ref} from {alt_linkbase_url}: {e2}")
+                                            else:
+                                                logger.debug(f"Could not download {linkbase_ref} from {linkbase_url}: {e}")
+                    except Exception as e:
+                        logger.debug(f"Could not extract linkbase references from instance: {e}")
+                
+                logger.info(f"Downloaded {linkbase_downloaded} linkbase file(s)")
             
             logger.info(f"✅ Successfully downloaded XBRL package to {filing_dir}")
             logger.info(f"   Instance: {instance_path}")

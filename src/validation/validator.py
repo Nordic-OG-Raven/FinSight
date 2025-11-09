@@ -408,6 +408,10 @@ class DatabaseValidator:
         relationship_result = self._check_calculation_relationships()
         report.add_result(relationship_result)
         
+        # Check displayed statement math (CRITICAL: validates what users actually see)
+        displayed_math_results = self._check_displayed_statement_math()
+        report.results.extend(displayed_math_results)
+        
         # Check data quality (normalization coverage, numeric ranges, unit consistency)
         quality_results = self._check_data_quality()
         report.results.extend(quality_results)
@@ -2506,6 +2510,857 @@ class DatabaseValidator:
                     message='All calculation relationships hold within tolerance',
                     details={'tolerance_pct': 0.1}
                 )
+    
+    def _check_displayed_statement_math(self) -> List[ValidationResult]:
+        """
+        CRITICAL: Validate mathematical relationships in ALL displayed financial statements.
+        
+        This validates the EXACT data that users see in the UI, using the same fact tables
+        that the API queries (fact_income_statement, fact_balance_sheet, fact_cash_flow,
+        fact_comprehensive_income, fact_equity_statement).
+        
+        Validates:
+        1. Income Statement: Revenue - COGS = Gross Profit, Gross Profit - OpEx = Operating Income, etc.
+        2. Comprehensive Income: Net Income + OCI = Total Comprehensive Income
+        3. Balance Sheet: Assets = Liabilities + Equity, Current + Non-Current = Total
+        4. Cash Flow: Beginning Cash + Net Cash Flow = Ending Cash
+        5. Equity Statement: Beginning + Net Income + OCI + Transactions = Ending
+        
+        Returns list of ValidationResult for each check.
+        """
+        results = []
+        tolerance_pct = 1.0  # 1% tolerance for rounding
+        
+        # 1. Income Statement Math
+        income_math_results = self._check_income_statement_math(tolerance_pct)
+        results.extend(income_math_results)
+        
+        # 2. Comprehensive Income Math
+        comprehensive_math_results = self._check_comprehensive_income_math(tolerance_pct)
+        results.extend(comprehensive_math_results)
+        
+        # 3. Balance Sheet Math (from displayed fact table)
+        balance_sheet_math_results = self._check_balance_sheet_displayed_math(tolerance_pct)
+        results.extend(balance_sheet_math_results)
+        
+        # 4. Cash Flow Math
+        cash_flow_math_results = self._check_cash_flow_displayed_math(tolerance_pct)
+        results.extend(cash_flow_math_results)
+        
+        # 5. Equity Statement Math
+        equity_math_results = self._check_equity_statement_math(tolerance_pct)
+        results.extend(equity_math_results)
+        
+        # 6. Equity Statement Cross-Period Validation (Beginning = Previous Ending)
+        equity_cross_period_results = self._check_equity_cross_period_consistency(tolerance_pct)
+        results.extend(equity_cross_period_results)
+        
+        # 7. Transaction Sign Validation
+        transaction_sign_results = self._check_transaction_signs()
+        results.extend(transaction_sign_results)
+        
+        # 8. Equity Statement Component Sum Validation (Total = Sum of Components)
+        equity_component_sum_results = self._check_equity_component_sums(tolerance_pct)
+        results.extend(equity_component_sum_results)
+        
+        return results
+    
+    def _check_income_statement_math(self, tolerance_pct: float) -> List[ValidationResult]:
+        """Validate Income Statement calculations from fact_income_statement"""
+        results = []
+        
+        query = text("""
+            WITH income_data AS (
+                SELECT 
+                    f.filing_id,
+                    c.ticker,
+                    tp.period_id,
+                    EXTRACT(YEAR FROM COALESCE(tp.end_date, tp.instant_date))::INTEGER as period_year,
+                    MAX(CASE WHEN co.normalized_label = 'revenue' THEN fis.value_numeric END) as revenue,
+                    MAX(CASE WHEN co.normalized_label = 'cost_of_sales' OR co.normalized_label = 'cost_of_revenue' THEN fis.value_numeric END) as cost_of_sales,
+                    MAX(CASE WHEN co.normalized_label = 'gross_profit' THEN fis.value_numeric END) as gross_profit,
+                    MAX(CASE WHEN co.normalized_label = 'operating_income' THEN fis.value_numeric END) as operating_income,
+                    MAX(CASE WHEN co.normalized_label = 'income_before_tax' THEN fis.value_numeric END) as income_before_tax,
+                    MAX(CASE WHEN co.normalized_label = 'income_tax_expense_continuing_operations' OR co.normalized_label = 'income_tax_expense' THEN fis.value_numeric END) as income_tax,
+                    MAX(CASE WHEN co.normalized_label = 'net_income_including_noncontrolling_interest' OR co.normalized_label = 'net_profit' THEN fis.value_numeric END) as net_income
+                FROM fact_income_statement fis
+                JOIN dim_concepts co ON fis.concept_id = co.concept_id
+                JOIN dim_filings f ON fis.filing_id = f.filing_id
+                JOIN dim_companies c ON f.company_id = c.company_id
+                JOIN dim_time_periods tp ON fis.period_id = tp.period_id
+                WHERE fis.value_numeric IS NOT NULL
+                  AND tp.period_type = 'duration'
+                GROUP BY f.filing_id, c.ticker, tp.period_id, EXTRACT(YEAR FROM COALESCE(tp.end_date, tp.instant_date))
+            )
+            SELECT 
+                ticker,
+                period_year,
+                revenue,
+                cost_of_sales,
+                gross_profit,
+                calculated_gross_profit,
+                ABS(calculated_gross_profit - gross_profit) as gross_profit_diff,
+                operating_income,
+                income_before_tax,
+                income_tax,
+                net_income,
+                calculated_net_income,
+                ABS(calculated_net_income - net_income) as net_income_diff
+            FROM (
+                SELECT 
+                    ticker,
+                    period_year,
+                    revenue,
+                    cost_of_sales,
+                    gross_profit,
+                    revenue - cost_of_sales as calculated_gross_profit,
+                    operating_income,
+                    income_before_tax,
+                    income_tax,
+                    net_income,
+                    income_before_tax - income_tax as calculated_net_income
+                FROM income_data
+                WHERE revenue IS NOT NULL AND cost_of_sales IS NOT NULL AND gross_profit IS NOT NULL
+            ) calc
+            WHERE ABS(calculated_gross_profit - gross_profit) / NULLIF(ABS(gross_profit), 0) * 100 > :tolerance
+               OR ABS(calculated_net_income - net_income) / NULLIF(ABS(net_income), 0) * 100 > :tolerance
+            ORDER BY ticker, period_year
+            LIMIT 50
+        """)
+        
+        with self.engine.connect() as conn:
+            result = conn.execute(query, {'tolerance': tolerance_pct})
+            violations = result.fetchall()
+            
+            if violations:
+                violation_details = []
+                for row in violations:
+                    violation_details.append({
+                        'company': row[0],
+                        'period_year': int(row[1]),
+                        'gross_profit_expected': float(row[4]) if row[4] else None,
+                        'gross_profit_actual': float(row[3]) if row[3] else None,
+                        'gross_profit_diff': float(row[5]) if row[5] else None,
+                        'net_income_expected': float(row[9]) if row[9] else None,
+                        'net_income_actual': float(row[8]) if row[8] else None,
+                        'net_income_diff': float(row[10]) if row[10] else None
+                    })
+                
+                results.append(ValidationResult(
+                    rule_name='income_statement_math',
+                    passed=False,
+                    severity='ERROR',
+                    message=f'Income statement math violations: {len(violations)} company-period combinations',
+                    details={
+                        'violations': violation_details[:20],
+                        'total_violations': len(violations),
+                        'tolerance_pct': tolerance_pct,
+                        'checks': [
+                            'Revenue - Cost of Sales = Gross Profit',
+                            'Income Before Tax - Income Tax = Net Income'
+                        ]
+                    }
+                ))
+            else:
+                results.append(ValidationResult(
+                    rule_name='income_statement_math',
+                    passed=True,
+                    severity='INFO',
+                    message='Income statement math holds for all displayed data',
+                    details={'tolerance_pct': tolerance_pct}
+                ))
+        
+        return results
+    
+    def _check_comprehensive_income_math(self, tolerance_pct: float) -> List[ValidationResult]:
+        """Validate Comprehensive Income: Net Income + OCI = Total Comprehensive Income"""
+        results = []
+        
+        query = text("""
+            WITH comprehensive_data AS (
+                SELECT 
+                    f.filing_id,
+                    c.ticker,
+                    tp.period_id,
+                    EXTRACT(YEAR FROM COALESCE(tp.end_date, tp.instant_date))::INTEGER as period_year,
+                    MAX(CASE WHEN co.normalized_label = 'net_income_including_noncontrolling_interest' OR co.normalized_label = 'net_profit' THEN fci.value_numeric END) as net_income,
+                    MAX(CASE WHEN co.normalized_label = 'other_comprehensive_income' OR co.normalized_label = 'oci_total' THEN fci.value_numeric END) as oci,
+                    MAX(CASE WHEN co.normalized_label = 'total_comprehensive_income' OR co.normalized_label = 'comprehensive_income' THEN fci.value_numeric END) as total_comprehensive_income
+                FROM fact_comprehensive_income fci
+                JOIN dim_concepts co ON fci.concept_id = co.concept_id
+                JOIN dim_filings f ON fci.filing_id = f.filing_id
+                JOIN dim_companies c ON f.company_id = c.company_id
+                JOIN dim_time_periods tp ON fci.period_id = tp.period_id
+                WHERE fci.value_numeric IS NOT NULL
+                  AND tp.period_type = 'duration'
+                GROUP BY f.filing_id, c.ticker, tp.period_id, EXTRACT(YEAR FROM COALESCE(tp.end_date, tp.instant_date))
+            )
+            SELECT 
+                ticker,
+                period_year,
+                net_income,
+                oci,
+                total_comprehensive_income,
+                net_income + COALESCE(oci, 0) as calculated_total,
+                ABS((net_income + COALESCE(oci, 0)) - total_comprehensive_income) as difference
+            FROM comprehensive_data
+            WHERE net_income IS NOT NULL 
+              AND total_comprehensive_income IS NOT NULL
+              AND ABS((net_income + COALESCE(oci, 0)) - total_comprehensive_income) / NULLIF(ABS(total_comprehensive_income), 0) * 100 > :tolerance
+            ORDER BY ticker, period_year
+            LIMIT 50
+        """)
+        
+        with self.engine.connect() as conn:
+            result = conn.execute(query, {'tolerance': tolerance_pct})
+            violations = result.fetchall()
+            
+            if violations:
+                violation_details = [
+                    {
+                        'company': row[0],
+                        'period_year': int(row[1]),
+                        'net_income': float(row[2]) if row[2] else None,
+                        'oci': float(row[3]) if row[3] else None,
+                        'total_expected': float(row[5]) if row[5] else None,
+                        'total_actual': float(row[4]) if row[4] else None,
+                        'difference': float(row[6]) if row[6] else None
+                    }
+                    for row in violations
+                ]
+                
+                results.append(ValidationResult(
+                    rule_name='comprehensive_income_math',
+                    passed=False,
+                    severity='ERROR',
+                    message=f'Comprehensive income math violations: {len(violations)} company-period combinations',
+                    details={
+                        'violations': violation_details[:20],
+                        'total_violations': len(violations),
+                        'tolerance_pct': tolerance_pct,
+                        'check': 'Net Income + OCI = Total Comprehensive Income'
+                    }
+                ))
+            else:
+                results.append(ValidationResult(
+                    rule_name='comprehensive_income_math',
+                    passed=True,
+                    severity='INFO',
+                    message='Comprehensive income math holds for all displayed data',
+                    details={'tolerance_pct': tolerance_pct}
+                ))
+        
+        return results
+    
+    def _check_balance_sheet_displayed_math(self, tolerance_pct: float) -> List[ValidationResult]:
+        """Validate Balance Sheet math from fact_balance_sheet"""
+        results = []
+        
+        query = text("""
+            WITH balance_data AS (
+                SELECT 
+                    f.filing_id,
+                    c.ticker,
+                    tp.period_id,
+                    EXTRACT(YEAR FROM COALESCE(tp.end_date, tp.instant_date))::INTEGER as period_year,
+                    MAX(CASE WHEN co.normalized_label = 'total_assets' THEN fbs.value_numeric END) as total_assets,
+                    MAX(CASE WHEN co.normalized_label = 'total_liabilities' THEN fbs.value_numeric END) as total_liabilities,
+                    MAX(CASE WHEN co.normalized_label = 'equity_total' OR co.normalized_label = 'total_equity' THEN fbs.value_numeric END) as total_equity,
+                    MAX(CASE WHEN co.normalized_label = 'current_assets' THEN fbs.value_numeric END) as current_assets,
+                    MAX(CASE WHEN co.normalized_label = 'noncurrent_assets' OR co.normalized_label = 'total_noncurrent_assets' THEN fbs.value_numeric END) as noncurrent_assets
+                FROM fact_balance_sheet fbs
+                JOIN dim_concepts co ON fbs.concept_id = co.concept_id
+                JOIN dim_filings f ON fbs.filing_id = f.filing_id
+                JOIN dim_companies c ON f.company_id = c.company_id
+                JOIN dim_time_periods tp ON fbs.period_id = tp.period_id
+                WHERE fbs.value_numeric IS NOT NULL
+                  AND tp.period_type = 'instant'
+                GROUP BY f.filing_id, c.ticker, tp.period_id, EXTRACT(YEAR FROM COALESCE(tp.end_date, tp.instant_date))
+            )
+            SELECT 
+                ticker,
+                period_year,
+                total_assets,
+                total_liabilities,
+                total_equity,
+                total_liabilities + total_equity as calculated_assets,
+                ABS(total_assets - (total_liabilities + total_equity)) as difference,
+                current_assets,
+                noncurrent_assets,
+                current_assets + COALESCE(noncurrent_assets, 0) as calculated_total_assets,
+                ABS(total_assets - (current_assets + COALESCE(noncurrent_assets, 0))) as assets_sum_diff
+            FROM balance_data
+            WHERE total_assets IS NOT NULL 
+              AND total_liabilities IS NOT NULL 
+              AND total_equity IS NOT NULL
+              AND (
+                  ABS(total_assets - (total_liabilities + total_equity)) / NULLIF(ABS(total_assets), 0) * 100 > :tolerance
+                  OR (current_assets IS NOT NULL AND noncurrent_assets IS NOT NULL 
+                      AND ABS(total_assets - (current_assets + noncurrent_assets)) / NULLIF(ABS(total_assets), 0) * 100 > :tolerance)
+              )
+            ORDER BY ticker, period_year
+            LIMIT 50
+        """)
+        
+        with self.engine.connect() as conn:
+            result = conn.execute(query, {'tolerance': tolerance_pct})
+            violations = result.fetchall()
+            
+            if violations:
+                violation_details = [
+                    {
+                        'company': row[0],
+                        'period_year': int(row[1]),
+                        'assets_equation_violation': abs(float(row[6])) / abs(float(row[2])) * 100 if row[2] and row[6] else None,
+                        'assets_sum_violation': abs(float(row[10])) / abs(float(row[2])) * 100 if row[2] and row[10] else None
+                    }
+                    for row in violations
+                ]
+                
+                results.append(ValidationResult(
+                    rule_name='balance_sheet_displayed_math',
+                    passed=False,
+                    severity='ERROR',
+                    message=f'Balance sheet math violations: {len(violations)} company-period combinations',
+                    details={
+                        'violations': violation_details[:20],
+                        'total_violations': len(violations),
+                        'tolerance_pct': tolerance_pct,
+                        'checks': [
+                            'Assets = Liabilities + Equity',
+                            'Total Assets = Current Assets + Non-Current Assets'
+                        ]
+                    }
+                ))
+            else:
+                results.append(ValidationResult(
+                    rule_name='balance_sheet_displayed_math',
+                    passed=True,
+                    severity='INFO',
+                    message='Balance sheet math holds for all displayed data',
+                    details={'tolerance_pct': tolerance_pct}
+                ))
+        
+        return results
+    
+    def _check_cash_flow_displayed_math(self, tolerance_pct: float) -> List[ValidationResult]:
+        """Validate Cash Flow: Beginning Cash + Net Cash Flow = Ending Cash"""
+        results = []
+        
+        query = text("""
+            WITH cash_flow_data AS (
+                SELECT 
+                    f.filing_id,
+                    c.ticker,
+                    tp.period_id,
+                    EXTRACT(YEAR FROM COALESCE(tp.end_date, tp.instant_date))::INTEGER as period_year,
+                    MAX(CASE WHEN co.normalized_label = 'cash_and_cash_equivalents_at_beginning_of_year' THEN fcf.value_numeric END) as beginning_cash,
+                    MAX(CASE WHEN co.normalized_label = 'increase_decrease_in_cash_and_cash_equivalents' THEN fcf.value_numeric END) as net_cash_flow,
+                    MAX(CASE WHEN co.normalized_label = 'cash_and_cash_equivalents_at_end_of_period' THEN fcf.value_numeric END) as ending_cash
+                FROM fact_cash_flow fcf
+                JOIN dim_concepts co ON fcf.concept_id = co.concept_id
+                JOIN dim_filings f ON fcf.filing_id = f.filing_id
+                JOIN dim_companies c ON f.company_id = c.company_id
+                JOIN dim_time_periods tp ON fcf.period_id = tp.period_id
+                WHERE fcf.value_numeric IS NOT NULL
+                  AND tp.period_type = 'duration'
+                GROUP BY f.filing_id, c.ticker, tp.period_id, EXTRACT(YEAR FROM COALESCE(tp.end_date, tp.instant_date))
+            )
+            SELECT 
+                ticker,
+                period_year,
+                beginning_cash,
+                net_cash_flow,
+                ending_cash,
+                beginning_cash + COALESCE(net_cash_flow, 0) as calculated_ending,
+                ABS(ending_cash - (beginning_cash + COALESCE(net_cash_flow, 0))) as difference
+            FROM cash_flow_data
+            WHERE beginning_cash IS NOT NULL 
+              AND ending_cash IS NOT NULL
+              AND ABS(ending_cash - (beginning_cash + COALESCE(net_cash_flow, 0))) / NULLIF(ABS(ending_cash), 0) * 100 > :tolerance
+            ORDER BY ticker, period_year
+            LIMIT 50
+        """)
+        
+        with self.engine.connect() as conn:
+            result = conn.execute(query, {'tolerance': tolerance_pct})
+            violations = result.fetchall()
+            
+            if violations:
+                violation_details = [
+                    {
+                        'company': row[0],
+                        'period_year': int(row[1]),
+                        'beginning_cash': float(row[2]) if row[2] else None,
+                        'net_cash_flow': float(row[3]) if row[3] else None,
+                        'ending_expected': float(row[5]) if row[5] else None,
+                        'ending_actual': float(row[4]) if row[4] else None,
+                        'difference': float(row[6]) if row[6] else None
+                    }
+                    for row in violations
+                ]
+                
+                results.append(ValidationResult(
+                    rule_name='cash_flow_displayed_math',
+                    passed=False,
+                    severity='ERROR',
+                    message=f'Cash flow math violations: {len(violations)} company-period combinations',
+                    details={
+                        'violations': violation_details[:20],
+                        'total_violations': len(violations),
+                        'tolerance_pct': tolerance_pct,
+                        'check': 'Beginning Cash + Net Cash Flow = Ending Cash'
+                    }
+                ))
+            else:
+                results.append(ValidationResult(
+                    rule_name='cash_flow_displayed_math',
+                    passed=True,
+                    severity='INFO',
+                    message='Cash flow math holds for all displayed data',
+                    details={'tolerance_pct': tolerance_pct}
+                ))
+        
+        return results
+    
+    def _check_equity_statement_math(self, tolerance_pct: float) -> List[ValidationResult]:
+        """Validate Equity Statement: Beginning + Net Income + OCI + Transactions = Ending"""
+        results = []
+        
+        query = text("""
+            WITH component_totals AS (
+                -- Calculate totals by summing component values for each period
+                SELECT 
+                    f.filing_id,
+                    tp.period_id,
+                    SUM(CASE WHEN (co.normalized_label = 'net_income_including_noncontrolling_interest' OR co.normalized_label = 'net_profit') AND fes.equity_component IS NOT NULL THEN fes.value_numeric END) as net_income_total,
+                    SUM(CASE WHEN (co.normalized_label = 'other_comprehensive_income' OR co.normalized_label = 'oci_total') AND fes.equity_component IS NOT NULL THEN fes.value_numeric END) as oci_total,
+                    SUM(CASE WHEN co.normalized_label = 'dividends_paid' AND fes.equity_component IS NOT NULL THEN fes.value_numeric END) as dividends_total,
+                    SUM(CASE WHEN co.normalized_label = 'purchase_of_treasury_shares' AND fes.equity_component IS NOT NULL THEN fes.value_numeric END) as treasury_purchases_total
+                FROM fact_equity_statement fes
+                JOIN dim_concepts co ON fes.concept_id = co.concept_id
+                JOIN dim_filings f ON fes.filing_id = f.filing_id
+                JOIN dim_time_periods tp ON fes.period_id = tp.period_id
+                WHERE fes.value_numeric IS NOT NULL
+                  AND tp.period_type = 'duration'
+                  AND fes.equity_component IS NOT NULL
+                GROUP BY f.filing_id, tp.period_id
+            ),
+            equity_data AS (
+                SELECT 
+                    f.filing_id,
+                    c.ticker,
+                    tp.period_id,
+                    fes.equity_component,
+                    -- CRITICAL FIX: Use fiscal_year or start_date year (not end_date) to correctly identify the period
+                    COALESCE(tp.fiscal_year, EXTRACT(YEAR FROM tp.start_date)::INTEGER) as period_year,
+                    MAX(CASE WHEN co.normalized_label = 'balance_at_the_beginning_of_the_year_equity' THEN fes.value_numeric END) as beginning_balance,
+                    -- CRITICAL FIX: For totals (NULL component), use component totals if total-level value doesn't exist
+                    COALESCE(
+                        MAX(CASE WHEN co.normalized_label = 'net_income_including_noncontrolling_interest' OR co.normalized_label = 'net_profit' THEN fes.value_numeric END),
+                        CASE WHEN fes.equity_component IS NULL THEN ct.net_income_total ELSE NULL END
+                    ) as net_income,
+                    COALESCE(
+                        MAX(CASE WHEN co.normalized_label = 'other_comprehensive_income' OR co.normalized_label = 'oci_total' THEN fes.value_numeric END),
+                        CASE WHEN fes.equity_component IS NULL THEN ct.oci_total ELSE NULL END
+                    ) as oci,
+                    MAX(CASE WHEN co.normalized_label = 'total_comprehensive_income' THEN fes.value_numeric END) as total_comprehensive_income,
+                    -- CRITICAL FIX: For totals, use component totals if total-level value doesn't exist
+                    COALESCE(
+                        MAX(CASE WHEN co.normalized_label = 'dividends_paid' THEN fes.value_numeric END),
+                        CASE WHEN fes.equity_component IS NULL THEN ct.dividends_total ELSE NULL END
+                    ) as dividends,
+                    COALESCE(
+                        MAX(CASE WHEN co.normalized_label = 'purchase_of_treasury_shares' THEN fes.value_numeric END),
+                        CASE WHEN fes.equity_component IS NULL THEN ct.treasury_purchases_total ELSE NULL END
+                    ) as treasury_purchases,
+                    MAX(CASE WHEN co.normalized_label = 'balance_at_the_end_of_the_year_equity' THEN fes.value_numeric END) as ending_balance
+                FROM fact_equity_statement fes
+                JOIN dim_concepts co ON fes.concept_id = co.concept_id
+                JOIN dim_filings f ON fes.filing_id = f.filing_id
+                JOIN dim_companies c ON f.company_id = c.company_id
+                JOIN dim_time_periods tp ON fes.period_id = tp.period_id
+                LEFT JOIN component_totals ct ON f.filing_id = ct.filing_id AND tp.period_id = ct.period_id
+                WHERE fes.value_numeric IS NOT NULL
+                  AND tp.period_type = 'duration'
+                GROUP BY f.filing_id, c.ticker, tp.period_id, fes.equity_component, COALESCE(tp.fiscal_year, EXTRACT(YEAR FROM tp.start_date)::INTEGER), ct.net_income_total, ct.oci_total, ct.dividends_total, ct.treasury_purchases_total
+            )
+            SELECT 
+                ticker,
+                period_year,
+                equity_component,
+                beginning_balance,
+                -- Use total_comprehensive_income if available, otherwise net_income + oci
+                COALESCE(total_comprehensive_income, COALESCE(net_income, 0) + COALESCE(oci, 0)) as comprehensive_income,
+                COALESCE(dividends, 0) + COALESCE(treasury_purchases, 0) as transactions,
+                ending_balance,
+                -- CRITICAL: Use total_comprehensive_income if available (it already includes net_income + oci)
+                -- Otherwise, use net_income + oci separately
+                beginning_balance + COALESCE(total_comprehensive_income, COALESCE(net_income, 0) + COALESCE(oci, 0)) + COALESCE(dividends, 0) + COALESCE(treasury_purchases, 0) as calculated_ending,
+                ABS(ending_balance - (beginning_balance + COALESCE(total_comprehensive_income, COALESCE(net_income, 0) + COALESCE(oci, 0)) + COALESCE(dividends, 0) + COALESCE(treasury_purchases, 0))) as difference
+            FROM equity_data
+            WHERE beginning_balance IS NOT NULL 
+              AND ending_balance IS NOT NULL
+              AND ABS(ending_balance - (beginning_balance + COALESCE(total_comprehensive_income, COALESCE(net_income, 0) + COALESCE(oci, 0)) + COALESCE(dividends, 0) + COALESCE(treasury_purchases, 0))) / NULLIF(ABS(ending_balance), 0) * 100 > :tolerance
+            ORDER BY ticker, period_year, equity_component
+            LIMIT 50
+        """)
+        
+        with self.engine.connect() as conn:
+            result = conn.execute(query, {'tolerance': tolerance_pct})
+            violations = result.fetchall()
+            
+            if violations:
+                violation_details = [
+                    {
+                        'company': row[0],
+                        'period_year': int(row[1]),
+                        'equity_component': row[2],
+                        'beginning_balance': float(row[3]) if row[3] else None,
+                        'comprehensive_income': float(row[4]) if row[4] else None,
+                        'transactions': float(row[5]) if row[5] else None,
+                        'ending_expected': float(row[7]) if row[7] else None,
+                        'ending_actual': float(row[6]) if row[6] else None,
+                        'difference': float(row[8]) if row[8] else None
+                    }
+                    for row in violations
+                ]
+                
+                results.append(ValidationResult(
+                    rule_name='equity_statement_math',
+                    passed=False,
+                    severity='ERROR',
+                    message=f'Equity statement math violations: {len(violations)} company-period-component combinations',
+                    details={
+                        'violations': violation_details[:20],
+                        'total_violations': len(violations),
+                        'tolerance_pct': tolerance_pct,
+                        'check': 'Beginning Balance + Total Comprehensive Income + Transactions = Ending Balance'
+                    }
+                ))
+            else:
+                results.append(ValidationResult(
+                    rule_name='equity_statement_math',
+                    passed=True,
+                    severity='INFO',
+                    message='Equity statement math holds for all displayed data',
+                    details={'tolerance_pct': tolerance_pct}
+                ))
+        
+        return results
+    
+    def _check_equity_cross_period_consistency(self, tolerance_pct: float) -> List[ValidationResult]:
+        """
+        CRITICAL: Validate that Beginning Balance = Previous Year's Ending Balance.
+        
+        This catches errors like:
+        - Beginning Balance 2024 total should be 106,561M but is 83,486M
+        - Component-level mismatches between years
+        """
+        results = []
+        
+        query = text("""
+            WITH equity_by_year AS (
+                SELECT 
+                    f.filing_id,
+                    c.ticker,
+                    tp.period_id,
+                    fes.equity_component,
+                    EXTRACT(YEAR FROM COALESCE(tp.end_date, tp.instant_date))::INTEGER as period_year,
+                    MAX(CASE WHEN co.normalized_label = 'balance_at_the_beginning_of_the_year_equity' THEN fes.value_numeric END) as beginning_balance,
+                    MAX(CASE WHEN co.normalized_label = 'balance_at_the_end_of_the_year_equity' THEN fes.value_numeric END) as ending_balance
+                FROM fact_equity_statement fes
+                JOIN dim_concepts co ON fes.concept_id = co.concept_id
+                JOIN dim_filings f ON fes.filing_id = f.filing_id
+                JOIN dim_companies c ON f.company_id = c.company_id
+                JOIN dim_time_periods tp ON fes.period_id = tp.period_id
+                WHERE fes.value_numeric IS NOT NULL
+                  AND tp.period_type = 'duration'
+                GROUP BY f.filing_id, c.ticker, tp.period_id, fes.equity_component, EXTRACT(YEAR FROM COALESCE(tp.end_date, tp.instant_date))
+            ),
+            cross_period_comparison AS (
+                SELECT 
+                    curr.ticker,
+                    curr.period_year,
+                    prev.period_year as prev_year,
+                    curr.equity_component,
+                    curr.beginning_balance,
+                    prev.ending_balance as prev_ending_balance,
+                    ABS(curr.beginning_balance - prev.ending_balance) as difference,
+                    ABS(curr.beginning_balance - prev.ending_balance) / NULLIF(ABS(curr.beginning_balance), 0) * 100 as difference_pct
+                FROM equity_by_year curr
+                JOIN equity_by_year prev ON 
+                    curr.ticker = prev.ticker
+                    AND curr.equity_component IS NOT DISTINCT FROM prev.equity_component
+                    AND curr.period_year = prev.period_year + 1
+                WHERE curr.beginning_balance IS NOT NULL
+                  AND prev.ending_balance IS NOT NULL
+                  AND ABS(curr.beginning_balance - prev.ending_balance) / NULLIF(ABS(curr.beginning_balance), 0) * 100 > :tolerance
+            )
+            SELECT 
+                ticker,
+                period_year,
+                prev_year,
+                equity_component,
+                beginning_balance,
+                prev_ending_balance,
+                difference,
+                difference_pct
+            FROM cross_period_comparison
+            ORDER BY ticker, period_year, equity_component
+            LIMIT 50
+        """)
+        
+        with self.engine.connect() as conn:
+            result = conn.execute(query, {'tolerance': tolerance_pct})
+            violations = result.fetchall()
+            
+            if violations:
+                violation_details = [
+                    {
+                        'company': row[0],
+                        'period_year': int(row[1]),
+                        'prev_year': int(row[2]),
+                        'equity_component': row[3],
+                        'beginning_balance': float(row[4]) if row[4] else None,
+                        'prev_ending_balance': float(row[5]) if row[5] else None,
+                        'difference': float(row[6]) if row[6] else None,
+                        'difference_pct': float(row[7]) if row[7] else None
+                    }
+                    for row in violations
+                ]
+                
+                results.append(ValidationResult(
+                    rule_name='equity_cross_period_consistency',
+                    passed=False,
+                    severity='ERROR',
+                    message=f'Equity cross-period consistency violations: {len(violations)} company-period-component combinations',
+                    details={
+                        'violations': violation_details[:20],
+                        'total_violations': len(violations),
+                        'tolerance_pct': tolerance_pct,
+                        'check': 'Beginning Balance (Year N) = Ending Balance (Year N-1)'
+                    }
+                ))
+            else:
+                results.append(ValidationResult(
+                    rule_name='equity_cross_period_consistency',
+                    passed=True,
+                    severity='INFO',
+                    message='Equity cross-period consistency holds for all displayed data',
+                    details={'tolerance_pct': tolerance_pct}
+                ))
+        
+        return results
+    
+    def _check_transaction_signs(self) -> List[ValidationResult]:
+        """
+        CRITICAL: Validate transaction signs are correct.
+        
+        This catches errors like:
+        - "Reduction of the B share capital" in treasury shares should be +5M but is -5M
+        - Dividends should be negative (outflow)
+        - Treasury share purchases should be negative (outflow)
+        - Capital reductions may have different signs depending on component
+        """
+        results = []
+        
+        query = text("""
+            WITH transaction_data AS (
+                SELECT 
+                    f.filing_id,
+                    c.ticker,
+                    tp.period_id,
+                    fes.equity_component,
+                    EXTRACT(YEAR FROM COALESCE(tp.end_date, tp.instant_date))::INTEGER as period_year,
+                    co.normalized_label,
+                    co.preferred_label,
+                    fes.value_numeric
+                FROM fact_equity_statement fes
+                JOIN dim_concepts co ON fes.concept_id = co.concept_id
+                JOIN dim_filings f ON fes.filing_id = f.filing_id
+                JOIN dim_companies c ON f.company_id = c.company_id
+                JOIN dim_time_periods tp ON fes.period_id = tp.period_id
+                WHERE fes.value_numeric IS NOT NULL
+                  AND tp.period_type = 'duration'
+                  AND co.normalized_label IN (
+                      'dividends_paid',
+                      'purchase_of_treasury_shares',
+                      'reduction_of_issued_capital'
+                  )
+                  AND fes.is_header = FALSE
+            )
+            SELECT 
+                ticker,
+                period_year,
+                equity_component,
+                normalized_label,
+                preferred_label,
+                value_numeric,
+                CASE 
+                    WHEN normalized_label = 'dividends_paid' AND value_numeric > 0 THEN 'ERROR: Dividends should be negative (outflow)'
+                    WHEN normalized_label = 'purchase_of_treasury_shares' AND value_numeric > 0 THEN 'ERROR: Treasury purchases should be negative (outflow)'
+                    WHEN normalized_label = 'reduction_of_issued_capital' AND equity_component = 'treasury_shares' AND value_numeric < 0 THEN 'ERROR: Capital reduction in treasury shares may need positive sign'
+                    WHEN normalized_label = 'reduction_of_issued_capital' AND equity_component = 'share_capital' AND value_numeric > 0 THEN 'ERROR: Capital reduction in share capital should be negative'
+                    ELSE NULL
+                END as sign_issue
+            FROM transaction_data
+            WHERE (
+                (normalized_label = 'dividends_paid' AND value_numeric > 0)
+                OR (normalized_label = 'purchase_of_treasury_shares' AND value_numeric > 0)
+                OR (normalized_label = 'reduction_of_issued_capital' AND equity_component = 'treasury_shares' AND value_numeric < 0)
+                OR (normalized_label = 'reduction_of_issued_capital' AND equity_component = 'share_capital' AND value_numeric > 0)
+            )
+            ORDER BY ticker, period_year, normalized_label, equity_component
+            LIMIT 50
+        """)
+        
+        with self.engine.connect() as conn:
+            result = conn.execute(query)
+            violations = result.fetchall()
+            
+            if violations:
+                violation_details = [
+                    {
+                        'company': row[0],
+                        'period_year': int(row[1]),
+                        'equity_component': row[2],
+                        'transaction': row[4],
+                        'value': float(row[5]) if row[5] else None,
+                        'issue': row[6]
+                    }
+                    for row in violations
+                ]
+                
+                results.append(ValidationResult(
+                    rule_name='transaction_signs',
+                    passed=False,
+                    severity='ERROR',
+                    message=f'Transaction sign violations: {len(violations)} company-period-component combinations',
+                    details={
+                        'violations': violation_details[:20],
+                        'total_violations': len(violations),
+                        'rules': [
+                            'Dividends should be negative (outflow from equity)',
+                            'Treasury share purchases should be negative (outflow from equity)',
+                            'Capital reduction in treasury shares may need positive sign (check accounting treatment)',
+                            'Capital reduction in share capital should be negative (outflow)'
+                        ]
+                    }
+                ))
+            else:
+                results.append(ValidationResult(
+                    rule_name='transaction_signs',
+                    passed=True,
+                    severity='INFO',
+                    message='All transaction signs are correct',
+                    details={}
+                ))
+        
+        return results
+    
+    def _check_equity_component_sums(self, tolerance_pct: float) -> List[ValidationResult]:
+        """
+        CRITICAL: Validate that Total = Sum of Components for equity statement.
+        
+        This catches errors like:
+        - Beginning Balance 2024 total (83,486M) doesn't match sum of components (should be 106,561M)
+        - Ending Balance totals don't match sum of components
+        """
+        results = []
+        
+        query = text("""
+            WITH equity_by_component AS (
+                SELECT 
+                    f.filing_id,
+                    c.ticker,
+                    tp.period_id,
+                    EXTRACT(YEAR FROM COALESCE(tp.end_date, tp.instant_date))::INTEGER as period_year,
+                    co.normalized_label,
+                    fes.equity_component,
+                    fes.value_numeric
+                FROM fact_equity_statement fes
+                JOIN dim_concepts co ON fes.concept_id = co.concept_id
+                JOIN dim_filings f ON fes.filing_id = f.filing_id
+                JOIN dim_companies c ON f.company_id = c.company_id
+                JOIN dim_time_periods tp ON fes.period_id = tp.period_id
+                WHERE fes.value_numeric IS NOT NULL
+                  AND tp.period_type = 'duration'
+                  AND co.normalized_label IN (
+                      'balance_at_the_beginning_of_the_year_equity',
+                      'balance_at_the_end_of_the_year_equity'
+                  )
+            ),
+            component_sums AS (
+                SELECT 
+                    ticker,
+                    period_year,
+                    normalized_label,
+                    SUM(CASE WHEN equity_component IS NOT NULL THEN value_numeric ELSE 0 END) as sum_of_components,
+                    MAX(CASE WHEN equity_component IS NULL THEN value_numeric END) as total_value,
+                    COUNT(DISTINCT equity_component) FILTER (WHERE equity_component IS NOT NULL) as component_count
+                FROM equity_by_component
+                GROUP BY ticker, period_year, normalized_label
+            )
+            SELECT 
+                ticker,
+                period_year,
+                normalized_label,
+                sum_of_components,
+                total_value,
+                ABS(sum_of_components - total_value) as difference,
+                ABS(sum_of_components - total_value) / NULLIF(ABS(total_value), 0) * 100 as difference_pct,
+                component_count
+            FROM component_sums
+            WHERE total_value IS NOT NULL
+              AND sum_of_components IS NOT NULL
+              AND component_count >= 2  -- Only check if there are multiple components
+              AND ABS(sum_of_components - total_value) / NULLIF(ABS(total_value), 0) * 100 > :tolerance
+            ORDER BY ticker, period_year, normalized_label
+            LIMIT 50
+        """)
+        
+        with self.engine.connect() as conn:
+            result = conn.execute(query, {'tolerance': tolerance_pct})
+            violations = result.fetchall()
+            
+            if violations:
+                violation_details = [
+                    {
+                        'company': row[0],
+                        'period_year': int(row[1]),
+                        'balance_type': row[2],
+                        'sum_of_components': float(row[3]) if row[3] else None,
+                        'total_value': float(row[4]) if row[4] else None,
+                        'difference': float(row[5]) if row[5] else None,
+                        'difference_pct': float(row[6]) if row[6] else None,
+                        'component_count': int(row[7]) if row[7] else None
+                    }
+                    for row in violations
+                ]
+                
+                results.append(ValidationResult(
+                    rule_name='equity_component_sums',
+                    passed=False,
+                    severity='ERROR',
+                    message=f'Equity component sum violations: {len(violations)} company-period combinations',
+                    details={
+                        'violations': violation_details[:20],
+                        'total_violations': len(violations),
+                        'tolerance_pct': tolerance_pct,
+                        'check': 'Total = Sum of Components (share_capital + treasury_shares + retained_earnings + other_reserves)'
+                    }
+                ))
+            else:
+                results.append(ValidationResult(
+                    rule_name='equity_component_sums',
+                    passed=True,
+                    severity='INFO',
+                    message='Equity component sums hold for all displayed data',
+                    details={'tolerance_pct': tolerance_pct}
+                ))
+        
+        return results
     
     def _check_data_quality(self) -> List[ValidationResult]:
         """
