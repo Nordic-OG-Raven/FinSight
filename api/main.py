@@ -235,6 +235,84 @@ def init_database():
             "message": str(e)
         }), 500
 
+@app.route('/api/populate-statements', methods=['POST'])
+def populate_statements():
+    """
+    Populate statement fact tables from existing data.
+    This endpoint triggers the populate scripts to create statement-specific fact tables.
+    """
+    try:
+        from src.utils.populate_statement_items import populate_statement_items
+        from src.utils.populate_statement_facts import populate_statement_facts
+        from sqlalchemy import create_engine, text
+        from config import DATABASE_URL
+        
+        engine = create_engine(DATABASE_URL)
+        with engine.connect() as conn:
+            # Get all filing IDs
+            result = conn.execute(text('SELECT filing_id FROM dim_filings ORDER BY filing_id'))
+            filing_ids = [row[0] for row in result]
+            
+            if not filing_ids:
+                return jsonify({
+                    "status": "error",
+                    "message": "No filings found in database"
+                }), 404
+            
+            # Populate statement items
+            items_populated = 0
+            for filing_id in filing_ids:
+                try:
+                    count = populate_statement_items(filing_id=filing_id)
+                    items_populated += count
+                except Exception as e:
+                    print(f"Error populating items for filing {filing_id}: {e}")
+            
+            # Populate statement facts
+            facts_populated = {
+                "income_statement": 0,
+                "balance_sheet": 0,
+                "cash_flow": 0,
+                "comprehensive_income": 0,
+                "equity_statement": 0
+            }
+            
+            for filing_id in filing_ids:
+                try:
+                    populate_statement_facts(filing_id=filing_id)
+                    
+                    # Count what was populated
+                    result = conn.execute(text("""
+                        SELECT 
+                            (SELECT COUNT(*) FROM fact_income_statement WHERE filing_id = :fid) as income,
+                            (SELECT COUNT(*) FROM fact_balance_sheet WHERE filing_id = :fid) as balance,
+                            (SELECT COUNT(*) FROM fact_cash_flow WHERE filing_id = :fid) as cash,
+                            (SELECT COUNT(*) FROM fact_comprehensive_income WHERE filing_id = :fid) as comprehensive,
+                            (SELECT COUNT(*) FROM fact_equity_statement WHERE filing_id = :fid) as equity
+                    """), {'fid': filing_id})
+                    row = result.fetchone()
+                    facts_populated["income_statement"] += row[0] or 0
+                    facts_populated["balance_sheet"] += row[1] or 0
+                    facts_populated["cash_flow"] += row[2] or 0
+                    facts_populated["comprehensive_income"] += row[3] or 0
+                    facts_populated["equity_statement"] += row[4] or 0
+                except Exception as e:
+                    print(f"Error populating facts for filing {filing_id}: {e}")
+            
+            return jsonify({
+                "status": "success",
+                "message": f"Populated {items_populated} statement items and facts for {len(filing_ids)} filings",
+                "items_populated": items_populated,
+                "facts_populated": facts_populated,
+                "filings_processed": len(filing_ids)
+            })
+            
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
 @app.route('/api/companies', methods=['GET'])
 def get_companies():
     """Get list of pre-loaded companies and quota status"""
