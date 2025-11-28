@@ -189,6 +189,10 @@ GET /api/analyze/{ticker}/{year}
 POST /api/analyze/custom
 Body: {"ticker": "TSLA", "year": 2024}
 
+# Natural language query (NP2SQL)
+POST /api/query
+Body: {"query": "Show me Apple's revenue in 2024"}
+
 # Check quota
 GET /api/quota
 ```

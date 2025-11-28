@@ -14,6 +14,8 @@ pyarrow>=12.0.0
 requests>=2.31.0
 beautifulsoup4>=4.12.0
 lxml>=4.9.0
+flask>=3.0.0
+flask-cors>=4.0.0
 
 # Data Validation & Models
 pydantic>=2.0.0
@@ -32,6 +34,15 @@ black>=23.0.0
 pylint>=3.0.0
 mypy>=1.5.0
 
+# Progress Bars
+tqdm>=4.66.0
+
+# SEC Filing Downloader
+sec-edgar-downloader>=5.0.0
+
 # Optional: SEC API (if using)
 # sec-api>=1.0.0
+
+# NP2SQL (Natural Language to SQL)
+openai>=1.0.0
 

@@ -28,6 +28,13 @@ CONFIG_DIR = PROJECT_ROOT / "config"
 if os.getenv('DATABASE_URL'):
     DATABASE_URL = os.getenv('DATABASE_URL')
     DATABASE_URI = DATABASE_URL
+    # Extract components from DATABASE_URL for NP2SQL config
+    # Default values if we can't parse (will use same connection)
+    POSTGRES_HOST = os.getenv('POSTGRES_HOST', '127.0.0.1')
+    POSTGRES_PORT = os.getenv('POSTGRES_PORT', '5432')
+    POSTGRES_USER = os.getenv('POSTGRES_USER', 'superset')
+    POSTGRES_PASSWORD = os.getenv('POSTGRES_PASSWORD', 'superset')
+    POSTGRES_DB = os.getenv('POSTGRES_DB', 'finsight')
 else:
     # Check for Railway PostgreSQL environment variables
     railway_host = os.getenv('RAILWAY_POSTGRES_HOST')
@@ -61,6 +68,19 @@ else:
 
 # API Keys (optional)
 SEC_API_KEY = os.getenv('SEC_API_KEY', '')
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
+
+# NP2SQL Configuration
+NP2SQL_DB_USER = os.getenv('NP2SQL_DB_USER', POSTGRES_USER)
+NP2SQL_DB_PASSWORD = os.getenv('NP2SQL_DB_PASSWORD', POSTGRES_PASSWORD)
+NP2SQL_QUERY_TIMEOUT = int(os.getenv('NP2SQL_QUERY_TIMEOUT', '30'))
+NP2SQL_MAX_ROWS = int(os.getenv('NP2SQL_MAX_ROWS', '10000'))
+
+# Build NP2SQL database URL (read-only connection)
+if NP2SQL_DB_PASSWORD:
+    NP2SQL_DATABASE_URL = f'postgresql://{NP2SQL_DB_USER}:{NP2SQL_DB_PASSWORD}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}'
+else:
+    NP2SQL_DATABASE_URL = f'postgresql://{NP2SQL_DB_USER}@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}'
 
 # Rate limiting
 RATE_LIMIT_DELAY = 1.0  # seconds between API calls

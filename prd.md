@@ -84,6 +84,42 @@ This is a **portfolio project** showcasing:
      - Deterministic and auditable - every mapping documented and verified
    - Fiscal period alignment (calendar vs fiscal year end)
    - Handle scale conversions and unit consistency
+   - **Financial Statement Ordering Strategy:**
+     - **Primary Source**: XBRL `order_index` from presentation hierarchy (company's actual filing order)
+       - Reflects the exact order as filed by the company according to their accounting standard
+       - Works universally across IFRS, US-GAAP, and other standards
+       - Respects company-specific and industry-specific ordering variations
+     - **Fallback 1**: Infer `order_index` from other years (same company/statement/concept)
+       - When XBRL extraction fails for a specific year (e.g., 2022), infer order from successful years (2023, 2024)
+       - Maintains consistency across years while preserving company-specific structure
+       - Flagged with `inferred_order=TRUE` for monitoring
+     - **Fallback 2**: Standard accounting templates (IFRS/US-GAAP) when XBRL unavailable
+       - Only used when XBRL data is completely missing or broken
+       - Hardcoded ordering functions are fallback-only, not primary
+     - **Balance Sheet Special Handling**: Sort by `side` (assets → liabilities_equity), then `order_index` within each side
+       - Ensures assets appear before liabilities/equity regardless of XBRL order_index values
+   - **Financial Statement Header Strategy:**
+     - **Primary Source**: XBRL parent-child relationships (parent concepts with children but no facts)
+       - Parent concepts in the presentation hierarchy that have child items but no numeric values serve as headers
+       - Most authoritative - reflects the company's actual filing structure as defined in XBRL
+       - Automatically works for all companies without hardcoding
+     - **Secondary Source**: XBRL label roles (documentation role indicates headers)
+       - Concepts with "documentation" label role in the XBRL label linkbase are treated as headers
+       - Standard XBRL mechanism for identifying structural elements
+       - Used when parent-child relationships don't provide headers
+     - **Tertiary Source**: Standard accounting templates (IFRS/US-GAAP header patterns)
+       - Industry-standard header patterns defined per accounting standard
+       - Only used when XBRL doesn't provide headers
+       - Configurable and maintainable (not hardcoded in application logic)
+     - **Fallback**: Synthetic headers (only when XBRL unavailable and templates don't apply)
+       - Created only when absolutely necessary for readability
+       - Logged for monitoring to assess XBRL extraction quality
+       - Flagged with `header_source='synthetic'` for tracking
+     - **Header Characteristics**: Headers are structural elements with no numeric values
+       - `value_numeric=NULL` in fact tables
+       - Appear before their child items in display order
+       - Used for grouping and readability (e.g., "Earnings per share", "Transactions with owners")
+       - Maintains standard balance sheet presentation format
 
 4. **Validation & Quality Assurance**
    - Validate **accounting identities** (Assets = Liabilities + Equity)
@@ -98,10 +134,20 @@ This is a **portfolio project** showcasing:
    - Generate **data quality report** per filing
    - **Pipeline Integration:** Validation runs automatically after data loading
 
-5. **Data Warehouse (PostgreSQL)**
-   - Store ALL extracted facts in **PostgreSQL** (primary storage)
-   - Relational schema: facts, contexts, dimensions, provenance
-   - Indexed for fast querying (company, period, concept)
+5. **Data Warehouse (PostgreSQL) - Hybrid ETL/ELT Architecture**
+   - **ELT Staging Layer**: Raw extracted facts stored in `staging_facts` table
+     - Enables debugging: Query raw data directly
+     - Enables reprocessing: Re-run transformations without re-extracting
+     - Preserves provenance: Original extraction method and metadata
+   - **Transformation Layer**: Normalized facts in `fact_financial_metrics` (star schema)
+     - Single source of truth for all financial data
+     - Relational schema: facts, contexts, dimensions, provenance
+     - Indexed for fast querying (company, period, concept)
+   - **Presentation Layer**: Template-based views replace denormalized fact tables
+     - `dim_statement_templates`: Canonical templates (80-90% standard items)
+     - `rel_statement_overrides`: Filing-specific custom items (10-20%)
+     - SQL functions: `get_income_statement()`, `get_balance_sheet()`, etc.
+     - Benefits: No data duplication, no sync issues, headers in templates (not facts)
    - Support time-series analysis and cross-company comparison
    - Optional: Export to **Parquet** for portability/backup
 
@@ -184,7 +230,7 @@ This is a **portfolio project** showcasing:
 
 ## 4. 🧱 System Architecture
 
-### 🧩 High-Level Pipeline Flow
+### 🧩 High-Level Pipeline Flow (Hybrid ETL/ELT)
 
 ```
 [1] Ingestion
@@ -193,16 +239,26 @@ This is a **portfolio project** showcasing:
     ↓
 [3] XBRL Parser (Arelle) / PDF Parser (PyMuPDF + Camelot)
     ↓
-[4] Data Normalization & Validation
+[4] ELT Staging: Load raw facts to staging_facts
     ↓
-[5] Provenance Logging
+[5] Transform: Normalize units, map concepts, create periods
     ↓
-[6] Data Storage (Parquet + JSON lineage)
+[6] Load: Store normalized facts in fact_financial_metrics (star schema)
     ↓
-[7] Visualization & Reporting (Streamlit)
+[7] Validation: Accounting identities, completeness checks
     ↓
-[8] Optional: LLM ESG Extractor (PDF or MD&A text)
+[8] Presentation: Template-based views (get_income_statement(), etc.)
+    ↓
+[9] Visualization & Reporting (Streamlit / Superset)
+    ↓
+[10] Optional: LLM ESG Extractor (PDF or MD&A text)
 ```
+
+**Key Architecture Features:**
+- **ELT Staging**: Raw data preserved in `staging_facts` for debugging/reprocessing
+- **Single Source of Truth**: All normalized data in `fact_financial_metrics`
+- **Template-Based Presentation**: Headers/structure in templates, not fact tables
+- **No Data Duplication**: Views query from `fact_financial_metrics`, not separate tables
 
 ### 🔧 Component Breakdown
 
@@ -608,6 +664,15 @@ Validation results are saved alongside extracted data in the `provenance` JSON f
 - ⬜ Automated insight generation (YoY growth, peer comparison)
 - ⬜ Standardized visualization templates
 - ⬜ Export-ready analysis reports
+
+### NP2SQL Feature (Natural Language to SQL)
+
+- ✅ Natural language query interface
+- ✅ OpenAI GPT-3.5 integration for SQL generation
+- ✅ Auto-detection of company mentions and result types
+- ✅ Multiple display formats (table, chart, number, list)
+- ✅ SQL validation and read-only database access
+- ✅ Comprehensive schema metadata for LLM context
 
 ---
 
