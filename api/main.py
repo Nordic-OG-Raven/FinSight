@@ -1645,7 +1645,7 @@ def get_financial_statements(ticker, year):
                     ))
                 else:
                     # Other statements: Sort by order_index only
-                statements[statement_type].sort(key=lambda x: (
+                    statements[statement_type].sort(key=lambda x: (
                     x.get('presentation_order_index') if x.get('presentation_order_index') is not None else 999999,
                     -(x.get('hierarchy_level') if x.get('hierarchy_level') is not None else 0),  # DESC
                     x.get('normalized_label', '')
