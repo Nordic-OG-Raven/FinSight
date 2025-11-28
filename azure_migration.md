@@ -38,37 +38,52 @@ If you need SSH tunneling for security or network restrictions, you can:
 
 ### Azure Database for PostgreSQL Flexible Server
 
+**Pricing Structure:**
+- **Compute**: Billed per hour, charged monthly
+- **Storage**: Billed separately based on provisioned storage
+- **Backups**: Free backup storage = 100% of provisioned storage (additional backups charged)
+
 #### Option 1: Burstable Tier (Recommended for Start)
-- **B1ms** (1 vCore, 2GB RAM, 32GB storage): **~$12-15/month**
-- **B2s** (2 vCores, 4GB RAM, 32GB storage): **~$24-30/month**
-- **Storage**: $0.10-0.15/GB/month beyond included storage
-- **Best for**: Development, small production workloads
-- **Limitations**: CPU throttling under sustained load
+- **B1ms** (1 vCore, 2GB RAM): **~$0.008/hour = ~$5.76/month**
+- **B2s** (2 vCores, 4GB RAM): **~$0.016/hour = ~$11.52/month**
+- **Storage**: $0.115/GB/month (provisioned storage, minimum 32GB included)
+- **Best for**: Development, small production workloads, low-traffic sites
+- **Limitations**: CPU throttling under sustained load (burst credits)
 
 #### Option 2: General Purpose Tier (For Production Scale)
-- **D2s_v3** (2 vCores, 8GB RAM, 32GB storage): **~$100-150/month**
-- **D4s_v3** (4 vCores, 16GB RAM, 32GB storage): **~$200-300/month**
-- **Storage**: $0.10-0.15/GB/month
-- **Best for**: Production workloads, high query volume
-- **No CPU throttling**
+- **D2s_v3** (2 vCores, 8GB RAM): **~$0.12/hour = ~$86/month**
+- **D4s_v3** (4 vCores, 16GB RAM): **~$0.24/hour = ~$172/month**
+- **Storage**: $0.115/GB/month
+- **Best for**: Production workloads, high query volume, consistent performance
+- **No CPU throttling**: Consistent performance
 
 #### Option 3: Memory Optimized (For Analytics)
-- **E2s_v3** (2 vCores, 16GB RAM): **~$150-200/month**
-- **Best for**: Large datasets, complex queries, analytics
+- **E2s_v3** (2 vCores, 16GB RAM): **~$0.24/hour = ~$172/month**
+- **Best for**: Large datasets, complex queries, analytics, in-memory operations
 
 ### Storage Costs (Beyond Included 32GB)
-- **100GB total**: ~$7-10/month additional
-- **500GB total**: ~$35-50/month additional
-- **1TB total**: ~$70-100/month additional
+- **Storage pricing**: **$0.115/GB/month** (provisioned, not pay-per-use)
+- **50GB total**: ~$5.75/month (50GB × $0.115)
+- **100GB total**: ~$11.50/month
+- **200GB total**: ~$23/month
+- **500GB total**: ~$57.50/month
+- **1TB total**: ~$115/month
+
+**Note**: Storage is provisioned (you pay for what you allocate), not pay-per-use. You can scale up but not down.
 
 ### Estimated Monthly Costs
 
-| Scenario | Database Tier | Storage | Estimated Cost |
-|----------|--------------|---------|----------------|
-| **Current (small)** | B1ms | 5GB | **~$12-15/month** |
-| **Medium (50 companies)** | B2s | 50GB | **~$30-40/month** |
-| **Large (200 companies)** | D2s_v3 | 200GB | **~$120-160/month** |
-| **Very Large (1000+ companies + Denmark stats)** | D4s_v3 | 1TB | **~$270-350/month** |
+| Scenario | Database Tier | Storage | Compute | Storage Cost | **Total** |
+|----------|--------------|---------|---------|--------------|-----------|
+| **Current (small)** | B1ms | 32GB (included) | $5.76 | $0 | **~$6/month** |
+| **Medium (50 companies)** | B2s | 50GB | $11.52 | $2.07 (18GB extra) | **~$14/month** |
+| **Large (200 companies)** | D2s_v3 | 200GB | $86 | $19.32 (168GB extra) | **~$105/month** |
+| **Very Large (1000+ companies + Denmark stats)** | D4s_v3 | 1TB | $172 | $111.32 (968GB extra) | **~$283/month** |
+
+**Breakdown:**
+- **Compute**: Hourly rate × 730 hours/month
+- **Storage**: (Provisioned GB - 32GB) × $0.115/GB/month
+- **Backups**: Free (100% of provisioned storage included)
 
 ### Additional Azure Services (Optional)
 
@@ -78,15 +93,24 @@ If you need SSH tunneling for security or network restrictions, you can:
 
 ### Cost Comparison Summary
 
-| Provider | Small (5GB) | Medium (50GB) | Large (200GB) | Very Large (1TB) |
-|----------|------------|---------------|---------------|------------------|
+| Provider | Small (32GB) | Medium (50GB) | Large (200GB) | Very Large (1TB) |
+|----------|-------------|---------------|---------------|------------------|
 | **Railway** | $5-20 | $50-100 | $200-400 | $500-1000+ |
-| **Azure (Burstable)** | $12-15 | $30-40 | $80-120 | $200-300 |
-| **Azure (General Purpose)** | $100-150 | $120-160 | $150-200 | $270-350 |
+| **Azure (Burstable B1ms)** | **~$6/month** | **~$8/month** | **~$25/month** | **~$118/month** |
+| **Azure (Burstable B2s)** | **~$12/month** | **~$14/month** | **~$31/month** | **~$124/month** |
+| **Azure (General Purpose D2s_v3)** | **~$86/month** | **~$88/month** | **~$105/month** | **~$198/month** |
+| **Azure (General Purpose D4s_v3)** | **~$172/month** | **~$174/month** | **~$191/month** | **~$283/month** |
 | **Supabase** | Free (500MB) | $25/month | $25/month | $25-100/month |
 | **Neon** | Free (3GB) | Free-10/month | $20-50/month | $100-200/month |
 
-**Verdict:** Azure is competitive at medium-to-large scale, especially with Burstable tier for development/small production.
+**Key Insights:**
+- **Azure Burstable is VERY cheap** for small-to-medium workloads (~$6-14/month)
+- **Storage is the main cost driver** at scale ($0.115/GB/month)
+- **General Purpose tier** is more expensive but provides consistent performance
+- **Azure is competitive** especially at small scale (cheaper than Railway)
+- **At very large scale (1TB)**, Azure becomes more expensive than Supabase/Neon
+
+**Verdict:** Azure Burstable (B1ms/B2s) is excellent for small-to-medium workloads. For very large datasets (500GB+), consider Supabase or Neon for better cost efficiency.
 
 ## Migration Plan
 
@@ -445,7 +469,20 @@ az postgres flexible-server update \
 ---
 
 **Estimated Total Migration Cost**: $0 (using free Azure credit for first month)
-**Estimated Monthly Cost After Migration**: $30-40/month (B2s, 50GB) → $120-160/month (D2s_v3, 200GB) at scale
+**Estimated Monthly Cost After Migration**: 
+- **Small scale**: ~$6/month (B1ms, 32GB)
+- **Medium scale**: ~$14/month (B2s, 50GB)
+- **Large scale**: ~$105/month (D2s_v3, 200GB)
+- **Very large scale**: ~$283/month (D4s_v3, 1TB)
 
-**Recommendation**: Start with **B2s Burstable tier** (~$30/month), then scale to **D2s_v3 General Purpose** (~$120-160/month) when you reach 100+ companies or need better performance.
+**Recommendation**: 
+- **Start with B1ms Burstable** (~$6/month) - extremely cost-effective for small workloads
+- **Scale to B2s** (~$14/month) when you need more CPU/memory
+- **Scale to D2s_v3 General Purpose** (~$105/month) when you reach 100+ companies or need consistent performance
+- **Consider Supabase/Neon** for very large datasets (500GB+) as they may be more cost-effective
+
+**Cost Breakdown Example (B2s, 50GB):**
+- Compute: $11.52/month (2 vCores, 4GB RAM)
+- Storage: $2.07/month (18GB extra beyond 32GB included)
+- **Total: ~$14/month** (much cheaper than initial estimate!)
 
