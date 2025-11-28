@@ -57,43 +57,67 @@ COMPANY_NAMES = {
 }
 
 def get_preloaded_companies_from_db():
-    """Dynamically query database for available companies and years"""
+    """Dynamically query database for available companies, years, and quarters"""
     try:
         from sqlalchemy import create_engine, text
         engine = create_engine(DATABASE_URL)
         
         with engine.connect() as conn:
-            # Query for companies and their available years
+            # Query for companies, years, and quarters
             query = text("""
-                SELECT 
+                SELECT DISTINCT
                     c.ticker,
-                    EXTRACT(YEAR FROM f.fiscal_year_end)::INTEGER as year
+                    EXTRACT(YEAR FROM f.fiscal_year_end)::INTEGER as year,
+                    tp.fiscal_quarter,
+                    f.filing_type,
+                    f.reporting_frequency
                 FROM fact_financial_metrics fm
                 JOIN dim_companies c ON fm.company_id = c.company_id
                 JOIN dim_filings f ON fm.filing_id = f.filing_id
+                LEFT JOIN dim_time_periods tp ON fm.period_id = tp.period_id
                 WHERE fm.dimension_id IS NULL
-                GROUP BY c.ticker, EXTRACT(YEAR FROM f.fiscal_year_end)
-                ORDER BY c.ticker, year DESC
+                ORDER BY c.ticker, year DESC, tp.fiscal_quarter NULLS LAST
             """)
             
             result = conn.execute(query)
             rows = result.fetchall()
             
-            # Group by ticker
+            # Group by ticker and year
             companies_dict = {}
-            for ticker, year in rows:
+            for ticker, year, quarter, filing_type, reporting_freq in rows:
                 if ticker not in companies_dict:
-                    companies_dict[ticker] = []
-                companies_dict[ticker].append(year)
+                    companies_dict[ticker] = {}
+                if year not in companies_dict[ticker]:
+                    companies_dict[ticker][year] = {
+                        "quarters": set(),
+                        "filing_types": set(),
+                        "reporting_frequencies": set()
+                    }
+                if quarter is not None:
+                    companies_dict[ticker][year]["quarters"].add(int(quarter))
+                if filing_type:
+                    companies_dict[ticker][year]["filing_types"].add(filing_type)
+                if reporting_freq:
+                    companies_dict[ticker][year]["reporting_frequencies"].add(reporting_freq)
             
-            # Format as list with company names
+            # Format as list with company names, years, and quarters
             companies_list = []
             for ticker in sorted(companies_dict.keys()):
-                years = sorted(set(companies_dict[ticker]))
+                years_data = []
+                for year in sorted(companies_dict[ticker].keys(), reverse=True):
+                    year_info = companies_dict[ticker][year]
+                    quarters = sorted(year_info["quarters"]) if year_info["quarters"] else None
+                    years_data.append({
+                        "year": year,
+                        "quarters": quarters,
+                        "filing_types": sorted(year_info["filing_types"]),
+                        "reporting_frequencies": sorted(year_info["reporting_frequencies"])
+                    })
                 companies_list.append({
                     "ticker": ticker,
                     "name": COMPANY_NAMES.get(ticker, ticker),
-                    "years": years
+                    "years": sorted(companies_dict[ticker].keys(), reverse=True),  # Keep for backward compatibility
+                    "years_detail": years_data  # New detailed structure
                 })
             
             return companies_list
