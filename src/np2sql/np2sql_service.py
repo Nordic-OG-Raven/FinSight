@@ -127,19 +127,21 @@ def generate_sql(natural_language_query: str, schema_metadata: dict, database_ur
 
 {schema_text}
 
-IMPORTANT RULES:
+CRITICAL RULES:
 1. Always use v_facts_consolidated view for consolidated queries (avoids duplicate segment data)
 2. Use normalized_label for filtering by metric type (e.g., 'revenue', 'net_income', 'total_assets')
 3. Use ticker for company filtering (e.g., ticker = 'AAPL' for Apple)
 4. Use fiscal_year for year filtering
 5. Use period_type = 'duration' for income statement and cash flow queries
 6. Use period_type = 'instant' for balance sheet queries
-7. Always return only the SQL query, no explanations or markdown formatting
-8. Use proper JOINs when querying fact_financial_metrics directly
-9. Filter by dimension_id IS NULL when querying fact_financial_metrics for consolidated data
-10. Return clean, executable PostgreSQL SQL only
+7. Use proper JOINs when querying fact_financial_metrics directly
+8. Filter by dimension_id IS NULL when querying fact_financial_metrics for consolidated data
 
-Return ONLY the SQL query, nothing else."""
+OUTPUT FORMAT:
+- Return ONLY valid PostgreSQL SQL starting with SELECT
+- NO explanations, NO apologies, NO markdown code blocks
+- NO text before or after the SQL
+- If you cannot generate SQL, return: SELECT 1 WHERE 1=0"""
 
     user_prompt = f"Convert this question to SQL: {natural_language_query}"
     
