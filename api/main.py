@@ -671,7 +671,8 @@ def natural_language_query():
         try:
             # Use NP2SQL database URL (read-only) if available, otherwise fall back to regular
             from config import NP2SQL_DATABASE_URL, NP2SQL_QUERY_TIMEOUT, NP2SQL_MAX_ROWS
-            db_url = NP2SQL_DATABASE_URL if NP2SQL_DATABASE_URL else DATABASE_URL
+            # Always use DATABASE_URL for now (NP2SQL_DATABASE_URL requires separate read-only user setup)
+            db_url = DATABASE_URL
             result = execute_query(sql, db_url, timeout=NP2SQL_QUERY_TIMEOUT, max_rows=NP2SQL_MAX_ROWS)
         except Exception as e:
             return jsonify({
