@@ -163,13 +163,23 @@ class StarSchemaLoader:
         result = self.cur.fetchone()
         if result:
             concept_id, existing_stmt_type, existing_preferred_label, existing_original_label = result[0], result[1], result[2], result[3]
-            # Update statement_type if it's NULL and we have a value
+            # Update statement_type whenever we have a NEW value that differs from what's
+            # stored — not just when the existing value is NULL. dim_concepts is a shared,
+            # persistent dimension: a concept's statement_type gets locked in the first
+            # time it's ever inserted, by whichever extraction logic existed at that
+            # moment. An "only update if NULL" policy meant any later classification fix
+            # (like item 5's comprehensive-income fix) would work correctly for facts
+            # sharing a concept never before seen, but be permanently masked for concepts
+            # already sitting in dim_concepts with a stale pre-fix value — confirmed: ~70
+            # comprehensive_income concepts were stuck at 'income_statement' from testing
+            # earlier in the same session, after the classification fix had already
+            # landed. See docs/NVO_GOLDEN_PATH_2026-08.md item 6.
             # Update preferred_label if it's NULL and we have a value (LASTING - ensures labels are populated on reload)
             # Update original_label if it's NULL and we have a value (from XBRL label linkbase)
             # This ensures that when balance sheet mappings are added to concept_label_mapping.py, existing concepts get updated on next ETL run
             updates = []
             params = []
-            if existing_stmt_type is None and statement_type:
+            if statement_type and statement_type != existing_stmt_type:
                 updates.append("statement_type = %s")
                 params.append(statement_type)
             if existing_preferred_label is None and preferred_label:
@@ -1395,24 +1405,20 @@ class StarSchemaLoader:
         from config import DATABASE_URI
         engine = create_engine(DATABASE_URI)
         
-        # Check if this filing has any presentation hierarchy
-        with engine.connect() as conn:
-            check_query = text("""
-                SELECT COUNT(*) 
-                FROM rel_presentation_hierarchy 
-                WHERE filing_id = :filing_id
-            """)
-            result = conn.execute(check_query, {'filing_id': filing_id})
-            existing_count = result.fetchone()[0]
-        
-        # If no presentation hierarchy exists, populate standard order
-        # Note: populate_standard_presentation_order processes all filings but uses ON CONFLICT DO NOTHING
-        # so it's safe to call and will only insert missing relationships
-        if existing_count == 0:
-            print(f"   🔧 No XBRL presentation hierarchy found - populating standard presentation order...")
-            from src.utils.populate_standard_presentation_order import populate_standard_presentation_order
-            populate_standard_presentation_order(engine)
-            print(f"   ✅ Standard presentation order populated")
+        # Always run the standard-order fallback — it's safe to call unconditionally
+        # (ON CONFLICT DO NOTHING, and its own per-concept NOT EXISTS check only touches
+        # concepts genuinely missing presentation hierarchy). A blanket "skip entirely if
+        # this filing has ANY presentation hierarchy rows" gate used to sit here, but
+        # XBRL extraction can partially succeed — e.g. income_statement/balance_sheet get
+        # real relationships before an extraction error aborts the rest — leaving
+        # `existing_count > 0` while comprehensive_income/equity_statement have zero
+        # coverage and the blanket gate skipped them too. Confirmed causing
+        # fact_comprehensive_income to populate empty intermittently — see
+        # docs/NVO_GOLDEN_PATH_2026-08.md item 6.
+        print(f"   🔧 Populating standard presentation order for any concepts missing XBRL hierarchy...")
+        from src.utils.populate_standard_presentation_order import populate_standard_presentation_order
+        populate_standard_presentation_order(engine)
+        print(f"   ✅ Standard presentation order populated")
         
         # Step: Concept mapping validation (concept_checker.py)
         if year:

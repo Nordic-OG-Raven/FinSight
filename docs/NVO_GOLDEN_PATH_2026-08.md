@@ -403,6 +403,60 @@ foothold: item 3's presentation-hierarchy gap is very likely the common root cau
 both this and item 4's original UI-test ordering warnings, not a cosmetic issue as it
 first looked.
 
+**Update, continued investigation same day — down to 1 of the original 3 remaining
+issues**:
+
+- **`fact_comprehensive_income` empty: fixed.** The actual root cause was neither a
+  duplicate period nor a phantom filing — `dim_concepts` is a shared, persistent
+  dimension table, and `get_or_create_concept()` (`database/load_financial_data.py`) only
+  updated `statement_type` when the existing stored value was `NULL`, never when it was
+  already set to something wrong. ~70 comprehensive-income concepts had been permanently
+  locked at `statement_type='income_statement'` from testing earlier in this same
+  session, *before* item 5's classification fix landed — so every run after that fix
+  still saw the stale value, making the fix look like it wasn't working. Changed the
+  update condition to correct `statement_type` whenever the newly-extracted value differs
+  from what's stored, not just when it's `NULL`. Verified: `comprehensive_income` dropped
+  out of the failure list entirely on the next run, self-healing all ~70 already-poisoned
+  concepts with no separate data migration needed (concept_id stays stable, so existing
+  fact rows pick up the correction automatically via the join).
+- **`populate_standard_presentation_order`'s blanket gate: fixed.** Separately, the outer
+  `if existing_count == 0` check in `load_json_file()` (deciding whether to run the
+  standard-order fallback at all) skipped the fallback whenever a filing had *any* real
+  XBRL presentation relationships — even if only for some statement types, leaving others
+  (comprehensive_income) with zero coverage and no fallback. Removed the gate — the
+  function is safe to call unconditionally (its own per-concept `NOT EXISTS` check already
+  avoids touching concepts with real coverage). Also extended its statement_type filter to
+  include `comprehensive_income` (real `STANDARD_TEMPLATES` entries already existed for
+  it, just weren't reachable due to this filter).
+- **`income_statement_math` violated: fixed.** Confirmed NVO never reports a single
+  combined income-tax-expense figure — only `current_tax_expense_income` +
+  `deferred_tax_expense_income` separately. The check's SQL only recognized the combined
+  label, so it always computed "calculated net income" using zero tax, producing a
+  spurious multi-billion-DKK "violation" every single period. Added a `COALESCE` fallback
+  in `check_income_statement_math()` (`src/validation/displayed_math.py`) summing the two
+  components when the combined label is absent. Manually verified the correct arithmetic
+  holds within tolerance for all three of NVO's fiscal years once tax is properly summed
+  (e.g. FY2024: within ~0.3% of reported net income); the rule dropped out of the failure
+  list on the next run.
+- **`fact_equity_statement` empty: still open, and architecturally different from the
+  comprehensive_income fix above** — do not assume the same fix pattern applies.
+  Equity-statement line items (share capital, retained earnings, treasury shares) are
+  *also*, and primarily, balance-sheet concepts — `dim_concepts.statement_type` is a
+  single value per concept, so it can only ever say `balance_sheet` for these, never
+  `equity_statement`, no matter how classification logic improves. Whether a given fact
+  belongs in the equity rollforward is inherently contextual (which section of the filing
+  it's presented in), which only genuine XBRL presentation-hierarchy data can determine —
+  confirmed there's no `STANDARD_TEMPLATES['equity_statement']` entry at all, unlike the
+  other four statement types. This means `fact_equity_statement` is fully dependent on
+  item 3's still-open, non-deterministic Arelle presentation-relationship extraction bug,
+  with no safety net. Fixing this properly requires either resolving item 3's root cause
+  or building a genuinely new mechanism (not a concept-based template) — bigger scope than
+  today's fixes, deliberately not started.
+
+**Net result this session**: down from 6 critical issues (original diagnosis) to 1
+(`fact_equity_statement`, architecturally distinct, scoped above). Every other concrete
+issue found today has a confirmed root cause and a verified fix.
+
 ### 7. Build the first real regression test
 **Why last, but non-negotiable**: this is the piece that was missing the whole time. Every
 item above should ship with (or be immediately followed by) a fixture-based test that

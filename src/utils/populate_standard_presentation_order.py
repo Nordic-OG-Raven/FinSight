@@ -416,7 +416,15 @@ def populate_standard_presentation_order(engine):
                 WHERE fm.filing_id = :filing_id
                   AND fm.dimension_id IS NULL  -- Only consolidated facts
                   AND co.normalized_label IS NOT NULL
-                  AND co.statement_type IN ('income_statement', 'balance_sheet', 'cash_flow')
+                  -- 'comprehensive_income' has real STANDARD_TEMPLATES entries (see above)
+                  -- but was excluded here, so it never got a fallback when XBRL's own
+                  -- presentation hierarchy was unavailable — confirmed causing
+                  -- fact_comprehensive_income to populate empty intermittently, tied to
+                  -- the non-deterministic Arelle presentation-relationship extraction bug
+                  -- (docs/NVO_GOLDEN_PATH_2026-08.md item 3/6). 'equity_statement' has no
+                  -- template entries at all yet, so including it here wouldn't help until
+                  -- one is built — left out deliberately, not an oversight.
+                  AND co.statement_type IN ('income_statement', 'balance_sheet', 'cash_flow', 'comprehensive_income')
                   AND NOT EXISTS (
                       SELECT 1 
                       FROM rel_presentation_hierarchy ph

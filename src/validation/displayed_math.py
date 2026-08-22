@@ -76,7 +76,17 @@ class DisplayedMathValidator:
                     MAX(CASE WHEN co.normalized_label = 'gross_profit' THEN fis.value_numeric END) as gross_profit,
                     MAX(CASE WHEN co.normalized_label = 'operating_income' THEN fis.value_numeric END) as operating_income,
                     MAX(CASE WHEN co.normalized_label = 'income_before_tax' THEN fis.value_numeric END) as income_before_tax,
-                    MAX(CASE WHEN co.normalized_label = 'income_tax_expense_continuing_operations' OR co.normalized_label = 'income_tax_expense' THEN fis.value_numeric END) as income_tax,
+                    -- Some filers (confirmed: NVO) never report a single combined tax
+                    -- expense figure, only current + deferred components — fall back to
+                    -- summing those when the combined label is absent, rather than
+                    -- treating tax as 0 (which is what NULL does via COALESCE downstream
+                    -- and was making every NVO period look like a large math violation).
+                    -- See docs/NVO_GOLDEN_PATH_2026-08.md item 6.
+                    COALESCE(
+                        MAX(CASE WHEN co.normalized_label = 'income_tax_expense_continuing_operations' OR co.normalized_label = 'income_tax_expense' THEN fis.value_numeric END),
+                        MAX(CASE WHEN co.normalized_label = 'current_tax_expense_income' THEN fis.value_numeric END)
+                        + MAX(CASE WHEN co.normalized_label = 'deferred_tax_expense_income' THEN fis.value_numeric END)
+                    ) as income_tax,
                     MAX(CASE WHEN co.normalized_label = 'net_income_including_noncontrolling_interest' OR co.normalized_label = 'net_profit' THEN fis.value_numeric END) as net_income
                 FROM fact_income_statement fis
                 JOIN dim_concepts co ON fis.concept_id = co.concept_id

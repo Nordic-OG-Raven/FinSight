@@ -259,3 +259,95 @@ class TestFullPipelineIntegration:
             f"to the primary filing — check that primary_year/filing_type are still being "
             f"threaded through from src/main.py to fill_missing_from_database()."
         )
+
+    def test_stale_dim_concepts_statement_type_self_heals(self):
+        """
+        Item 6: get_or_create_concept() must correct dim_concepts.statement_type whenever
+        the newly-extracted value differs from what's stored, not just when the existing
+        value is NULL. dim_concepts is shared and persistent — a concept created before a
+        classification fix landed would otherwise be permanently stuck with the old wrong
+        value forever, silently masking the fix for that concept on every future run. This
+        directly caused fact_comprehensive_income to appear empty even after item 5's
+        classification fix was verified correct at the extraction level — ~70 concepts had
+        been locked at statement_type='income_statement' from testing before the fix.
+        """
+        from database.load_financial_data import StarSchemaLoader
+
+        loader = StarSchemaLoader()
+        try:
+            # Simulate a concept that's already in dim_concepts with a stale, wrong value
+            loader.cur.execute(
+                "SELECT concept_id FROM dim_concepts WHERE concept_name = %s AND taxonomy = %s",
+                ('TestStaleComprehensiveIncomeConcept', 'TEST')
+            )
+            existing = loader.cur.fetchone()
+            if existing:
+                loader.cur.execute("DELETE FROM dim_concepts WHERE concept_id = %s", (existing[0],))
+                loader.conn.commit()
+
+            concept_id = loader.get_or_create_concept(
+                'TestStaleComprehensiveIncomeConcept', 'TEST',
+                {'normalized_label': 'test_stale_oci_concept', 'statement_type': 'income_statement'}
+            )
+            # Now simulate a later, corrected classification for the SAME concept
+            concept_id_2 = loader.get_or_create_concept(
+                'TestStaleComprehensiveIncomeConcept', 'TEST',
+                {'normalized_label': 'test_stale_oci_concept', 'statement_type': 'comprehensive_income'}
+            )
+            assert concept_id == concept_id_2, "Expected the same concept_id to be reused"
+
+            loader.cur.execute(
+                "SELECT statement_type FROM dim_concepts WHERE concept_id = %s", (concept_id,)
+            )
+            final_statement_type = loader.cur.fetchone()[0]
+            assert final_statement_type == 'comprehensive_income', (
+                f"Expected dim_concepts.statement_type to be corrected to "
+                f"'comprehensive_income', found '{final_statement_type}'. "
+                f"get_or_create_concept() is only updating when the existing value is "
+                f"NULL again, not when it differs from a new value — see "
+                f"database/load_financial_data.py get_or_create_concept()."
+            )
+        finally:
+            loader.cur.execute(
+                "DELETE FROM dim_concepts WHERE concept_name = %s AND taxonomy = %s",
+                ('TestStaleComprehensiveIncomeConcept', 'TEST')
+            )
+            loader.conn.commit()
+            loader.close()
+
+    def test_income_statement_math_handles_split_tax_components(self):
+        """
+        Item 6: check_income_statement_math() must fall back to summing
+        current_tax_expense_income + deferred_tax_expense_income when the single combined
+        income_tax_expense_continuing_operations/income_tax_expense label is absent.
+        Confirmed NVO never reports the combined label — every period's tax is split into
+        current/deferred components — so without this fallback, the check always computed
+        "calculated net income" using zero tax, producing a spurious multi-billion-DKK
+        violation every single period regardless of any other fix.
+        """
+        import inspect
+        from src.validation.displayed_math import DisplayedMathValidator
+
+        source = inspect.getsource(DisplayedMathValidator.check_income_statement_math)
+        assert 'current_tax_expense_income' in source and 'deferred_tax_expense_income' in source, (
+            "check_income_statement_math() no longer falls back to summing "
+            "current_tax_expense_income + deferred_tax_expense_income when the combined "
+            "income_tax_expense label is absent — this will reintroduce spurious "
+            "multi-billion-DKK 'violations' for NVO and any other filer that splits tax "
+            "into components instead of reporting one combined figure."
+        )
+
+        engine = create_engine(DATABASE_URI)
+        with engine.connect() as conn:
+            filing_count = conn.execute(text(
+                """SELECT COUNT(*) FROM dim_filings fi
+                   JOIN dim_companies c ON fi.company_id = c.company_id
+                   WHERE c.ticker = 'NVO'"""
+            )).scalar()
+        assert filing_count == 1, (
+            f"Expected exactly 1 dim_filings row for NVO, found {filing_count}. "
+            f"This is the exact symptom of post_load_gap_filling.py creating a separate "
+            f"filing record per comparative year instead of attaching supplementary facts "
+            f"to the primary filing — check that primary_year/filing_type are still being "
+            f"threaded through from src/main.py to fill_missing_from_database()."
+        )
