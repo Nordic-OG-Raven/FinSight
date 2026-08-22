@@ -354,14 +354,34 @@ class UniversalUITest:
             ))
             return
         
-        # Group API items by normalized_label (API returns one item per year)
+        # Group API items by normalized_label (API returns one item per year).
+        # Headers/spacers are deliberately included in the API response (they're used for
+        # frontend section rendering — confirmed in api/main.py's get_financial_statements,
+        # "Headers are already in fact tables with is_header=True... no post-processing
+        # needed"), but _get_expected_items() above deliberately excludes them (matching
+        # what a real financial statement's line items are, not its visual structure).
+        # Filter them out here too so the missing/extra comparison is on the same set both
+        # sides use — the order-comparison logic below already does this same filtering;
+        # this used to be inconsistent with it, producing "extra" items for every header
+        # and spacer, confirmed for NVO's balance_sheet/comprehensive_income/
+        # equity_statement. See docs/NVO_GOLDEN_PATH_2026-08.md item 4.
+        def _is_header_or_spacer(normalized_label: str) -> bool:
+            return (
+                normalized_label.endswith('_header')
+                or normalized_label.endswith('_space1')
+                or normalized_label.endswith('_space2')
+                or 'space' in normalized_label.lower()
+            )
+
         api_items_by_label = {}
         for item in api_items:
             normalized = item.get('normalized_label', '')
+            if _is_header_or_spacer(normalized):
+                continue
             if normalized not in api_items_by_label:
                 api_items_by_label[normalized] = []
             api_items_by_label[normalized].append(item)
-        
+
         # Check for missing items
         expected_labels = {item['normalized_label'] for item in expected_items}
         api_labels = set(api_items_by_label.keys())
@@ -372,16 +392,11 @@ class UniversalUITest:
         # CRITICAL: API response is already sorted by presentation_order_index, hierarchy_level, normalized_label
         # We should use the API's order directly instead of re-sorting to avoid order mismatches
         # Get unique normalized labels in API order (first occurrence of each label)
-        # Filter out headers and "space" items (e.g., equity_statement_space1) that are not actual financial items
         api_labels_ordered = []
         seen = set()
         for item in api_items:  # API items are already sorted
             normalized = item.get('normalized_label', '')
-            if (normalized not in seen 
-                and not normalized.endswith('_header')  # Skip headers
-                and not normalized.endswith('_space1')  # Skip space items
-                and not normalized.endswith('_space2')  # Skip space items
-                and 'space' not in normalized.lower()):  # Skip any other space items
+            if normalized not in seen and not _is_header_or_spacer(normalized):
                 api_labels_ordered.append(normalized)
                 seen.add(normalized)
         

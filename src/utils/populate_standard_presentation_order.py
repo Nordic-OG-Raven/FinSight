@@ -494,6 +494,48 @@ def populate_standard_presentation_order(engine):
         
         logger.info(f"✅ Total: Inserted {total_inserted:,} standard presentation relationships")
 
+        # Comprehensive income statements universally start with net income as their
+        # first line (Comprehensive Income = Net Income + OCI, by definition) — but net
+        # income's own dim_concepts.statement_type is correctly 'income_statement' (its
+        # true primary classification), so the concept-based backfill above never
+        # considers it for comprehensive_income. Same "one concept, two statement
+        # memberships" shape as equity_statement's dimension-based fix, but simpler: no
+        # dimensional signal needed, just an explicit secondary insertion. See
+        # docs/NVO_GOLDEN_PATH_2026-08.md item 4.
+        net_income_labels = ('net_income_including_noncontrolling_interest', 'net_income', 'net_profit')
+        net_income_result = conn.execute(text("""
+            SELECT DISTINCT fm.filing_id, co.concept_id
+            FROM fact_financial_metrics fm
+            JOIN dim_concepts co ON fm.concept_id = co.concept_id
+            WHERE fm.dimension_id IS NULL
+              AND co.normalized_label = ANY(:labels)
+              AND NOT EXISTS (
+                  SELECT 1 FROM rel_presentation_hierarchy ph
+                  WHERE ph.filing_id = fm.filing_id
+                    AND ph.child_concept_id = co.concept_id
+                    AND ph.statement_type = 'comprehensive_income'
+              )
+        """), {'labels': list(net_income_labels)})
+        net_income_inserted = 0
+        for row_filing_id, concept_id in net_income_result.fetchall():
+            try:
+                conn.execute(text("""
+                    INSERT INTO rel_presentation_hierarchy (
+                        filing_id, parent_concept_id, child_concept_id, order_index,
+                        statement_type, source, is_synthetic, priority
+                    ) VALUES (
+                        :filing_id, NULL, :child_concept_id, 1,
+                        'comprehensive_income', 'standard', TRUE, 0
+                    )
+                    ON CONFLICT (filing_id, parent_concept_id, child_concept_id, order_index) DO NOTHING
+                """), {'filing_id': row_filing_id, 'child_concept_id': concept_id})
+                net_income_inserted += 1
+            except Exception as e:
+                logger.warning(f"Failed to insert comprehensive_income net-income row: {e}")
+        if net_income_inserted:
+            conn.commit()
+            logger.info(f"✅ Inserted {net_income_inserted} net-income-as-comprehensive-income-opening-line relationships")
+
         # Show statistics
         stats_result = conn.execute(text("""
             SELECT

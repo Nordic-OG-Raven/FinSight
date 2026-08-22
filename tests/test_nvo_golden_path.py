@@ -411,3 +411,34 @@ class TestFullPipelineIntegration:
             "dim_xbrl_dimensions.axis_name still contains 'ComponentsOfEquityAxis' for "
             "NVO's equity-rollforward facts."
         )
+
+    def test_balance_sheet_and_cash_flow_ui_display_correctly(self):
+        """
+        Item 4: UniversalUITest's missing/extra-item comparison must filter headers and
+        spacers out of the API's items the same way it already filters them out of the
+        API's item ORDER — these were inconsistent (headers/spacers correctly excluded
+        from the order check, but not from the missing/extra check), producing false
+        "extra items" for every header/spacer the API legitimately returns (confirmed:
+        balance_sheet showed 2 false "extra items" — assets_header,
+        equity_and_liabilities_header — purely from this inconsistency, not a real data
+        problem). Also guards the net-income-as-comprehensive-income-first-line fix
+        (populate_standard_presentation_order.py) that unblocked comprehensive_income.
+        Runs the real pipeline + real UI test against the live API, not a mock.
+        """
+        from src.main import run_pipeline
+        from src.validation.ui_test import UniversalUITest
+
+        success = run_pipeline(ticker='NVO', year=2024, filing_type='20-F')
+        assert success, "Full pipeline run failed for NVO 2024 — check validation gate output"
+
+        tester = UniversalUITest(api_base="http://localhost:5001")
+        report = tester.test_company('NVO', 2024, statement_types=['balance_sheet', 'cash_flow'])
+
+        failed = [r for r in report.results if not r.passed]
+        assert not failed, (
+            f"balance_sheet/cash_flow UI validation failed: "
+            f"{[(r.rule_name, r.message) for r in failed]}. "
+            f"If this is 'extra items' matching header/spacer normalized_labels "
+            f"(ending in _header, _space1, _space2), the filter consistency fix in "
+            f"src/validation/ui_test.py's _validate_statement() has regressed."
+        )

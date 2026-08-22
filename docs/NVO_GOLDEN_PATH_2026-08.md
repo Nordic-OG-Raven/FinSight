@@ -42,10 +42,21 @@ not the core financial statements, so item 4's display-ordering warnings remain 
 the hypothesis they were blamed on ("presentation hierarchy is empty") is now ruled out,
 not just deprioritized. This fix benefits every company's extraction, not just NVO's.
 
-**What's still open, not blocking**: item 4 (API/UI-level display correctness — exact
-items, ordering) has real, unresolved warnings, cause now unknown rather than assumed. 15
-tests pass (up from 1 before today). The database was left in a clean baseline (NVO: 0
-facts, 1 filing record) at end of session.
+**Then item 4 itself got substantially fixed.** Traced the display discrepancies to two
+real bugs, not the ruled-out presentation-hierarchy hypothesis: `UniversalUITest`'s
+missing/extra-item check compared against unfiltered API output while its order check a
+few lines below already filtered out headers/spacers — that inconsistency alone produced
+false "extra items" for every legitimate header. And comprehensive income's fallback never
+considered net income for its own statement, since net income's true classification is
+`income_statement` — same "one concept, two statement memberships" shape as the
+equity-dimension fix. Both fixed. `balance_sheet` and `cash_flow` now pass
+`UniversalUITest` cleanly; `comprehensive_income`/`equity_statement` have one remaining,
+precisely-diagnosed gap (a validation-rule template's generic labels not matching NVO's
+actual verbose concept names — a bounded task, not a mystery).
+
+**What's still open, not blocking**: the one item 4 gap described above. 16 tests pass (up
+from 1 before today). The database was left in a clean baseline (NVO: 0 facts, 1 filing
+record) at end of session.
 
 ---
 
@@ -78,24 +89,34 @@ NVO 2024 20-F, run through `./run_pipeline.sh NVO 2024 20-F` end to end:
    dim_concepts-staleness/tax-math/equity-dimension fixes) combined to get here.
 3. ✅ **Done, verified 2026-08-22.** Balance sheet, income statement, cash flow,
    comprehensive income, and equity statement all populate with real data.
-4. ⚠️ **Still open, but the hypothesis it was blamed on is now ruled out.** Item 3's
-   presentation-hierarchy gap is fixed (128 real relationships now extract correctly) —
-   but they're all for a peripheral disclosure section, not the core statements, so they
-   don't actually feed the UI test's comparisons. `UniversalUITest` still reports real
-   discrepancies (extra/missing items, ordering) against every statement type — the actual
-   cause is still open, but "presentation hierarchy is empty" is no longer it. Next step:
-   check whether NVO's core financial-statement presentation linkbase is reachable via a
-   different mechanism than the disclosure-section relationships found here, or whether
-   `EQUITY_ROLLFORWARD_ORDER`'s hand-built ordering (and the standard templates for the
-   other statement types) are the actual, more mundane explanation.
-5. ✅ **Done.** 12 tests total (up from 1 before this session), 11 passing —
-   `TestFullPipelineIntegration::test_pipeline_succeeds_and_populates_all_statements` was
-   failing as of the previous update (correctly, catching the then-real gap) and should
-   now pass; re-verify next session rather than assuming.
+4. ⚠️ **Mostly done — balance_sheet and cash_flow pass cleanly; comprehensive_income and
+   equity_statement have one narrow, well-understood remaining gap.** Two real bugs found
+   and fixed: (1) `UniversalUITest`'s missing/extra-item comparison built its "API items"
+   set from *all* API items including headers/spacers, while the order-comparison logic a
+   few lines below it already correctly filtered them out — this inconsistency alone
+   produced false "extra items" for every header the API legitimately returns (confirmed:
+   `assets_header`, `equity_and_liabilities_header`, etc. were never real discrepancies).
+   Fixed by extracting one shared filter helper both checks now use.
+   (2) Comprehensive income statements universally start with net income as their first
+   line by definition (Comprehensive Income = Net Income + OCI) — but net income's own
+   `dim_concepts.statement_type` is correctly `income_statement`, so the standard
+   fallback never considered it for comprehensive_income. Same "one concept, two
+   statement memberships" shape as item 6's equity-dimension fix; fixed with an explicit
+   secondary insertion in `populate_standard_presentation_order.py`.
+   **Remaining, not yet fixed**: `equity_statement` is still missing `oci_total`/
+   `comprehensive_income` as rollforward lines — traced precisely to
+   `STANDARD_TEMPLATES['comprehensive_income']` (`populate_standard_presentation_order.py`)
+   having generic entries (`oci_total`, `other_comprehensive_income`) that don't match any
+   of NVO's actual, verbose normalized_labels for its OCI concepts, so
+   `fact_comprehensive_income` never gets real oci_total/comprehensive_income values for
+   `populate_equity_statement()`'s `LEFT JOIN LATERAL` to find. Bounded fix, not started:
+   expand that template with NVO's actual label strings (already enumerated in item 6's
+   `dim_concepts` staleness investigation above).
+5. ✅ **Done.** 16 tests total (up from 1 before this session), all passing.
 6. ✅ **Done, verified 2026-08-22, confirmed reproducible.**
 
-**5 of 6 done. Item 4 (API-level display correctness) is the sole genuinely open item** —
-not a reproducibility question anymore, a real display-fidelity one.
+**5 of 6 fully done, item 4 substantially improved with one narrow, precisely-diagnosed
+gap remaining** — not a mystery anymore, a specific template-coverage task.
 
 ---
 
