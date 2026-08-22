@@ -12,9 +12,8 @@ this project has ~15 archived docs that suffered exactly that fate
 
 **Session status (2026-08-22, end of session)**: **`./run_pipeline.sh NVO 2024 20-F`
 genuinely, reproducibly succeeds now** — confirmed across 3 consecutive clean runs, zero
-critical validation issues. Items 1-6 all done and independently verified; item 7 has 12
-tests (up from 1 before today), 11 of which pass (the 12th failure was the marker that
-caught the last remaining issue, now fixed — should be re-verified green next session).
+critical validation issues. Items 1-6 all done and independently verified; item 7 has 15
+tests (up from 1 before today), all passing.
 
 Getting here took six distinct, confirmed root causes in item 6 alone, each narrower than
 it first looked: an invalid-SQL-syntax bug in `schema.sql` (why `dim_statement_templates`
@@ -29,11 +28,24 @@ a math-check that assumed a single combined tax figure NVO never reports, and fi
 concept (e.g. "Equity") is legitimately both a primary balance-sheet figure and an
 equity-rollforward line item depending on context.
 
-**What's still open, not blocking**: item 3's presentation-hierarchy extraction is still
-non-deterministic for NVO's own filing (empty `pres_rels`), and item 4 (API/UI-level
-display correctness — exact items, ordering) has real, unresolved warnings. Both are
-softer, non-critical signal now, not load-blocking. The database was left in a clean
-baseline (NVO: 0 facts, 1 filing record) at end of session.
+**Then item 3's presentation-hierarchy gap got fixed too**, and it wasn't an Arelle/lxml
+staleness bug after all: `pres_rels.fromModelObject(from_concept)` returns
+`list[ModelRelationship]`, not `(to_concept, rel)` tuples — the code was tuple-unpacking
+each relationship object itself, which silently invoked lxml's inherited `_Element.__iter__`
+instead of erroring clearly (`ModelRelationship`/`ModelConcept` both inherit lxml's
+`_Element`). Compounded by a second bug in the same code: `if from_concept else None`
+relied on lxml's deprecated Element truthiness (`bool()` means "has children," not "is not
+None"), silently nulling every child concept even after the first fix landed. Both fixed;
+NVO's filing now extracts 128 real presentation relationships (previously 0). Caveat:
+they're entirely for a peripheral SEC disclosure section (cybersecurity risk management),
+not the core financial statements, so item 4's display-ordering warnings remain open — but
+the hypothesis they were blamed on ("presentation hierarchy is empty") is now ruled out,
+not just deprioritized. This fix benefits every company's extraction, not just NVO's.
+
+**What's still open, not blocking**: item 4 (API/UI-level display correctness — exact
+items, ordering) has real, unresolved warnings, cause now unknown rather than assumed. 15
+tests pass (up from 1 before today). The database was left in a clean baseline (NVO: 0
+facts, 1 filing record) at end of session.
 
 ---
 
@@ -66,12 +78,16 @@ NVO 2024 20-F, run through `./run_pipeline.sh NVO 2024 20-F` end to end:
    dim_concepts-staleness/tax-math/equity-dimension fixes) combined to get here.
 3. ✅ **Done, verified 2026-08-22.** Balance sheet, income statement, cash flow,
    comprehensive income, and equity statement all populate with real data.
-4. ⚠️ **Not yet — the honest remaining gap.** `/api/statements/NVO/2024` runs and returns
-   data, but `UniversalUITest` still reports real discrepancies (extra/missing items,
-   ordering) against every statement type — likely downstream of item 3's still-open
-   presentation-hierarchy gap (empty `pres_rels` for NVO's filing), and possibly related to
-   `EQUITY_ROLLFORWARD_ORDER`'s hand-built (not XBRL-derived) ordering for the new equity
-   fallback. Not investigated yet — this is the natural next focus.
+4. ⚠️ **Still open, but the hypothesis it was blamed on is now ruled out.** Item 3's
+   presentation-hierarchy gap is fixed (128 real relationships now extract correctly) —
+   but they're all for a peripheral disclosure section, not the core statements, so they
+   don't actually feed the UI test's comparisons. `UniversalUITest` still reports real
+   discrepancies (extra/missing items, ordering) against every statement type — the actual
+   cause is still open, but "presentation hierarchy is empty" is no longer it. Next step:
+   check whether NVO's core financial-statement presentation linkbase is reachable via a
+   different mechanism than the disclosure-section relationships found here, or whether
+   `EQUITY_ROLLFORWARD_ORDER`'s hand-built ordering (and the standard templates for the
+   other statement types) are the actual, more mundane explanation.
 5. ✅ **Done.** 12 tests total (up from 1 before this session), 11 passing —
    `TestFullPipelineIntegration::test_pipeline_succeeds_and_populates_all_statements` was
    failing as of the previous update (correctly, catching the then-real gap) and should
@@ -140,24 +156,39 @@ the correct current API is `fromModelObjects()`, a method (not a property) retur
 (`src/parsing/parse_xbrl.py:209,1744,1922`). Verified: NVO's filing now extracts 2951
 facts cleanly with no crash (previously returned `None`).
 
-**Follow-up issue found, not yet fixed**: presentation/calculation relationships still
-come back empty for NVO specifically. Two compounding causes: (1) the loose
-`nvo-20241231_{pre,cal,def,lab}.xml` files visible in `data/raw/` sit at that directory's
-top level, not inside `data/raw/NVO_2024_20F_000162828025003920/` — they're leftovers from
-an earlier/different download attempt, not part of this filing's actual package, so the
-manual-linkbase-loading fallback (`parse_xbrl.py:210-256`) finds referenced filenames in
-the HTML but `lb_path.exists()` is always false and it silently does nothing; (2)
-separately, `_extract_presentation_relationships()` (`parse_xbrl.py:1973`) catches and
-logs (rather than propagating) an `invalid Element proxy` error — a stale lxml/Arelle
-element reference, exact trigger not yet isolated. Net effect: NVO's statement hierarchy
-will fall back to the standard-order heuristic (`populate_standard_presentation_order.py`)
-rather than NVO's true filed order — which matters more for NVO than most companies, since
-respecting actual filing order for a non-trivial IFRS layout was part of why NVO was
-chosen as the hard reference case. Not fixed now — didn't want to chase an open-ended lxml
-lifecycle bug without a bound, the same shape of problem that cost months before. Worth
-revisiting: try re-downloading NVO's filing fresh (confirm whether SEC's actual filed
-package includes separate linkbases at all, or whether this is another pure-inline-XBRL
-filing like AAPL's) before spending more time on the stale-proxy error itself.
+**Follow-up issue: fixed, later the same day (not an Arelle/lxml bug after all)**. The
+"invalid Element proxy" crash was never a genuine staleness/lifecycle issue in Arelle or
+lxml — it was this codebase using the wrong API. `pres_rels.fromModelObject(from_concept)`
+returns `list[ModelRelationship]` (confirmed against Arelle's own source), not
+`(to_concept, rel)` tuples. The code did `for to_concept, rel in
+pres_rels.fromModelObject(from_concept):`, which tuple-unpacks each `ModelRelationship`
+object itself — and since `ModelRelationship` inherits lxml's `_Element` (via
+`ModelObject`/`ElementBase`), that unpacking silently invoked `_Element.__iter__`
+(iterating the underlying `<xbrl:arc>` XML element's raw children) instead of raising a
+clear `TypeError`. Fixed by using `rel.toModelObject` directly — the correct accessor,
+confirmed in Arelle's own source (e.g. `toConcept = modelRel.toModelObject`). Applied
+identically to `extract_calculation_relationships()`, which had the same bug.
+
+A second, compounding bug in the same code: `parent_qname = from_concept.qname if
+from_concept else None` looked like a None-check but wasn't one — `from_concept`/
+`to_concept` are `ModelConcept` objects, also lxml `_Element` subclasses, and `bool()` on
+an lxml Element means "has child XML elements," not "is not None." A leaf concept
+definition (the normal case) has no children of its own, so this silently nulled
+`child_qname` for every relationship regardless of whether the concept was a real object —
+this is the exact same deprecated-truthiness pattern the `FutureWarning`s already scattered
+through this file have been flagging all along. Fixed by using `is not None` instead.
+
+**Verified**: NVO's filing now extracts 128 real presentation relationships (previously 0,
+either from the crash or, after the `toModelObject` fix alone, from the truthiness bug).
+**Caveat, not further chased**: those 128 relationships are entirely for NVO's
+"Cybersecurity Risk Management" SEC disclosure section (`cyd:` namespace) — a mandatory
+but peripheral disclosure, not the core financial statements. `statement_type` correctly
+classifies all of them as `other`, so they don't conflict with or replace the `standard`
+presentation-hierarchy fallback rows the core statements still rely on. Whether NVO's
+*core* financial-statement presentation linkbase is reachable via this same arcrole/path
+at all, or needs a different route, is now the open question — but the crash and the
+silent-swallowing bug are both genuinely fixed regardless of that answer, and the fix
+benefits every company, not just NVO.
 
 ### 4. Resolve the 2022 balance-sheet completeness gap
 **Why**: this is the original unsolved bug, and NVO is the company it's about — it's

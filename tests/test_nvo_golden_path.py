@@ -27,8 +27,8 @@ from config import DATA_RAW, DATABASE_URI
 
 
 @pytest.fixture(scope="module")
-def nvo_2024_facts():
-    """Parse NVO's FY2024 20-F once and share across tests in this module."""
+def nvo_2024_parse_result():
+    """Parse NVO's FY2024 20-F once and share the full parse result across tests."""
     downloader = SECFilingDownloader(output_dir=DATA_RAW)
     filing_path = downloader.download_filing('NVO', 2024, '20-F')
     assert filing_path is not None, "Failed to download NVO FY2024 20-F"
@@ -42,7 +42,13 @@ def nvo_2024_facts():
         "src/parsing/parse_xbrl.py's fromModelObjects() calls still match the "
         "installed arelle-release version's actual API."
     )
-    return result['facts']
+    return result
+
+
+@pytest.fixture(scope="module")
+def nvo_2024_facts(nvo_2024_parse_result):
+    """Just the facts, for tests that don't need relationships."""
+    return nvo_2024_parse_result['facts']
 
 
 def _facts_for_concept(facts, concept_name, period_type=None):
@@ -62,6 +68,42 @@ class TestExtractionSucceeds:
         assert len(nvo_2024_facts) > 2000, (
             f"Expected >2000 facts from NVO's FY2024 20-F, got {len(nvo_2024_facts)}. "
             "Extraction may have silently fallen back to stale/incomplete data."
+        )
+
+
+class TestPresentationRelationshipsExtract:
+    """
+    Item 3 follow-up: presentation/calculation relationship extraction must not silently
+    return zero relationships. Two distinct bugs caused this, both now fixed:
+    (1) `for to_concept, rel in pres_rels.fromModelObject(from_concept):` tuple-unpacked
+    each ModelRelationship object itself — which inherits lxml's _Element, so this
+    silently invoked _Element.__iter__ (iterating the underlying arc XML element's raw
+    children) instead of raising a clear error. Fixed via `rel.toModelObject`.
+    (2) `from_concept.qname if from_concept else None` used lxml's deprecated Element
+    truthiness (bool() means "has child elements", not "is not None") — a leaf concept
+    definition has no children, so this silently nulled every child_qname. Fixed via
+    `is not None`.
+    """
+
+    def test_presentation_relationships_are_extracted(self, nvo_2024_parse_result):
+        presentation_rels = nvo_2024_parse_result.get('relationships', {}).get('presentation', [])
+        assert len(presentation_rels) > 0, (
+            "No presentation relationships extracted for NVO's FY2024 20-F. Either the "
+            "toModelObject fix or the 'is not None' truthiness fix in "
+            "extract_presentation_hierarchy() (src/parsing/parse_xbrl.py) has regressed — "
+            "see NVO_GOLDEN_PATH_2026-08.md item 3 for the full diagnosis."
+        )
+
+    def test_extracted_relationships_have_real_concept_names(self, nvo_2024_parse_result):
+        # Guards against the truthiness bug specifically: if it regresses, relationships
+        # get "extracted" but with child_concept=None for all of them (silently useless).
+        presentation_rels = nvo_2024_parse_result.get('relationships', {}).get('presentation', [])
+        assert presentation_rels, "No presentation relationships to check (see previous test)"
+        with_real_child = [r for r in presentation_rels if r.get('child_concept')]
+        assert len(with_real_child) == len(presentation_rels), (
+            f"{len(presentation_rels) - len(with_real_child)} of {len(presentation_rels)} "
+            f"presentation relationships have no child_concept — this is the exact "
+            f"signature of the lxml Element truthiness bug (see class docstring)."
         )
 
 

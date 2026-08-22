@@ -1759,12 +1759,17 @@ class ComprehensiveXBRLParser:
                 logger.debug("No calculation relationships found")
                 return relationships
             
-            # Iterate through all calculation relationships
+            # Iterate through all calculation relationships. See the identical fix in
+            # extract_presentation_hierarchy() for why `rel.toModelObject` is required
+            # here instead of tuple-unpacking the ModelRelationship object directly.
             for from_concept in calc_rels.fromModelObjects():
-                for to_concept, rel in calc_rels.fromModelObject(from_concept):
-                    parent_qname = from_concept.qname if from_concept else None
-                    child_qname = to_concept.qname if to_concept else None
-                    
+                for rel in calc_rels.fromModelObject(from_concept):
+                    to_concept = rel.toModelObject
+                    # `is not None`, not truthiness — see extract_presentation_hierarchy()
+                    # for why (ModelConcept inherits lxml's _Element truthiness semantics).
+                    parent_qname = from_concept.qname if from_concept is not None else None
+                    child_qname = to_concept.qname if to_concept is not None else None
+
                     if not parent_qname or not child_qname:
                         continue
                     
@@ -1889,7 +1894,7 @@ class ComprehensiveXBRLParser:
             # Get presentation relationship set (parent-child in presentation linkbase)
             pres_arcrole = XbrlConst.parentChild if hasattr(XbrlConst, 'parentChild') else 'http://www.xbrl.org/2003/arcrole/parent-child'
             pres_rels = model_xbrl.relationshipSet(pres_arcrole)
-            
+
             if not pres_rels:
                 logger.warning("No presentation relationship set found - Arelle's inlineXbrlDiscover() doesn't process linkbaseRef elements")
                 # PRIMARY METHOD: Manually parse linkbase XML files (best practice for Arelle's inline XBRL limitation)
@@ -1937,12 +1942,36 @@ class ComprehensiveXBRLParser:
                 except:
                     pass
             
-            # Iterate through all presentation relationships
+            # Iterate through all presentation relationships.
+            #
+            # `pres_rels.fromModelObject(from_concept)` returns a list[ModelRelationship]
+            # (confirmed directly against Arelle's source), not (to_concept, rel) tuples.
+            # The previous code here did `for to_concept, rel in ...`, tuple-unpacking each
+            # ModelRelationship object itself — ModelRelationship subclasses lxml's
+            # _Element (via ModelObject/ElementBase), so that unpacking silently invoked
+            # _Element.__iter__ (iterating the underlying arc XML element's raw children,
+            # not any meaningful (target, relationship) pair) instead of raising a clear
+            # TypeError. This is what produced the "invalid Element proxy" AssertionError —
+            # not a Arelle/lxml staleness bug as it first appeared, but this codebase using
+            # the wrong API. The correct accessor is `rel.toModelObject`. Confirmed fixed:
+            # NVO's presentation relationships now extract without error. See
+            # docs/NVO_GOLDEN_PATH_2026-08.md item 3.
             for from_concept in pres_rels.fromModelObjects():
-                for to_concept, rel in pres_rels.fromModelObject(from_concept):
-                    parent_qname = from_concept.qname if from_concept else None
-                    child_qname = to_concept.qname if to_concept else None
-                    
+                for rel in pres_rels.fromModelObject(from_concept):
+                    to_concept = rel.toModelObject
+                    # `if from_concept else None` / `if to_concept else None` looked like a
+                    # None-check but isn't one: ModelConcept inherits from lxml's _Element
+                    # (same MRO as ModelRelationship — see the fix above), and bool() on an
+                    # lxml Element means "has child elements", not "is not None". A leaf
+                    # concept definition (the normal case) has no XML children of its own,
+                    # so this silently nulled every child_qname regardless of whether
+                    # to_concept was a real object — confirmed causing "128 relationships
+                    # iterated, 0 appended" for NVO even after the toModelObject fix above.
+                    # `is not None` is the actual, correct check. See
+                    # docs/NVO_GOLDEN_PATH_2026-08.md item 3.
+                    parent_qname = from_concept.qname if from_concept is not None else None
+                    child_qname = to_concept.qname if to_concept is not None else None
+
                     if not child_qname:
                         continue
                     
@@ -1988,10 +2017,10 @@ class ComprehensiveXBRLParser:
                     })
             
             logger.info(f"Extracted {len(relationships)} presentation relationships")
-            
+
         except Exception as e:
             logger.warning(f"Error extracting presentation relationships: {e}")
-        
+
         return relationships
     
     def _extract_relationships_from_linkbase_xml(self, filing_path: Path) -> List[Dict[str, Any]]:
