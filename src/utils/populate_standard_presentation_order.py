@@ -11,6 +11,7 @@ SOLUTION: Two-Tier Presentation Hierarchy
 """
 import sys
 from pathlib import Path
+from typing import Optional
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from sqlalchemy import create_engine, text
@@ -492,20 +493,105 @@ def populate_standard_presentation_order(engine):
                 logger.info(f"  {ticker}: Inserted {inserted_count} standard presentation relationships")
         
         logger.info(f"✅ Total: Inserted {total_inserted:,} standard presentation relationships")
-        
+
         # Show statistics
         stats_result = conn.execute(text("""
-            SELECT 
+            SELECT
                 source,
                 COUNT(*) as count
             FROM rel_presentation_hierarchy
             GROUP BY source
             ORDER BY source
         """))
-        
+
         logger.info("\nPresentation hierarchy sources:")
         for source, count in stats_result:
             logger.info(f"  {source}: {count:,} relationships")
+
+
+# Equity-rollforward line items, identified by a structural XBRL signal rather than by
+# concept name: whether a fact carries the ComponentsOfEquityAxis dimension (standard
+# IFRS/US-GAAP dimension breaking equity movements out by component — issued capital,
+# treasury shares, retained earnings, reserves). This sidesteps a real limitation of the
+# concept-based STANDARD_TEMPLATES approach used above: dim_concepts.statement_type is one
+# value per concept, but a concept like "Equity" or "ProfitLoss" is legitimately BOTH a
+# primary balance-sheet/income-statement figure (undimensioned) AND an equity-rollforward
+# line item (dimensioned) — no single statement_type could ever be correct for both. See
+# docs/NVO_GOLDEN_PATH_2026-08.md item 6.
+#
+# Order is a simple, reasonable rollforward sequence, not derived from real presentation
+# order — good enough to get real data flowing into fact_equity_statement rather than
+# leaving it permanently empty; refining actual display order is separate follow-up work.
+EQUITY_ROLLFORWARD_ORDER = {
+    'equity_total': 1,
+    'net_income_including_noncontrolling_interest': 2,
+    'oci_total': 3,
+    'comprehensive_income': 4,
+    'dividends_paid': 5,
+    'purchase_of_treasury_shares': 6,
+    'increase_decrease_through_sharebased_payment_transactions': 7,
+    'decrease_increase_through_tax_on_sharebased_payment_transactions': 8,
+    'increase_decrease_in_shares_outstanding_value': 9,
+    'reduction_of_issued_capital': 10,
+}
+
+
+def populate_equity_statement_from_dimensions(engine, filing_id: Optional[int] = None):
+    """
+    Populate rel_presentation_hierarchy with statement_type='equity_statement' entries for
+    concepts identified via the ComponentsOfEquityAxis dimension, rather than via
+    dim_concepts.statement_type (which cannot represent "this concept is ALSO an equity
+    rollforward line item" — see EQUITY_ROLLFORWARD_ORDER's docstring above).
+    """
+    with engine.connect() as conn:
+        filing_filter = "AND fm.filing_id = :filing_id" if filing_id else ""
+        params = {'filing_id': filing_id} if filing_id else {}
+
+        result = conn.execute(text(f"""
+            SELECT DISTINCT fm.filing_id, co.concept_id, co.normalized_label
+            FROM fact_financial_metrics fm
+            JOIN dim_concepts co ON fm.concept_id = co.concept_id
+            JOIN dim_xbrl_dimensions dx ON fm.dimension_id = dx.dimension_id
+            WHERE dx.axis_name = 'ComponentsOfEquityAxis'
+              AND co.normalized_label IS NOT NULL
+              {filing_filter}
+              AND NOT EXISTS (
+                  SELECT 1 FROM rel_presentation_hierarchy ph
+                  WHERE ph.filing_id = fm.filing_id
+                    AND ph.child_concept_id = co.concept_id
+                    AND ph.statement_type = 'equity_statement'
+              )
+        """), params)
+
+        rows = result.fetchall()
+        inserted = 0
+        for row_filing_id, concept_id, normalized_label in rows:
+            order_index = EQUITY_ROLLFORWARD_ORDER.get(normalized_label)
+            if order_index is None:
+                continue  # not a rollforward line item we have a place for (e.g. par_value_per_share, number_of_votes — ratios/disclosures, not statement lines)
+            try:
+                conn.execute(text("""
+                    INSERT INTO rel_presentation_hierarchy (
+                        filing_id, parent_concept_id, child_concept_id, order_index,
+                        statement_type, source, is_synthetic, priority
+                    ) VALUES (
+                        :filing_id, NULL, :child_concept_id, :order_index,
+                        'equity_statement', 'standard', TRUE, 0
+                    )
+                    ON CONFLICT (filing_id, parent_concept_id, child_concept_id, order_index) DO NOTHING
+                """), {
+                    'filing_id': row_filing_id,
+                    'child_concept_id': concept_id,
+                    'order_index': order_index
+                })
+                inserted += 1
+            except Exception as e:
+                logger.warning(f"Failed to insert equity_statement hierarchy for {normalized_label}: {e}")
+                continue
+
+        if inserted > 0:
+            conn.commit()
+            logger.info(f"✅ Inserted {inserted} equity_statement relationships from ComponentsOfEquityAxis-dimensioned facts")
 
 
 def main():

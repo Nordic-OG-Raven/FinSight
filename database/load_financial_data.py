@@ -1416,10 +1416,14 @@ class StarSchemaLoader:
         # fact_comprehensive_income to populate empty intermittently — see
         # docs/NVO_GOLDEN_PATH_2026-08.md item 6.
         print(f"   🔧 Populating standard presentation order for any concepts missing XBRL hierarchy...")
-        from src.utils.populate_standard_presentation_order import populate_standard_presentation_order
+        from src.utils.populate_standard_presentation_order import populate_standard_presentation_order, populate_equity_statement_from_dimensions
         populate_standard_presentation_order(engine)
+        # Equity-rollforward items need a dimension-based signal (ComponentsOfEquityAxis),
+        # not the concept-based STANDARD_TEMPLATES approach — see that function's
+        # docstring in src/utils/populate_standard_presentation_order.py.
+        populate_equity_statement_from_dimensions(engine, filing_id=filing_id)
         print(f"   ✅ Standard presentation order populated")
-        
+
         # Step: Concept mapping validation (concept_checker.py)
         if year:
             try:

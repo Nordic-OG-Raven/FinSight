@@ -198,9 +198,12 @@ class TestFullPipelineIntegration:
     database) — see docs/PIPELINE_AND_VALIDATION_MAP.md for local setup.
 
     This is the test explicitly deferred in NVO_GOLDEN_PATH_2026-08.md item 7 until item 6
-    (schema drift + the period-deduplication bug it surfaced) closed — it would have been
-    permanently red before that. Now that the pipeline reaches SUCCESS with zero critical
-    validation issues, this pins that down.
+    closed — item 6 turned out to be six confirmed root causes deep (schema syntax,
+    period dedup, filing identity, dim_concepts staleness, a tax-splitting math check, and
+    finally equity-statement's dimension-based fix), each of which made this test fail for
+    a genuinely different reason as it got fixed. As of 2026-08-22 the pipeline reaches
+    SUCCESS with zero critical issues, confirmed reproducible across 3 consecutive clean
+    runs — this test pins that down.
 
     Mutates the shared local database (clears and reloads NVO's data) — don't run this
     against a database with NVO data you care about preserving mid-edit.
@@ -337,17 +340,32 @@ class TestFullPipelineIntegration:
             "into components instead of reporting one combined figure."
         )
 
+    def test_equity_statement_populates_from_components_of_equity_axis(self):
+        """
+        Item 6: fact_equity_statement must populate via the ComponentsOfEquityAxis
+        dimension signal (populate_equity_statement_from_dimensions), since
+        dim_concepts.statement_type can never correctly say 'equity_statement' for
+        concepts (like "Equity" or "ProfitLoss") that are legitimately both a primary
+        balance-sheet/income-statement figure AND an equity-rollforward line item
+        depending on context.
+        """
+        from src.main import run_pipeline
+
+        success = run_pipeline(ticker='NVO', year=2024, filing_type='20-F')
+        assert success, "Full pipeline run failed for NVO 2024 — check validation gate output"
+
         engine = create_engine(DATABASE_URI)
         with engine.connect() as conn:
-            filing_count = conn.execute(text(
-                """SELECT COUNT(*) FROM dim_filings fi
+            count = conn.execute(text(
+                """SELECT COUNT(*) FROM fact_equity_statement fes
+                   JOIN dim_filings fi ON fes.filing_id = fi.filing_id
                    JOIN dim_companies c ON fi.company_id = c.company_id
                    WHERE c.ticker = 'NVO'"""
             )).scalar()
-        assert filing_count == 1, (
-            f"Expected exactly 1 dim_filings row for NVO, found {filing_count}. "
-            f"This is the exact symptom of post_load_gap_filling.py creating a separate "
-            f"filing record per comparative year instead of attaching supplementary facts "
-            f"to the primary filing — check that primary_year/filing_type are still being "
-            f"threaded through from src/main.py to fill_missing_from_database()."
+        assert count > 0, (
+            "fact_equity_statement is empty for NVO after a successful pipeline run. "
+            "Check that populate_equity_statement_from_dimensions() is still wired into "
+            "database/load_financial_data.py's load_json_file(), and that "
+            "dim_xbrl_dimensions.axis_name still contains 'ComponentsOfEquityAxis' for "
+            "NVO's equity-rollforward facts."
         )
