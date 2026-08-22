@@ -28,8 +28,8 @@ CONFIG_DIR = PROJECT_ROOT / "config"
 if os.getenv('DATABASE_URL'):
     DATABASE_URL = os.getenv('DATABASE_URL')
     DATABASE_URI = DATABASE_URL
-    # Extract components from DATABASE_URL for NP2SQL config
-    # Default values if we can't parse (will use same connection)
+    # For Railway, DATABASE_URL is already set, so use it directly
+    # Set defaults for NP2SQL config (won't be used since we use DATABASE_URL directly)
     POSTGRES_HOST = os.getenv('POSTGRES_HOST', '127.0.0.1')
     POSTGRES_PORT = os.getenv('POSTGRES_PORT', '5432')
     POSTGRES_USER = os.getenv('POSTGRES_USER', 'superset')

@@ -342,7 +342,9 @@ def get_template_order(normalized_label: str, statement_type: str) -> tuple[str,
         if normalized_label in section_data['items']:
             item_order = section_data['items'][normalized_label]
             section_order = section_data['order']
-            combined_order = section_order * 1000 + item_order
+            # Use sequential order: section_order * 10 + item_order (max 99 items per section)
+            # This keeps order_index < 1000 so items aren't filtered out as disclosures
+            combined_order = section_order * 10 + item_order
             return (section_name, combined_order)
         
         # Then try fuzzy matching - but only for main statement items
@@ -368,7 +370,9 @@ def get_template_order(normalized_label: str, statement_type: str) -> tuple[str,
                 label_lower.endswith('_' + template_key_lower) or
                 ('_' + template_key_lower + '_' in label_lower)):
                 section_order = section_data['order']
-                combined_order = section_order * 1000 + item_order
+                # Use sequential order: section_order * 10 + item_order (max 99 items per section)
+                # This keeps order_index < 1000 so items aren't filtered out as disclosures
+                combined_order = section_order * 10 + item_order
                 return (section_name, combined_order)
     
     return None
@@ -383,7 +387,7 @@ def populate_standard_presentation_order(engine):
     2. Apply standard templates based on normalized_label and statement_type
     3. Insert synthetic presentation hierarchy relationships with source='standard'
     """
-    logger.info("Populating standard presentation order for concepts missing XBRL hierarchy...")
+    logger.debug("Populating standard presentation order for concepts missing XBRL hierarchy...")
     
     with engine.connect() as conn:
         # Get all filings
@@ -395,7 +399,7 @@ def populate_standard_presentation_order(engine):
         """))
         filings = filings_result.fetchall()
         
-        logger.info(f"Processing {len(filings)} filings...")
+        logger.debug(f"Processing {len(filings)} filings...")
         
         total_inserted = 0
         

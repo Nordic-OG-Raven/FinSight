@@ -89,8 +89,8 @@ def populate_all_hierarchy_levels(engine):
     NOTE: For best results, run load_taxonomy_hierarchy.py first to load taxonomy relationships.
     """
     
-    logger.info("Populating hierarchy_level for ALL concepts...")
-    logger.info("Strategy: Taxonomy relationships → Filing relationships → Pattern matching")
+    logger.debug("Populating hierarchy_level for ALL concepts...")
+    logger.debug("Strategy: Taxonomy relationships → Filing relationships → Pattern matching")
     
     # Check if taxonomy relationships have been loaded (they populate parent_concept_id)
     with engine.connect() as conn:
@@ -101,11 +101,9 @@ def populate_all_hierarchy_levels(engine):
         """)).scalar() > 100  # If > 100 concepts have parents, taxonomy likely loaded
     
     if taxonomy_loaded:
-        logger.info("✅ Taxonomy relationships detected - using data-driven hierarchy")
-        logger.info("   (If needed, run: python src/utils/load_taxonomy_hierarchy.py)")
+        logger.debug("✅ Taxonomy relationships detected - using data-driven hierarchy")
     else:
         logger.warning("⚠️  No taxonomy relationships found - will use pattern matching fallback")
-        logger.info("   Recommendation: Run 'python src/utils/load_taxonomy_hierarchy.py' first")
     
     # Universal metrics that MUST be level 3 or 4 (force update even if already set)
     universal_metrics_level_3 = {
@@ -124,7 +122,7 @@ def populate_all_hierarchy_levels(engine):
     
     with engine.connect() as conn:
         # STEP 1: Force-update universal metrics to correct level (even if already set incorrectly)
-        logger.info("Step 1: Force-updating universal metrics to correct levels...")
+        logger.debug("Step 1: Force-updating universal metrics to correct levels...")
         
         # Update level 3 universal metrics
         for metric in universal_metrics_level_3:
@@ -135,7 +133,7 @@ def populate_all_hierarchy_levels(engine):
                   AND (hierarchy_level IS NULL OR hierarchy_level < 3);
             """), {'metric': metric})
             if result.rowcount > 0:
-                logger.info(f"  ✅ Updated {result.rowcount} concepts for '{metric}' to level 3")
+                logger.debug(f"  ✅ Updated {result.rowcount} concepts for '{metric}' to level 3")
         
         # Update level 4 statement totals
         for metric in statement_totals_level_4:
@@ -158,7 +156,7 @@ def populate_all_hierarchy_levels(engine):
         """))
         
         concepts = result.fetchall()
-        logger.info(f"\nStep 2: Found {len(concepts)} concepts without hierarchy_level")
+        logger.debug(f"Step 2: Found {len(concepts)} concepts without hierarchy_level")
         
         updated = 0
         for concept_id, concept_name, normalized_label in concepts:

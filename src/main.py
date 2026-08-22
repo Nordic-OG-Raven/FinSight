@@ -75,9 +75,91 @@ def run_pipeline(ticker: str, year: int, filing_type: str = '10-K') -> bool:
         
         # Step 4: Completeness check
         tracker = CompletenessTracker()
-        completeness_report = tracker.analyze_completeness(facts)
+        completeness_report = tracker.analyze_completeness(
+            facts, 
+            company=ticker, 
+            filing_type=filing_type, 
+            fiscal_year_end=metadata.get('fiscal_year_end', f'{year}-12-31')
+        )
         
         logger.info(f"Completeness: {completeness_report.overall_completeness:.1%}")
+        
+        # Step 4.5: Always fill gaps with SEC API and check for missing years
+        logger.info(f"Filling gaps with SEC API for all missing concepts and years...")
+        logger.info(f"  Initial completeness: {completeness_report.overall_completeness:.1%}")
+        logger.info(f"  Balance Sheet: {completeness_report.balance_sheet_completeness:.1%}")
+        logger.info(f"  Income Statement: {completeness_report.income_statement_completeness:.1%}")
+        logger.info(f"  Cash Flow: {completeness_report.cash_flow_completeness:.1%}")
+        
+        # Determine taxonomy: IFRS for 20-F, US-GAAP for 10-K
+        taxonomy = 'ifrs-full' if '20-F' in filing_type.upper() else 'us-gaap'
+        
+        # Check for missing years in existing facts
+        existing_years = set()
+        for fact in facts:
+            period_end = fact.get('period_end')
+            instant_date = fact.get('instant_date')
+            if period_end:
+                fact_year = period_end[:4] if isinstance(period_end, str) else str(period_end.year)
+                existing_years.add(fact_year)
+            if instant_date:
+                fact_year = instant_date[:4] if isinstance(instant_date, str) else str(instant_date.year)
+                existing_years.add(fact_year)
+        
+        # Fill gaps for current year and any missing years (typically 2-3 years of comparatives)
+        years_to_fill = {str(year)}
+        if existing_years:
+            # Also try to fill for years that appear in the data but might be missing concepts
+            years_to_fill.update(existing_years)
+            # Also check for comparative years (typically year-1, year-2)
+            for y in range(year - 2, year + 1):
+                years_to_fill.add(str(y))
+        
+        logger.info(f"  Checking for missing data in years: {sorted(years_to_fill)}")
+        
+        # Fill gaps for each year (with caching to respect rate limits)
+        # NOTE: This only fills TRULY missing concepts (not in facts list at all)
+        # Post-load gap filling (after DB load) will catch wrong values and missing years
+        cache_dir = DATA_RAW / 'sec_api_cache'
+        for fill_year in sorted(years_to_fill):
+            facts = tracker.fill_missing_with_sec_api(
+                facts,
+                company=ticker,
+                year=int(fill_year),
+                taxonomy=taxonomy,
+                cache_dir=cache_dir  # Cache responses to avoid repeated API calls
+            )
+        
+        logger.info(f"Gap filling complete. Total facts: {len(facts)}")
+        
+        # Re-run completeness check after gap filling
+        completeness_report = tracker.analyze_completeness(
+            facts,
+            company=ticker,
+            filing_type=filing_type,
+            fiscal_year_end=metadata.get('fiscal_year_end', f'{year}-12-31')
+        )
+        logger.info(f"Completeness after gap filling:")
+        logger.info(f"  Overall: {completeness_report.overall_completeness:.1%}")
+        logger.info(f"  Balance Sheet: {completeness_report.balance_sheet_completeness:.1%}")
+        logger.info(f"  Income Statement: {completeness_report.income_statement_completeness:.1%}")
+        logger.info(f"  Cash Flow: {completeness_report.cash_flow_completeness:.1%}")
+        
+        # Step 4.75: Pre-load validation (input_check.py)
+        logger.info("Running pre-load validation...")
+        from src.validation.input_check import InputValidator
+        
+        input_validator = InputValidator(tolerance_pct=1.0)
+        input_report = input_validator.validate_facts(facts, company=ticker)
+        
+        if not input_report.passed:
+            logger.warning(f"Pre-load validation issues: {input_report.overall_score:.1%}")
+            # Log specific issues for debugging
+            for result in input_report.results:
+                if not result.passed:
+                    logger.warning(f"  {result.rule_name}: {result.message}")
+        else:
+            logger.info(f"Pre-load validation passed: {input_report.overall_score:.1%}")
         
         # Step 5: Save to database (using star schema loader - same as Railway uses)
         from database.load_financial_data import StarSchemaLoader
@@ -103,6 +185,58 @@ def run_pipeline(ticker: str, year: int, filing_type: str = '10-K') -> bool:
         temp_json.unlink()
         
         loader.close()
+        
+        # Step 6: Post-load gap filling (catches missing concepts and wrong values)
+        # This runs AFTER database load, so it can query what's actually in the DB
+        logger.info("Running post-load gap filling to catch missing concepts and wrong values...")
+        from src.utils.post_load_gap_filling import run_post_load_gap_filling
+        
+        years_to_check = list(years_to_fill)
+        filled_post = run_post_load_gap_filling(
+            ticker=ticker,
+            years=[int(y) for y in years_to_check],
+            taxonomy=taxonomy
+        )
+        if filled_post > 0:
+            logger.info(f"✅ Post-load gap filling added {filled_post} facts")
+        
+        # Step 6.5: Consistency validation (consistency_check.py)
+        logger.info("Running consistency validation...")
+        try:
+            from src.validation.consistency_check import ConsistencyValidator
+            
+            consistency_validator = ConsistencyValidator(tolerance_pct=1.0)
+            consistency_report = consistency_validator.validate_consistency(ticker)
+            
+            if not consistency_report.passed:
+                logger.warning(f"Consistency issues: {consistency_report.overall_score:.1%}")
+                for result in consistency_report.results:
+                    if not result.passed:
+                        logger.warning(f"  {result.rule_name}: {result.message}")
+            else:
+                logger.info(f"Consistency validation passed: {consistency_report.overall_score:.1%}")
+        except Exception as e:
+            logger.warning(f"Consistency validation failed: {e}")
+            # Don't fail pipeline if consistency check fails
+        
+        # Step 7: Universal UI test (ui_test.py)
+        logger.info("Running universal UI test...")
+        try:
+            from src.validation.ui_test import UniversalUITest
+            
+            ui_tester = UniversalUITest(api_base="http://localhost:5001")
+            ui_report = ui_tester.test_company(ticker, year)
+            
+            if not ui_report.passed:
+                logger.warning(f"UI test issues: {ui_report.overall_score:.1%}")
+                for result in ui_report.results:
+                    if not result.passed:
+                        logger.warning(f"  {result.rule_name}: {result.message}")
+            else:
+                logger.info(f"UI test passed: {ui_report.overall_score:.1%}")
+        except Exception as e:
+            logger.warning(f"UI test failed: {e}")
+            # Don't fail pipeline if UI test fails
         
         logger.info(f"Pipeline completed successfully for {ticker} {year}")
         return True
@@ -209,6 +343,24 @@ Examples:
     print(f"✅ Parsing complete!")
     print(f"   Total facts extracted: {len(facts)}")
     
+    # Apply normalization to facts BEFORE validation/completeness
+    # This ensures completeness analysis uses normalized labels (works for both IFRS and US-GAAP)
+    print("🔧 Applying normalization to facts...")
+    try:
+        from src.utils.taxonomy_mappings import get_normalized_label
+        normalized_count = 0
+        for fact in facts:
+            concept_name = fact.get('concept')
+            if concept_name:
+                normalized = get_normalized_label(concept_name)
+                if normalized:
+                    fact['normalized_label'] = normalized
+                    normalized_count += 1
+        print(f"   ✅ Normalized {normalized_count}/{len(facts)} facts ({100*normalized_count/len(facts):.1f}%)")
+    except Exception as e:
+        logger.warning(f"Failed to apply normalization: {e}")
+        print(f"   ⚠️  Normalization failed (completeness may be inaccurate for IFRS companies)")
+    
     # Show breakdown by taxonomy
     from collections import Counter
     taxonomy_counts = Counter([f['taxonomy'] for f in facts])
@@ -242,29 +394,87 @@ Examples:
     
     print()
     
-    # Step 4: Analyze completeness
-    print("📊 Step 4/5: Analyzing completeness...")
-    print("-" * 70)
-    
+    # Step 4: Analyze initial completeness (before gap filling)
     tracker = CompletenessTracker()
-    completeness_report = tracker.analyze_completeness(
+    initial_completeness = tracker.analyze_completeness(
         facts=facts,
         company=args.ticker,
         filing_type=args.filing_type,
         fiscal_year_end=metadata.get('fiscal_year_end', str(args.year) + '-12-31')
     )
     
-    print(f"✅ Completeness analysis complete!")
-    print(f"   Overall: {completeness_report.overall_completeness:.1%}")
-    print(f"   Income Statement: {completeness_report.income_statement_completeness:.1%}")
+    # Step 4.5: Always fill gaps with SEC API and check for missing years
+    print("🔧 Step 4/5: Filling gaps with SEC API...")
+    print("-" * 70)
+    print(f"   Initial: {initial_completeness.overall_completeness:.1%} "
+          f"(BS: {initial_completeness.balance_sheet_completeness:.1%}, "
+          f"IS: {initial_completeness.income_statement_completeness:.1%}, "
+          f"CF: {initial_completeness.cash_flow_completeness:.1%})")
+    
+    # Determine taxonomy: IFRS for 20-F, US-GAAP for 10-K
+    taxonomy = 'ifrs-full' if '20-F' in args.filing_type.upper() else 'us-gaap'
+    
+    # Check for missing years in existing facts
+    existing_years = set()
+    for fact in facts:
+        period_end = fact.get('period_end')
+        instant_date = fact.get('instant_date')
+        if period_end:
+            fact_year = period_end[:4] if isinstance(period_end, str) else str(period_end.year)
+            existing_years.add(fact_year)
+        if instant_date:
+            fact_year = instant_date[:4] if isinstance(instant_date, str) else str(instant_date.year)
+            existing_years.add(fact_year)
+    
+    # Fill gaps for current year and any missing years (typically 2-3 years of comparatives)
+    years_to_fill = {str(args.year)}
+    if existing_years:
+        # Also try to fill for years that appear in the data but might be missing concepts
+        years_to_fill.update(existing_years)
+        # Also check for comparative years (typically year-1, year-2)
+        for y in range(args.year - 2, args.year + 1):
+            years_to_fill.add(str(y))
+    
+    total_filled = 0
+    # Fill gaps for each year (with caching to respect rate limits)
+    cache_dir = Path(DATA_RAW) / 'sec_api_cache'
+    for fill_year in sorted(years_to_fill):
+        facts_before = len(facts)
+        facts = tracker.fill_missing_with_sec_api(
+            facts,
+            company=args.ticker,
+            year=int(fill_year),
+            taxonomy=taxonomy,
+            cache_dir=cache_dir  # Cache responses to avoid repeated API calls
+        )
+        filled_this_year = len(facts) - facts_before
+        total_filled += filled_this_year
+        if filled_this_year > 0:
+            print(f"   Year {fill_year}: +{filled_this_year} concepts")
+    
+    print(f"   ✅ Gap filling complete: +{total_filled} total concepts added")
+    
+    # Re-run completeness check after gap filling (THIS IS THE FINAL SCORE)
+    completeness_report = tracker.analyze_completeness(
+        facts,
+        company=args.ticker,
+        filing_type=args.filing_type,
+        fiscal_year_end=metadata.get('fiscal_year_end', str(args.year) + '-12-31')
+    )
+    
+    print()
+    print("📊 Step 5/5: Final completeness analysis...")
+    print("-" * 70)
+    print(f"✅ Final completeness: {completeness_report.overall_completeness:.1%}")
     print(f"   Balance Sheet: {completeness_report.balance_sheet_completeness:.1%}")
+    print(f"   Income Statement: {completeness_report.income_statement_completeness:.1%}")
     print(f"   Cash Flow: {completeness_report.cash_flow_completeness:.1%}")
     print(f"   Data Quality: {completeness_report.facts_with_numeric_values}/{completeness_report.total_facts} facts with numeric values")
     
     print()
     
-    # Step 5: Save results
-    print("💾 Step 5/5: Saving results...")
+    # Step 6: Save results
+    print("💾 Step 6/6: Saving results...")
     print("-" * 70)
     
     # Ensure output directory exists

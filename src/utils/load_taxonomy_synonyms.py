@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from sqlalchemy import create_engine, text
 from config import DATABASE_URI
 import logging
+from src.utils.logging_utils import truncate_log_message
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ def load_taxonomy_synonyms(taxonomy_dir: Path, use_semantic_equivalence: bool = 
         logger.warning(f"No taxonomy label files found in {taxonomy_dir}")
         return {}
     
-    logger.info(f"Loading synonyms from {len(labels_files)} taxonomy file(s)...")
+    logger.info(truncate_log_message(f"Loading synonyms from {len(labels_files)} file(s)..."))
     
     synonym_mapping = {}
     semantic_equivalence_used = False
@@ -44,7 +45,7 @@ def load_taxonomy_synonyms(taxonomy_dir: Path, use_semantic_equivalence: bool = 
     # PRIORITY 1: Semantic equivalence from reference linkbase (authoritative)
     if use_semantic_equivalence:
         for labels_file in labels_files:
-            logger.info(f"  Loading semantic equivalence from: {labels_file.name}")
+            logger.debug(truncate_log_message(f"  Loading: {labels_file.name}"))
             with open(labels_file, 'r') as f:
                 data = json.load(f)
             
@@ -61,7 +62,7 @@ def load_taxonomy_synonyms(taxonomy_dir: Path, use_semantic_equivalence: bool = 
                             synonym_mapping[concept_name] = canonical
         
         if semantic_equivalence_used:
-            logger.info(f"✅ Built {len(synonym_mapping)} synonym mappings from reference linkbase (semantic equivalence)")
+            logger.debug(truncate_log_message(f"✅ Built {len(synonym_mapping)} mappings"))
         
         # If no semantic equivalence found, fall through to label-based
     
@@ -116,7 +117,7 @@ def apply_taxonomy_synonyms_to_db(engine, synonym_mapping: dict):
         logger.warning("No synonym mappings provided")
         return 0
     
-    logger.info("Applying taxonomy synonyms to database...")
+    logger.debug(truncate_log_message("Applying taxonomy synonyms..."))
     
     with engine.connect() as conn:
         updated_count = 0
@@ -140,6 +141,41 @@ def apply_taxonomy_synonyms_to_db(engine, synonym_mapping: dict):
             canonical_normalized = canonical_row[0]
             
             # Update synonym to use canonical's normalized label
+            # CRITICAL: Check if update would create duplicate facts before updating
+            # If facts with this concept would conflict with existing facts with the canonical normalized_label,
+            # skip the update (the facts are already correct or would violate unique constraint)
+            check_conflict = conn.execute(
+                text("""
+                    SELECT COUNT(*) as conflict_count
+                    FROM fact_financial_metrics fm_synonym
+                    JOIN dim_concepts dc_synonym ON fm_synonym.concept_id = dc_synonym.concept_id
+                    WHERE dc_synonym.concept_name = :synonym
+                      AND EXISTS (
+                          SELECT 1
+                          FROM fact_financial_metrics fm_existing
+                          JOIN dim_concepts dc_existing ON fm_existing.concept_id = dc_existing.concept_id
+                          WHERE dc_existing.normalized_label = :normalized
+                            AND fm_existing.filing_id = fm_synonym.filing_id
+                            AND fm_existing.fiscal_year = fm_synonym.fiscal_year
+                            AND fm_existing.period_type = fm_synonym.period_type
+                            AND (fm_existing.dimension_id = fm_synonym.dimension_id 
+                                 OR (fm_existing.dimension_id IS NULL AND fm_synonym.dimension_id IS NULL))
+                            AND fm_existing.fact_id != fm_synonym.fact_id
+                      )
+                """),
+                {
+                    'synonym': synonym_concept,
+                    'normalized': canonical_normalized
+                }
+            )
+            conflict_count = check_conflict.fetchone()[0]
+            
+            if conflict_count > 0:
+                logger.warning(f"Skipping synonym mapping {synonym_concept} → {canonical_normalized}: "
+                             f"would create {conflict_count} duplicate fact(s)")
+                continue
+            
+            # Safe to update - no conflicts
             result = conn.execute(
                 text("""
                     UPDATE dim_concepts
@@ -158,7 +194,7 @@ def apply_taxonomy_synonyms_to_db(engine, synonym_mapping: dict):
         
         conn.commit()
         
-        logger.info(f"✅ Updated {updated_count:,} concepts with taxonomy synonyms")
+        logger.debug(truncate_log_message(f"✅ Updated {updated_count:,} concepts"))
         return updated_count
 
 

@@ -12,7 +12,7 @@ echo "=========================================="
 echo ""
 
 # Activate venv and run streamlit
-/Users/jonas/Thesis/.venv/bin/streamlit run src/ui/data_viewer.py \
+/Users/jonas/FinSight/.venv/bin/streamlit run src/ui/data_viewer.py \
   --server.port 8502 \
   --server.headless true \
   --browser.gatherUsageStats false

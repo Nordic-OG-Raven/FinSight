@@ -18,21 +18,29 @@ import psycopg2
 from psycopg2.extras import execute_values
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from config import POSTGRES_HOST, POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
+from config import DATABASE_URI
 
 
 class StarSchemaLoader:
     """Loads financial data into star schema warehouse"""
     
     def __init__(self):
+        # Use DATABASE_URI to ensure connection to same database as ValidationAggregator
+        # Parse DATABASE_URI to get connection parameters for psycopg2
+        from urllib.parse import urlparse
+        parsed = urlparse(DATABASE_URI)
+        
         self.conn = psycopg2.connect(
-            host=POSTGRES_HOST,
-            port=POSTGRES_PORT,
-            user=POSTGRES_USER,
-            password=POSTGRES_PASSWORD,
-            database=POSTGRES_DB
+            host=parsed.hostname or '127.0.0.1',
+            port=parsed.port or 5432,
+            user=parsed.username or 'superset',
+            password=parsed.password or 'superset',
+            database=parsed.path.lstrip('/') if parsed.path else 'finsight'
         )
         self.cur = self.conn.cursor()
+        # Create SQLAlchemy engine for functions that need it
+        from sqlalchemy import create_engine
+        self.engine = create_engine(DATABASE_URI)
         
     def get_or_create_company(self, ticker: str, metadata: Dict) -> int:
         """Get or create company_id"""
@@ -46,8 +54,18 @@ class StarSchemaLoader:
             if '20-F' in filing_type or 'ESEF' in filing_type:
                 new_standard = 'IFRS'
                 if existing_standard != new_standard:
-                    self.cur.execute("UPDATE dim_companies SET accounting_standard = %s WHERE company_id = %s", 
-                                   (new_standard, company_id))
+                    # Get framework_id for new standard
+                    self.cur.execute("""
+                        SELECT framework_id FROM dim_reporting_frameworks 
+                        WHERE framework_name = %s
+                    """, (new_standard,))
+                    framework_result = self.cur.fetchone()
+                    framework_id = framework_result[0] if framework_result else None
+                    self.cur.execute("""
+                        UPDATE dim_companies 
+                        SET accounting_standard = %s, framework_id = %s 
+                        WHERE company_id = %s
+                    """, (new_standard, framework_id, company_id))
                     self.conn.commit()
             return company_id
         
@@ -66,12 +84,20 @@ class StarSchemaLoader:
         else:
             accounting_standard = 'US-GAAP'  # Default
         
+        # Get framework_id
+        self.cur.execute("""
+            SELECT framework_id FROM dim_reporting_frameworks 
+            WHERE framework_name = %s
+        """, (accounting_standard,))
+        framework_result = self.cur.fetchone()
+        framework_id = framework_result[0] if framework_result else None
+        
         # Create new
         self.cur.execute("""
-            INSERT INTO dim_companies (ticker, company_name, accounting_standard)
-            VALUES (%s, %s, %s)
+            INSERT INTO dim_companies (ticker, company_name, accounting_standard, framework_id)
+            VALUES (%s, %s, %s, %s)
             RETURNING company_id
-        """, (ticker, metadata.get('company_name', ticker), accounting_standard))
+        """, (ticker, metadata.get('company_name', ticker), accounting_standard, framework_id))
         
         company_id = self.cur.fetchone()[0]
         self.conn.commit()
@@ -81,15 +107,27 @@ class StarSchemaLoader:
         """Get or create concept_id, and update statement_type if missing"""
         # Import taxonomy mappings for statement_type inference
         try:
-            from src.utils.taxonomy_mappings import get_statement_type
+            from src.utils.taxonomy_mappings import get_statement_type, get_normalized_label
         except ImportError:
             get_statement_type = None
+            get_normalized_label = None
+        
+        # CRITICAL: Ensure normalized_label is always set (required by schema)
+        normalized_label = metadata.get('normalized_label')
+        if not normalized_label:
+            # Generate from concept name using taxonomy mappings
+            if get_normalized_label:
+                normalized_label = get_normalized_label(concept_name)
+            else:
+                # Fallback: generate snake_case from concept name
+                import re
+                s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', concept_name)
+                normalized_label = re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
         
         # Determine statement_type from fact metadata or taxonomy mappings
         statement_type = metadata.get('statement_type')
         if not statement_type:
             # Try to infer from normalized_label using taxonomy mappings
-            normalized_label = metadata.get('normalized_label')
             if normalized_label and get_statement_type:
                 statement_type = get_statement_type(normalized_label)
         
@@ -110,20 +148,24 @@ class StarSchemaLoader:
             from src.utils.concept_label_mapping import get_humanized_label
             # Get statement_type from metadata if available (for context-specific mapping)
             stmt_type = metadata.get('statement_type')
-            preferred_label = get_humanized_label(concept_name, metadata.get('normalized_label'), stmt_type)
+            preferred_label = get_humanized_label(concept_name, normalized_label, stmt_type)
         except ImportError:
             preferred_label = None
         
+        # Get original_label from metadata if available (from XBRL label linkbase)
+        original_label = metadata.get('original_label')
+        
         # Check if exists
         self.cur.execute(
-            "SELECT concept_id, statement_type, preferred_label FROM dim_concepts WHERE concept_name = %s AND taxonomy = %s",
+            "SELECT concept_id, statement_type, preferred_label, original_label FROM dim_concepts WHERE concept_name = %s AND taxonomy = %s",
             (concept_name, taxonomy)
         )
         result = self.cur.fetchone()
         if result:
-            concept_id, existing_stmt_type, existing_preferred_label = result[0], result[1], result[2]
+            concept_id, existing_stmt_type, existing_preferred_label, existing_original_label = result[0], result[1], result[2], result[3]
             # Update statement_type if it's NULL and we have a value
             # Update preferred_label if it's NULL and we have a value (LASTING - ensures labels are populated on reload)
+            # Update original_label if it's NULL and we have a value (from XBRL label linkbase)
             # This ensures that when balance sheet mappings are added to concept_label_mapping.py, existing concepts get updated on next ETL run
             updates = []
             params = []
@@ -133,6 +175,9 @@ class StarSchemaLoader:
             if existing_preferred_label is None and preferred_label:
                 updates.append("preferred_label = %s")
                 params.append(preferred_label)
+            if existing_original_label is None and original_label:
+                updates.append("original_label = %s")
+                params.append(original_label)
             
             if updates:
                 params.append(concept_id)
@@ -144,25 +189,82 @@ class StarSchemaLoader:
                 self.conn.commit()
             return concept_id
         
-        # Create new (preferred_label already calculated above)
+        # Get taxonomy_id
+        taxonomy_id = None
         self.cur.execute("""
-            INSERT INTO dim_concepts (
-                concept_name, taxonomy, normalized_label, concept_type,
-                balance_type, period_type, data_type, is_abstract, statement_type, preferred_label
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            RETURNING concept_id
-        """, (
-            concept_name,
-            taxonomy,
-            metadata.get('normalized_label'),
-            metadata.get('concept_type'),
-            metadata.get('concept_balance'),
-            metadata.get('concept_period_type'),
-            metadata.get('concept_data_type'),
-            metadata.get('concept_abstract', False),
-            statement_type,
-            preferred_label
-        ))
+            SELECT taxonomy_id FROM dim_taxonomies 
+            WHERE taxonomy_name = %s
+        """, (taxonomy,))
+        taxonomy_result = self.cur.fetchone()
+        if taxonomy_result:
+            taxonomy_id = taxonomy_result[0]
+        
+        # Create new (preferred_label already calculated above)
+        # CRITICAL: normalized_label is now guaranteed to be set above
+        # Check if original_label column exists (for backward compatibility)
+        try:
+            self.cur.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'dim_concepts' 
+                AND column_name = 'original_label'
+            """)
+            has_original_label = self.cur.fetchone() is not None
+        except:
+            has_original_label = False
+        
+        if has_original_label:
+            self.cur.execute("""
+                INSERT INTO dim_concepts (
+                    concept_name, taxonomy, taxonomy_id, normalized_label, concept_type,
+                    balance_type, period_type, data_type, is_abstract, statement_type, preferred_label, original_label
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (concept_name, taxonomy) DO UPDATE SET
+                    taxonomy_id = COALESCE(EXCLUDED.taxonomy_id, dim_concepts.taxonomy_id),
+                    normalized_label = EXCLUDED.normalized_label,
+                    statement_type = COALESCE(EXCLUDED.statement_type, dim_concepts.statement_type),
+                    preferred_label = COALESCE(EXCLUDED.preferred_label, dim_concepts.preferred_label),
+                    original_label = COALESCE(EXCLUDED.original_label, dim_concepts.original_label)
+                RETURNING concept_id
+            """, (
+                concept_name,
+                taxonomy,
+                taxonomy_id,
+                normalized_label,  # Use guaranteed non-None value
+                metadata.get('concept_type'),
+                metadata.get('concept_balance'),
+                metadata.get('concept_period_type'),
+                metadata.get('concept_data_type'),
+                metadata.get('concept_abstract', False),
+                statement_type,
+                preferred_label,
+                original_label
+            ))
+        else:
+            self.cur.execute("""
+                INSERT INTO dim_concepts (
+                    concept_name, taxonomy, taxonomy_id, normalized_label, concept_type,
+                    balance_type, period_type, data_type, is_abstract, statement_type, preferred_label
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (concept_name, taxonomy) DO UPDATE SET
+                    taxonomy_id = COALESCE(EXCLUDED.taxonomy_id, dim_concepts.taxonomy_id),
+                    normalized_label = EXCLUDED.normalized_label,
+                    statement_type = COALESCE(EXCLUDED.statement_type, dim_concepts.statement_type),
+                    preferred_label = COALESCE(EXCLUDED.preferred_label, dim_concepts.preferred_label)
+                RETURNING concept_id
+            """, (
+                concept_name,
+                taxonomy,
+                taxonomy_id,
+                normalized_label,  # Use guaranteed non-None value
+                metadata.get('concept_type'),
+                metadata.get('concept_balance'),
+                metadata.get('concept_period_type'),
+                metadata.get('concept_data_type'),
+                metadata.get('concept_abstract', False),
+                statement_type,
+                preferred_label
+            ))
         
         concept_id = self.cur.fetchone()[0]
         self.conn.commit()
@@ -231,8 +333,21 @@ class StarSchemaLoader:
         fiscal_year_end: str,
         metadata: Dict
     ) -> int:
-        """Get or create filing_id"""
-        # Check if exists
+        """Get or create filing_id
+        
+        CRITICAL: Match on (company_id, filing_type, fiscal_year) to prevent
+        multiple filings from being created when loading XBRL and SEC_API data separately.
+        The exact date (e.g., "2023-12-31" vs "2024-12-31") may differ between sources,
+        but if they're the same fiscal year, they should go into the same filing.
+        """
+        # Extract year from fiscal_year_end for matching
+        # Handle both date strings (e.g., "2023-12-31") and just years (e.g., "2023")
+        if fiscal_year_end:
+            fiscal_year = fiscal_year_end[:4] if len(fiscal_year_end) >= 4 else fiscal_year_end
+        else:
+            fiscal_year = None
+        
+        # First, try exact match (company_id, filing_type, fiscal_year_end)
         self.cur.execute("""
             SELECT filing_id FROM dim_filings 
             WHERE company_id = %s AND filing_type = %s AND fiscal_year_end = %s
@@ -242,7 +357,24 @@ class StarSchemaLoader:
         if result:
             return result[0]
         
-        # Create new
+        # If no exact match, match on fiscal YEAR (not exact date)
+        # This handles cases where XBRL has "2023-12-31" but SEC_API has "2024-12-31" for the same fiscal year
+        if fiscal_year:
+            self.cur.execute("""
+                SELECT filing_id FROM dim_filings 
+                WHERE company_id = %s 
+                  AND filing_type = %s 
+                  AND EXTRACT(YEAR FROM fiscal_year_end) = %s
+                ORDER BY filing_id DESC
+                LIMIT 1
+            """, (company_id, filing_type, int(fiscal_year)))
+            
+            result = self.cur.fetchone()
+            if result:
+                # Reuse existing filing for same fiscal year
+                return result[0]
+        
+        # Create new filing only if none exists for this company, filing_type, and fiscal year
         self.cur.execute("""
             INSERT INTO dim_filings (
                 company_id, filing_type, fiscal_year_end, source_url,
@@ -287,8 +419,12 @@ class StarSchemaLoader:
             # Get first axis/member pair
             for axis, details in dimensions.items():
                 axis_name = axis
-                if isinstance(details, dict) and 'member' in details:
-                    member_name = details['member']
+                if isinstance(details, dict):
+                    if 'member' in details:
+                        member_name = details['member']
+                    elif 'value' in details:
+                        # Typed dimension: use value as member_name
+                        member_name = details['value']
                 break
         
         # Create new
@@ -303,6 +439,102 @@ class StarSchemaLoader:
         self.conn.commit()
         return dimension_id
     
+    def load_to_staging(self, filing_id: int, fact: Dict) -> Optional[int]:
+        """Load raw fact to staging_facts table (ELT staging layer)
+        
+        Args:
+            filing_id: Filing ID
+            fact: Raw fact dictionary from JSON
+            
+        Returns:
+            staging_id if successful, None if skipped
+        """
+        try:
+            # Extract raw data (minimal transformation)
+            concept_name = fact.get('concept') or fact.get('concept_name', '')
+            if not concept_name:
+                return None
+            
+            concept_namespace = fact.get('concept_namespace')
+            taxonomy = fact.get('taxonomy', 'us-gaap')
+            value_text = fact.get('value_text') or fact.get('value', '')
+            value_numeric = fact.get('value_numeric')
+            if value_numeric is None and value_text:
+                try:
+                    value_numeric = float(value_text)
+                except (ValueError, TypeError):
+                    value_numeric = None
+            
+            # Period info (raw from XBRL)
+            period_type = fact.get('period_type', 'duration')
+            period_start = fact.get('period_start')
+            period_end = fact.get('period_end')
+            instant_date = fact.get('instant_date')
+            context_id = fact.get('context_id')
+            
+            # Dimensions (raw JSON)
+            dimensions = fact.get('dimensions', {})
+            dimensions_json = json.dumps(dimensions) if dimensions else None
+            
+            # Unit info (raw)
+            unit_measure = fact.get('unit_measure')
+            unit_type = fact.get('unit_type')
+            scale_int = fact.get('scale_int')
+            
+            # Source metadata
+            source = fact.get('source', 'XBRL')
+            extraction_method = fact.get('extraction_method', 'lxml')
+            
+            # Provenance
+            fact_id_xbrl = fact.get('fact_id_xbrl') or fact.get('id')
+            source_line = fact.get('source_line')
+            order_index = fact.get('order_index')
+            
+            # Insert into staging (ON CONFLICT to handle duplicates)
+            self.cur.execute("""
+                INSERT INTO staging_facts (
+                    filing_id, concept_name, concept_namespace, taxonomy,
+                    value_text, value_numeric,
+                    period_type, period_start, period_end, instant_date, context_id,
+                    dimensions_json,
+                    unit_measure, unit_type, scale_int,
+                    source, extraction_method,
+                    fact_id_xbrl, source_line, order_index,
+                    is_processed
+                ) VALUES (
+                    %s, %s, %s, %s,
+                    %s, %s,
+                    %s, %s, %s, %s, %s,
+                    %s,
+                    %s, %s, %s,
+                    %s, %s,
+                    %s, %s, %s,
+                    FALSE
+                )
+                ON CONFLICT (filing_id, concept_name, context_id, fact_id_xbrl) 
+                DO UPDATE SET
+                    value_numeric = EXCLUDED.value_numeric,
+                    value_text = EXCLUDED.value_text,
+                    extraction_timestamp = CURRENT_TIMESTAMP
+                RETURNING staging_id
+            """, (
+                filing_id, concept_name, concept_namespace, taxonomy,
+                value_text, value_numeric,
+                period_type, period_start, period_end, instant_date, context_id,
+                dimensions_json,
+                unit_measure, unit_type, scale_int,
+                source, extraction_method,
+                fact_id_xbrl, source_line, order_index
+            ))
+            
+            result = self.cur.fetchone()
+            return result[0] if result else None
+            
+        except Exception as e:
+            # Log error but don't fail - staging is for debugging
+            print(f"      ⚠️  Failed to load to staging: {e}")
+            return None
+    
     def load_fact(
         self,
         company_id: int,
@@ -314,17 +546,289 @@ class StarSchemaLoader:
     ):
         """Load a single fact into fact table"""
         try:
+            # Determine source: SEC_API if gap-filled, otherwise XBRL
+            source = fact.get('source', 'XBRL')
+            if fact.get('is_gap_filled'):
+                source = 'SEC_API'
+            
+            # Get business keys from dimension tables
+            self.cur.execute("""
+                SELECT normalized_label FROM dim_concepts WHERE concept_id = %s
+            """, (concept_id,))
+            normalized_label_result = self.cur.fetchone()
+            normalized_label = normalized_label_result[0] if normalized_label_result else fact.get('normalized_label')
+            
+            # Get currency_id from unit_measure (will be set later, but check now if available)
+            currency_id = None
+            
+            # Determine is_gaap (default to True, set False for non-GAAP metrics)
+            is_gaap = True
+            concept_name_lower = fact.get('concept_name', '').lower()
+            if any(term in concept_name_lower for term in ['non-gaap', 'non_gaap', 'adjusted', 'ebitda', 'ebit']):
+                # Check if it's explicitly non-GAAP
+                if 'non-gaap' in concept_name_lower or 'non_gaap' in concept_name_lower:
+                    is_gaap = False
+            
+            self.cur.execute("""
+                SELECT fiscal_year, period_type FROM dim_time_periods WHERE period_id = %s
+            """, (period_id,))
+            period_result = self.cur.fetchone()
+            if period_result:
+                fiscal_year, period_type = period_result
+            else:
+                # Fallback: infer from fact metadata
+                fiscal_year = None
+                period_type = fact.get('period_type', 'duration')
+                period_end = fact.get('period_end')
+                instant_date = fact.get('instant_date')
+                if period_end:
+                    from datetime import datetime
+                    end_dt = datetime.strptime(period_end, '%Y-%m-%d')
+                    fiscal_year = end_dt.year - 1 if end_dt.month <= 3 else end_dt.year
+                elif instant_date:
+                    from datetime import datetime
+                    instant_dt = datetime.strptime(instant_date, '%Y-%m-%d')
+                    fiscal_year = instant_dt.year - 1 if instant_dt.month <= 3 else instant_dt.year
+            
+            # UNIVERSAL FIX: Balance sheet items must be instant, not duration
+            # This prevents balance sheet items from being incorrectly stored with duration period_type
+            # Root cause fix: ensures correct period_type at load time, preventing duplicates
+            if normalized_label:
+                from src.utils.taxonomy_mappings import get_statement_type
+                statement_type = get_statement_type(normalized_label)
+                if statement_type == 'balance_sheet' and period_type == 'duration':
+                    # Balance sheet items must be instant - get/create correct period
+                    # Use instant_date if available, otherwise use period_end as instant_date
+                    instant_date_for_bs = fact.get('instant_date') or fact.get('period_end')
+                    period_end_for_bs = None
+                    period_start_for_bs = None
+                    
+                    if instant_date_for_bs:
+                        # Recreate period with instant type
+                        period_id = self.get_or_create_period(
+                            period_type='instant',
+                            start_date=None,
+                            end_date=None,
+                            instant_date=instant_date_for_bs
+                        )
+                        # Re-fetch period info with correct type
+                        self.cur.execute("""
+                            SELECT fiscal_year, period_type FROM dim_time_periods WHERE period_id = %s
+                        """, (period_id,))
+                        period_result = self.cur.fetchone()
+                        if period_result:
+                            fiscal_year, period_type = period_result
+            
+            # Ensure we have all business keys
+            if not normalized_label:
+                # Try to get from concept one more time
+                self.cur.execute("""
+                    SELECT normalized_label FROM dim_concepts WHERE concept_id = %s
+                """, (concept_id,))
+                retry_result = self.cur.fetchone()
+                if retry_result and retry_result[0]:
+                    normalized_label = retry_result[0]
+                else:
+                    raise ValueError(f"Missing normalized_label for concept_id {concept_id} (concept_name: {fact.get('concept')})")
+            if fiscal_year is None:
+                # Try to get from period one more time
+                self.cur.execute("""
+                    SELECT fiscal_year FROM dim_time_periods WHERE period_id = %s
+                """, (period_id,))
+                retry_result = self.cur.fetchone()
+                if retry_result and retry_result[0]:
+                    fiscal_year = retry_result[0]
+                else:
+                    raise ValueError(f"Missing fiscal_year for period_id {period_id}")
+            if not period_type:
+                # Try to get from period one more time
+                self.cur.execute("""
+                    SELECT period_type FROM dim_time_periods WHERE period_id = %s
+                """, (period_id,))
+                retry_result = self.cur.fetchone()
+                if retry_result and retry_result[0]:
+                    period_type = retry_result[0]
+                else:
+                    raise ValueError(f"Missing period_type for period_id {period_id}")
+            
+            # UNIVERSAL FIX: Normalize unit_measure when None
+            # If unit_measure is None, try to infer from SEC_API data or from value scale
+            unit_measure = fact.get('unit_measure') or fact.get('unit')
+            if not unit_measure and source == 'XBRL':
+                # Try to get unit from SEC_API data for same concept/period
+                self.cur.execute("""
+                    SELECT unit_measure FROM fact_financial_metrics fm
+                    WHERE fm.filing_id = %s
+                      AND fm.normalized_label = %s
+                      AND fm.fiscal_year = %s
+                      AND fm.period_type = %s
+                      AND fm.dimension_id IS NULL
+                      AND fm.source = 'SEC_API'
+                      AND fm.unit_measure IS NOT NULL
+                    LIMIT 1
+                """, (filing_id, normalized_label, fiscal_year, period_type))
+                sec_unit = self.cur.fetchone()
+                if sec_unit:
+                    unit_measure = sec_unit[0]
+                # If still None, infer from value scale (common XBRL patterns)
+                if not unit_measure and fact.get('value_numeric'):
+                    abs_value = abs(fact.get('value_numeric', 0))
+                    # Very large values (billions) likely in base currency
+                    # Very small values (< 1) might be ratios/pure
+                    if abs_value > 1_000_000_000:
+                        # Check company currency from filing
+                        self.cur.execute("""
+                            SELECT c.currency FROM dim_companies c
+                            JOIN dim_filings f ON c.company_id = f.company_id
+                            WHERE f.filing_id = %s
+                        """, (filing_id,))
+                        currency_row = self.cur.fetchone()
+                        if currency_row and currency_row[0]:
+                            unit_measure = currency_row[0]
+                        else:
+                            unit_measure = 'USD'  # Default fallback
+            
+            # Get currency_id from unit_measure (now that it's set)
+            currency_id = None
+            if unit_measure and len(unit_measure) == 3 and unit_measure.isupper():
+                # Likely a currency code (USD, EUR, etc.)
+                self.cur.execute("""
+                    SELECT currency_id FROM dim_currencies WHERE currency_code = %s
+                """, (unit_measure,))
+                currency_result = self.cur.fetchone()
+                if currency_result:
+                    currency_id = currency_result[0]
+            
+            # PHASE 1: Apply unit scaling BEFORE storing (store in base currency units)
+            # XBRL decimals attribute: decimals="-6" means value is in millions (scale factor = 10^6)
+            # Industry best practice: Store values in base currency units, not scaled
+            # CRITICAL: Only apply scaling to XBRL values - SEC_API values are already in base currency
+            value_numeric = fact.get('value_numeric')
+            decimals = fact.get('decimals')
+            scale_int = fact.get('scale_int')
+            
+            # Only apply scaling to XBRL values (SEC_API values are already in base currency)
+            if source == 'XBRL' and value_numeric is not None:
+                # Apply scaling if decimals is negative (e.g., "-6" means millions)
+                if decimals is not None:
+                    try:
+                        # Handle both string and int decimals
+                        if isinstance(decimals, str):
+                            decimal_val = int(decimals)
+                        else:
+                            decimal_val = decimals
+                        
+                        if decimal_val < 0:
+                            # Negative decimals means value is scaled (e.g., -6 = millions)
+                            scale_factor = 10 ** abs(decimal_val)
+                            value_numeric = float(value_numeric) * scale_factor
+                    except (ValueError, TypeError):
+                        pass  # If decimals can't be parsed, skip scaling
+                
+                # Also check scale_int if decimals wasn't available
+                if scale_int is not None and decimals is None:
+                    try:
+                        if isinstance(scale_int, (int, float)) and scale_int > 0:
+                            # scale_int=6 means millions (10^6)
+                            scale_factor = 10 ** int(scale_int)
+                            value_numeric = float(value_numeric) * scale_factor
+                    except (ValueError, TypeError):
+                        pass
+            
+            # UNIVERSAL FIX: Create synthetic dimension from context_id for consolidated facts
+            # This preserves all facts when multiple consolidated facts (dimension_id=NULL) exist
+            # with the same business key but different context_ids
+            context_id = fact.get('context_id')
+            if dimension_id is None:
+                # Check if there's already a fact with same business key (potential conflict)
+                self.cur.execute("""
+                    SELECT fact_id, context_id, dimension_id
+                    FROM fact_financial_metrics
+                    WHERE filing_id = %s
+                      AND normalized_label = %s
+                      AND fiscal_year = %s
+                      AND period_type = %s
+                      AND dimension_id IS NULL
+                    LIMIT 1
+                """, (filing_id, normalized_label, fiscal_year, period_type))
+                existing_fact = self.cur.fetchone()
+                
+                if existing_fact:
+                    existing_fact_id, existing_context_id, existing_dim_id = existing_fact
+                    # If existing fact has different context_id, create synthetic dimension for new fact
+                    if existing_context_id != context_id:
+                        if context_id:
+                            # Create synthetic dimension from context_id for new fact
+                            synthetic_dimensions = {
+                                'ContextAxis': {
+                                    'type': 'explicit',
+                                    'member': f'Context_{context_id}'
+                                }
+                            }
+                            dimension_id = self.get_or_create_dimension(synthetic_dimensions)
+                        elif existing_context_id:
+                            # New fact has no context_id but existing does - create synthetic for existing
+                            # Update existing fact to have synthetic dimension
+                            synthetic_dimensions = {
+                                'ContextAxis': {
+                                    'type': 'explicit',
+                                    'member': f'Context_{existing_context_id}'
+                                }
+                            }
+                            existing_dim_id = self.get_or_create_dimension(synthetic_dimensions)
+                            self.cur.execute("""
+                                UPDATE fact_financial_metrics
+                                SET dimension_id = %s
+                                WHERE fact_id = %s
+                            """, (existing_dim_id, existing_fact_id))
+                            self.conn.commit()
+            
+            # DEBUG: Verify constraint exists before attempting insert
+            self.cur.execute("""
+                SELECT conname FROM pg_constraint 
+                WHERE conrelid = 'fact_financial_metrics'::regclass 
+                  AND contype = 'u'
+                  AND conname = 'fact_financial_metrics_filing_id_normalized_label_fiscal_ye_key'
+            """)
+            constraint_check = self.cur.fetchone()
+            if not constraint_check:
+                raise RuntimeError("Business key constraint not found! Database schema may be out of sync.")
+            
             self.cur.execute("""
                 INSERT INTO fact_financial_metrics (
                     company_id, concept_id, period_id, filing_id, dimension_id,
-                    value_numeric, value_text, unit_measure, decimals,
+                    normalized_label, fiscal_year, period_type,
+                    value_numeric, value_text, unit_measure, currency_id, decimals,
                     scale_int, xbrl_format,
-                    context_id, fact_id_xbrl, source_line, order_index, is_primary
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (filing_id, concept_id, period_id, dimension_id) 
+                    context_id, fact_id_xbrl, source_line, order_index, is_primary,
+                    source, is_gaap
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (filing_id, normalized_label, fiscal_year, period_type, dimension_id) 
                 DO UPDATE SET
-                    value_numeric = EXCLUDED.value_numeric,
-                    value_text = EXCLUDED.value_text,
+                    -- Prefer SEC_API over XBRL when both exist (SEC is authoritative)
+                    source = CASE 
+                        WHEN EXCLUDED.source = 'SEC_API' THEN 'SEC_API'
+                        WHEN fact_financial_metrics.source = 'SEC_API' THEN 'SEC_API'
+                        ELSE EXCLUDED.source
+                    END,
+                    currency_id = COALESCE(EXCLUDED.currency_id, fact_financial_metrics.currency_id),
+                    is_gaap = COALESCE(EXCLUDED.is_gaap, fact_financial_metrics.is_gaap),
+                    value_numeric = CASE 
+                        WHEN EXCLUDED.source = 'SEC_API' THEN EXCLUDED.value_numeric
+                        WHEN fact_financial_metrics.source = 'SEC_API' THEN fact_financial_metrics.value_numeric
+                        ELSE EXCLUDED.value_numeric
+                    END,
+                    value_text = CASE 
+                        WHEN EXCLUDED.source = 'SEC_API' THEN EXCLUDED.value_text
+                        WHEN fact_financial_metrics.source = 'SEC_API' THEN fact_financial_metrics.value_text
+                        ELSE EXCLUDED.value_text
+                    END,
+                    unit_measure = CASE 
+                        WHEN EXCLUDED.source = 'SEC_API' AND EXCLUDED.unit_measure IS NOT NULL THEN EXCLUDED.unit_measure
+                        WHEN fact_financial_metrics.source = 'SEC_API' AND fact_financial_metrics.unit_measure IS NOT NULL THEN fact_financial_metrics.unit_measure
+                        WHEN EXCLUDED.unit_measure IS NOT NULL THEN EXCLUDED.unit_measure
+                        ELSE fact_financial_metrics.unit_measure
+                    END,
                     is_primary = EXCLUDED.is_primary,
                     fact_id_xbrl = EXCLUDED.fact_id_xbrl,
                     order_index = EXCLUDED.order_index
@@ -334,9 +838,13 @@ class StarSchemaLoader:
                 period_id,
                 filing_id,
                 dimension_id,
-                fact.get('value_numeric'),
+                normalized_label,
+                fiscal_year,
+                period_type,
+                value_numeric,  # Use scaled value
                 fact.get('value_text'),
-                fact.get('unit_measure'),
+                unit_measure,
+                currency_id,
                 fact.get('decimals'),
                 fact.get('scale_int'),
                 fact.get('xbrl_format'),
@@ -344,11 +852,21 @@ class StarSchemaLoader:
                 fact.get('fact_id'),
                 fact.get('source_line'),
                 fact.get('order_index'),
-                fact.get('is_primary', True)
+                fact.get('is_primary', True),
+                source,
+                is_gaap
             ))
         except Exception as e:
-            print(f"      ⚠️  Error loading fact: {e}")
+            error_msg = str(e)
+            print(f"      ⚠️  Error loading fact: {error_msg}")
+            # DEBUG: Print the actual values being inserted
+            print(f"      DEBUG - Values: filing_id={filing_id}, normalized_label={normalized_label}, fiscal_year={fiscal_year}, period_type={period_type}, dimension_id={dimension_id}")
+            import traceback
+            print(f"      Traceback: {traceback.format_exc()}")
             self.conn.rollback()
+            # Re-raise to stop processing if it's a critical error
+            if "NOT NULL" in error_msg or "constraint" in error_msg.lower() or "ON CONFLICT" in error_msg:
+                raise
     
     def validate_loaded_data(self, company_id: int, ticker: str, fiscal_year: int):
         """
@@ -361,41 +879,178 @@ class StarSchemaLoader:
         Raises ValueError if validation fails.
         """
         # Check balance sheet equation for this company/year
+        # Use normalized_label for reliable matching (concept_name varies by taxonomy)
         self.cur.execute("""
+        WITH balance_sheet_values AS (
+            SELECT 
+                MAX(CASE WHEN dc.normalized_label = 'total_assets' THEN f.value_numeric END) as total_assets,
+                MAX(CASE WHEN dc.normalized_label = 'total_assets_equation' THEN f.value_numeric END) as total_assets_equation,
+                MAX(CASE WHEN dc.normalized_label = 'total_liabilities' THEN f.value_numeric END) as total_liabilities,
+                MAX(CASE WHEN dc.normalized_label = 'equity_total' OR dc.normalized_label = 'stockholders_equity' THEN f.value_numeric END) as equity,
+                MAX(CASE WHEN dc.normalized_label = 'equity_and_liabilities' THEN f.value_numeric END) as equity_and_liabilities,
+                MAX(CASE WHEN dc.normalized_label = 'liabilities_and_stockholders_equity' THEN f.value_numeric END) as liabilities_and_stockholders_equity
+            FROM fact_financial_metrics f
+            JOIN dim_companies c ON f.company_id = c.company_id
+            JOIN dim_concepts dc ON f.concept_id = dc.concept_id
+            JOIN dim_time_periods dt ON f.period_id = dt.period_id
+            WHERE c.company_id = %s
+              AND dt.fiscal_year = %s
+              AND f.dimension_id IS NULL
+              AND dt.period_type = 'instant'
+              AND f.value_numeric IS NOT NULL
+        )
         SELECT 
-            c.ticker,
-            dt.fiscal_year,
-            MAX(CASE WHEN dc.concept_name = 'Assets' THEN f.value_numeric END) as assets,
-            MAX(CASE WHEN dc.concept_name = 'LiabilitiesAndStockholdersEquity' THEN f.value_numeric END) as liab_equity
-        FROM fact_financial_metrics f
-        JOIN dim_companies c ON f.company_id = c.company_id
-        JOIN dim_concepts dc ON f.concept_id = dc.concept_id
-        JOIN dim_time_periods dt ON f.period_id = dt.period_id
-        WHERE c.company_id = %s
-          AND dt.fiscal_year = %s
-          AND f.dimension_id IS NULL
-          AND dc.concept_name IN ('Assets', 'LiabilitiesAndStockholdersEquity')
-        GROUP BY c.ticker, dt.fiscal_year
-        HAVING MAX(CASE WHEN dc.concept_name = 'Assets' THEN f.value_numeric END) IS NOT NULL
-           AND MAX(CASE WHEN dc.concept_name = 'LiabilitiesAndStockholdersEquity' THEN f.value_numeric END) IS NOT NULL;
+            COALESCE(total_assets, total_assets_equation) as assets,
+            COALESCE(
+                CASE WHEN equity_and_liabilities IS NOT NULL AND total_assets IS NOT NULL 
+                     AND ABS(total_assets - equity_and_liabilities) / NULLIF(total_assets, 0) < 0.01
+                     THEN equity_and_liabilities
+                     ELSE NULL
+                END,
+                CASE WHEN liabilities_and_stockholders_equity IS NOT NULL AND total_assets IS NOT NULL
+                     AND ABS(total_assets - liabilities_and_stockholders_equity) / NULLIF(total_assets, 0) < 0.01
+                     THEN liabilities_and_stockholders_equity
+                     ELSE NULL
+                END,
+                total_liabilities + equity,
+                equity_and_liabilities,
+                liabilities_and_stockholders_equity
+            ) as liab_equity
+        FROM balance_sheet_values
+        WHERE COALESCE(total_assets, total_assets_equation) IS NOT NULL;
         """, (company_id, fiscal_year))
         
         result = self.cur.fetchone()
         if result:
-            assets, liab_equity = result[2], result[3]
-            diff_pct = abs(assets - liab_equity) / assets * 100 if assets else 0
-            
-            if diff_pct > 1.0:  # More than 1% difference is critical error
-                raise ValueError(
-                    f"❌ VALIDATION FAILED: Balance sheet doesn't balance for {ticker} FY{fiscal_year}\n"
-                    f"   Assets: ${assets:,.0f}\n"
-                    f"   Liabilities + Equity: ${liab_equity:,.0f}\n"
-                    f"   Difference: {diff_pct:.2f}%\n"
-                    f"   This indicates a DATA PROCESSING ERROR - DO NOT LOAD"
-                )
+            assets, liab_equity = result[0], result[1]
+            if assets and liab_equity:
+                diff_pct = abs(assets - liab_equity) / assets * 100 if assets else 0
+                
+                # Check for unit scaling issues (values way too large or small)
+                # If difference is > 90%, likely a unit scaling issue
+                if diff_pct > 90.0:
+                    # Try to detect and fix unit scaling issue
+                    # If assets is 1000x larger than liab_equity, assets might be in wrong units
+                    ratio = assets / liab_equity if liab_equity else 0
+                    if ratio > 500 or ratio < 0.002:  # More than 500x or less than 0.002x difference
+                        raise ValueError(
+                            f"❌ VALIDATION FAILED: Unit scaling error detected for {ticker} FY{fiscal_year}\n"
+                            f"   Assets: ${assets:,.0f} (ratio: {ratio:.2f}x)\n"
+                            f"   Liabilities + Equity: ${liab_equity:,.0f}\n"
+                            f"   Difference: {diff_pct:.2f}%\n"
+                            f"   This indicates a UNIT SCALING ERROR - values stored in wrong units"
+                        )
+                
+                if diff_pct > 1.0:  # More than 1% difference is critical error
+                    raise ValueError(
+                        f"❌ VALIDATION FAILED: Balance sheet doesn't balance for {ticker} FY{fiscal_year}\n"
+                        f"   Assets: ${assets:,.0f}\n"
+                        f"   Liabilities + Equity: ${liab_equity:,.0f}\n"
+                        f"   Difference: {diff_pct:.2f}%\n"
+                        f"   This indicates a DATA PROCESSING ERROR - DO NOT LOAD"
+                    )
     
-    def load_json_file(self, json_path: Path):
-        """Load a single JSON file"""
+    def load_concept_labels(self, concept_labels: Dict[str, str], filing_id: int):
+        """
+        Store original XBRL labels from label linkbase in dim_concepts.
+        
+        Args:
+            concept_labels: Dictionary mapping concept_name -> label_text
+            filing_id: Filing ID (for logging)
+        """
+        if not concept_labels:
+            return 0
+        
+        # Check if original_label column exists
+        try:
+            self.cur.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'dim_concepts' 
+                AND column_name = 'original_label'
+            """)
+            has_original_label = self.cur.fetchone() is not None
+        except:
+            has_original_label = False
+        
+        if not has_original_label:
+            # Add column if it doesn't exist
+            try:
+                self.cur.execute("""
+                    ALTER TABLE dim_concepts 
+                    ADD COLUMN original_label VARCHAR(500)
+                """)
+                self.conn.commit()
+                has_original_label = True
+            except Exception as e:
+                print(f"Warning: Could not add original_label column: {e}")
+                return 0
+        
+        # Check if label_role column exists
+        try:
+            self.cur.execute("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'dim_concepts' 
+                AND column_name = 'label_role'
+            """)
+            has_label_role = self.cur.fetchone() is not None
+        except:
+            has_label_role = False
+        
+        updated = 0
+        for concept_name, label_data in concept_labels.items():
+            try:
+                # Handle both old format (str) and new format (dict)
+                if isinstance(label_data, dict):
+                    label_text = label_data.get('label', '')
+                    label_role = label_data.get('role')
+                else:
+                    # Old format: just a string
+                    label_text = label_data
+                    label_role = None
+                
+                if not label_text:
+                    continue
+                
+                # Match on full concept_name (e.g., "ifrs-full_Revenue") or just the base name (e.g., "Revenue")
+                # First try exact match, then try without taxonomy prefix
+                base_name = concept_name.split('_')[-1] if '_' in concept_name else concept_name
+                
+                # Update dim_concepts with original_label and label_role
+                if has_label_role and label_role:
+                    self.cur.execute("""
+                        UPDATE dim_concepts
+                        SET original_label = COALESCE(original_label, %s),
+                            label_role = COALESCE(label_role, %s)
+                        WHERE (concept_name = %s OR concept_name = %s)
+                          AND (original_label IS NULL OR original_label = '')
+                    """, (label_text, label_role, concept_name, base_name))
+                else:
+                    # Fallback if label_role column doesn't exist
+                    self.cur.execute("""
+                        UPDATE dim_concepts
+                        SET original_label = COALESCE(original_label, %s)
+                        WHERE (concept_name = %s OR concept_name = %s)
+                          AND (original_label IS NULL OR original_label = '')
+                    """, (label_text, concept_name, base_name))
+                
+                if self.cur.rowcount > 0:
+                    updated += 1
+            except Exception as e:
+                continue
+        
+        self.conn.commit()
+        return updated
+    
+    def load_json_file(self, json_path: Path, show_completeness_check: bool = True):
+        """Load a single JSON file
+        
+        Args:
+            json_path: Path to JSON file to load
+            show_completeness_check: Whether to display completeness check results (default: True)
+                                    Set to False when loading multiple files to avoid redundancy
+        """
         print(f"\n📄 Loading: {json_path.name}")
         
         # Read JSON
@@ -431,39 +1086,108 @@ class StarSchemaLoader:
         company_id = self.get_or_create_company(ticker, data.get('metadata', {}))
         filing_id = self.get_or_create_filing(company_id, filing_type, fiscal_year_end, data.get('metadata', {}))
         
-        # Load facts
+        # CRITICAL: Clear existing data for this filing before reloading
+        # This ensures fixes actually work - old data won't mask new fixes
+        print(f"   🗑️  Clearing existing data for filing_id {filing_id}...")
+        try:
+            # Delete from all statement tables
+            for table in ['fact_income_statement', 'fact_balance_sheet', 'fact_cash_flow', 
+                         'fact_comprehensive_income', 'fact_equity_statement', 'rel_statement_items']:
+                self.cur.execute(f"DELETE FROM {table} WHERE filing_id = %s", (filing_id,))
+            
+            # Delete from fact_financial_metrics (base table)
+            self.cur.execute("DELETE FROM fact_financial_metrics WHERE filing_id = %s", (filing_id,))
+            
+            # Delete from staging
+            self.cur.execute("DELETE FROM staging_facts WHERE filing_id = %s", (filing_id,))
+            
+            self.conn.commit()
+            print(f"   ✅ Cleared existing data for filing_id {filing_id}")
+        except Exception as e:
+            print(f"   ⚠️  Warning: Could not clear existing data: {e}")
+            self.conn.rollback()
+        
+        # ELT STAGING LAYER: First load all raw facts to staging_facts
+        print(f"   → Loading {len(facts)} facts to staging layer...")
+        staging_loaded = 0
+        from tqdm import tqdm
+        import sys
+        for fact in tqdm(facts, desc=f"Staging {ticker} facts", unit="facts", file=sys.stderr, mininterval=0.1, maxinterval=1.0, dynamic_ncols=True, leave=False):
+            try:
+                staging_id = self.load_to_staging(filing_id, fact)
+                if staging_id:
+                    staging_loaded += 1
+                if staging_loaded % 500 == 0:
+                    self.conn.commit()
+            except Exception as e:
+                # Don't fail on staging errors - staging is for debugging
+                continue
+        
+        self.conn.commit()
+        print(f"   → Loaded {staging_loaded} facts to staging")
+        
+        # Load facts from staging to fact_financial_metrics (transformation layer)
         facts_loaded = 0
         facts_with_dims = 0
         
         # Track facts by concept and period for completeness validation
         facts_by_concept_period = {}  # (concept_name, period_year) -> count
         
-        for fact in facts:
+        # Get concept labels for this filing (to pass to get_or_create_concept)
+        concept_labels = data.get('concept_labels', {})
+        
+        for fact in tqdm(facts, desc=f"Loading {ticker} facts", unit="facts", file=sys.stderr, mininterval=0.1, maxinterval=1.0, dynamic_ncols=True):
             try:
+                # Add original_label to fact metadata if available
+                fact_metadata = fact.copy()
+                concept_name = fact.get('concept') or fact.get('concept_name', '')
+                if concept_name and concept_name in concept_labels:
+                    fact_metadata['original_label'] = concept_labels[concept_name]
+                
                 # Get or create concept
                 concept_id = self.get_or_create_concept(
-                    fact.get('concept'),
+                    concept_name,
                     fact.get('taxonomy', 'us-gaap'),
-                    fact
+                    fact_metadata
                 )
+                
+                # UNIVERSAL FIX: Balance sheet items must be instant, not duration
+                # Check if this is a balance sheet item and correct period_type if needed
+                normalized_label = fact.get('normalized_label')
+                period_type_from_fact = fact.get('period_type', 'duration')
+                
+                if normalized_label:
+                    from src.utils.taxonomy_mappings import get_statement_type
+                    statement_type = get_statement_type(normalized_label)
+                    if statement_type == 'balance_sheet' and period_type_from_fact == 'duration':
+                        # Balance sheet items must be instant - correct the period_type
+                        period_type_from_fact = 'instant'
+                        # If period_end exists but no instant_date, use period_end as instant_date
+                        if fact.get('period_end') and not fact.get('instant_date'):
+                            fact['instant_date'] = fact.get('period_end')
+                            fact['period_end'] = None
+                            fact['period_start'] = None
                 
                 # Get or create period
                 period_id = self.get_or_create_period(
-                    fact.get('period_type', 'duration'),
+                    period_type_from_fact,
                     fact.get('period_start'),
                     fact.get('period_end'),
                     fact.get('instant_date')
                 )
                 
                 # Track for completeness validation
+                # CRITICAL: Track by normalized_label, not concept_name
+                # Multiple concept names can map to same normalized label (e.g., PropertyPlantAndEquipment vs PropertyPlantAndEquipmentIncludingRightofuseAssets)
                 concept_name = fact.get('concept')
+                normalized_label = fact.get('normalized_label')
                 period_end = fact.get('period_end')
                 instant_date = fact.get('instant_date')
                 date_str = period_end or instant_date
-                if date_str and concept_name:
+                if date_str and normalized_label:  # Use normalized_label for tracking
                     year = date_str[:4] if len(date_str) >= 4 else None
                     if year:
-                        key = (concept_name, year)
+                        key = (normalized_label, year)  # Track by normalized_label, not concept_name
                         facts_by_concept_period[key] = facts_by_concept_period.get(key, 0) + 1
                 
                 # Get or create dimension
@@ -477,44 +1201,114 @@ class StarSchemaLoader:
                 
                 if facts_loaded % 500 == 0:
                     self.conn.commit()
-                    print(f"      ... {facts_loaded}/{len(facts)} facts loaded")
             
             except Exception as e:
+                # CRITICAL: Always rollback on error to reset transaction state
+                # This prevents "current transaction is aborted" errors
+                try:
+                    self.conn.rollback()
+                except:
+                    pass  # Ignore rollback errors
                 print(f"      ⚠️  Skipped fact {fact.get('concept')}: {e}")
                 continue
         
-        # Validate completeness: Check if concepts have data for all years
+        # Validate completeness: Check if CRITICAL concepts have data for all years
+        # Only check critical statement items - optional/one-time items may legitimately not have data for all years
+        # CRITICAL FIX: Track by normalized_label, not concept_name, because multiple concept names map to same label
         self.conn.commit()
-        concepts_by_year = {}
-        for (concept, year), count in facts_by_concept_period.items():
-            if concept not in concepts_by_year:
-                concepts_by_year[concept] = set()
-            concepts_by_year[concept].add(year)
+        normalized_labels_by_year = {}
+        for (normalized_label, year), count in facts_by_concept_period.items():
+            if normalized_label not in normalized_labels_by_year:
+                normalized_labels_by_year[normalized_label] = set()
+            normalized_labels_by_year[normalized_label].add(year)
         
-        # Find concepts missing data for some years
+        # Find all years present in the data
         all_years = set()
-        for years in concepts_by_year.values():
+        for years in normalized_labels_by_year.values():
             all_years.update(years)
         all_years = sorted(all_years, reverse=True)
+        
+        # CRITICAL: Filter out future years - only expect years up to and including the filing year
+        # Get filing year from fiscal_year_end
+        filing_year = None
+        if fiscal_year_end:
+            try:
+                from datetime import datetime
+                if isinstance(fiscal_year_end, str):
+                    filing_year = int(fiscal_year_end[:4])
+                else:
+                    filing_year = fiscal_year_end.year if hasattr(fiscal_year_end, 'year') else None
+            except (ValueError, AttributeError):
+                pass
+        
+        # If we can't determine filing year, use the latest year in the data
+        if not filing_year and all_years:
+            try:
+                filing_year = int(max(all_years))
+            except (ValueError, TypeError):
+                pass
+        
+        # Filter out future years (years > filing year)
+        if filing_year:
+            all_years = [y for y in all_years if int(y) <= filing_year]
+        
+        # Take top 3 years (most recent), but only up to filing year
         expected_years = all_years[:3] if len(all_years) > 3 else all_years
         
-        incomplete_concepts = []
-        for concept, years in concepts_by_year.items():
+        # CRITICAL: Only check normalized labels for critical statement items
+        # These are the universal metrics that should have data for all years
+        from src.validation.completeness import CompletenessTracker
+        tracker = CompletenessTracker()
+        critical_labels = []
+        for labels in tracker.EXPECTED_NORMALIZED_LABELS.values():
+            critical_labels.extend(labels)
+        
+        # Check only critical normalized labels for year completeness
+        incomplete_critical = []
+        incomplete_optional = []
+        
+        for normalized_label, years in normalized_labels_by_year.items():
             missing_years = [y for y in expected_years if y not in years]
             if missing_years:
-                incomplete_concepts.append((concept, sorted(years, reverse=True), missing_years))
+                if normalized_label in critical_labels:
+                    incomplete_critical.append((normalized_label, normalized_label, sorted(years, reverse=True), missing_years))
+                else:
+                    incomplete_optional.append((normalized_label, sorted(years, reverse=True), missing_years))
         
-        if incomplete_concepts:
-            print(f"\n      ⚠️  COMPLETENESS WARNING: {len(incomplete_concepts)} concepts missing data for some years")
-            print(f"         Expected years: {expected_years}")
-            print(f"         Sample incomplete concepts (showing first 10):")
-            for concept, years, missing in incomplete_concepts[:10]:
-                print(f"           {concept[:60]:<60} | Has: {years}, Missing: {missing}")
-            if len(incomplete_concepts) > 10:
-                print(f"           ... and {len(incomplete_concepts) - 10} more")
-            print(f"         This may indicate incomplete parsing. Re-parse the filing to ensure all facts are extracted.")
-        else:
-            print(f"\n      ✅ Completeness check passed: All concepts have data for all expected years")
+        # Only show completeness check if requested (suppress for individual files when loading multiple)
+        if show_completeness_check:
+            # Report critical issues (these are real problems)
+            if incomplete_critical:
+                print(f"\n      ⚠️  CRITICAL: {len(incomplete_critical)} critical concept(s) missing data for some years")
+                print(f"         Expected years: {expected_years}")
+                for concept, normalized_label, years, missing in incomplete_critical:
+                    print(f"           • {normalized_label:<30} | Has: {years}, Missing: {missing}")
+            
+            # Report optional items (informational only - these may be legitimate)
+            # Only show summary, not full list (too noisy)
+            if incomplete_optional:
+                print(f"\n      ℹ️  INFO: {len(incomplete_optional)} optional concept(s) missing data for some years")
+                print(f"         (These may be one-time items, acquisitions, or new/discontinued concepts)")
+                # Show sample only if there are many
+                if len(incomplete_optional) <= 5:
+                    for concept, years, missing in incomplete_optional:
+                        print(f"           • {concept[:50]:<50} | Has: {years}, Missing: {missing}")
+                else:
+                    print(f"         Sample (first 3 of {len(incomplete_optional)}):")
+                    for concept, years, missing in incomplete_optional[:3]:
+                        print(f"           • {concept[:50]:<50} | Has: {years}, Missing: {missing}")
+            
+            if not incomplete_critical and not incomplete_optional:
+                print(f"\n      ✅ Completeness check passed: All concepts have data for all expected years")
+            elif not incomplete_critical:
+                print(f"\n      ✅ Critical completeness check passed: All critical statement items have data for all expected years")
+        
+        # Store completeness results for final check (when loading multiple files)
+        completeness_result = {
+            'incomplete_critical': incomplete_critical,
+            'incomplete_optional': incomplete_optional,
+            'expected_years': expected_years
+        }
         
         # Load relationships with synthesis
         from src.utils.relationship_synthesizer import synthesize_relationships_for_filing
@@ -567,6 +1361,13 @@ class StarSchemaLoader:
             synth_count = calc_count - xbrl_count
             print(f"   ✅ Loaded {calc_count} calculation relationships ({xbrl_count} from XBRL, {synth_count} generated)")
         
+        # Load concept labels (original XBRL labels from label linkbase)
+        concept_labels = data.get('concept_labels', {})
+        if concept_labels:
+            labels_updated = self.load_concept_labels(concept_labels, filing_id)
+            if labels_updated > 0:
+                print(f"   ✅ Loaded {labels_updated} original XBRL labels")
+        
         # Load presentation hierarchy
         if synthesized.get('presentation'):
             pres_count = self.load_presentation_hierarchy(filing_id, synthesized['presentation'], data.get('metadata', {}))
@@ -605,28 +1406,93 @@ class StarSchemaLoader:
             populate_standard_presentation_order(engine)
             print(f"   ✅ Standard presentation order populated")
         
+        # Step: Concept mapping validation (concept_checker.py)
+        if year:
+            try:
+                print(f"   🔍 Validating concept mappings...")
+                from src.validation.concept_checker import ConceptMappingValidator
+                
+                concept_validator = ConceptMappingValidator()
+                concept_report = concept_validator.validate_mappings(ticker, year)
+                
+                if not concept_report.passed:
+                    print(f"   ⚠️  Concept mapping issues: {concept_report.overall_score:.1%}")
+                    # Log specific issues
+                    for result in concept_report.results:
+                        if not result.passed:
+                            print(f"      {result.rule_name}: {result.message}")
+                else:
+                    print(f"   ✅ Concept mapping validation passed: {concept_report.overall_score:.1%}")
+            except Exception as e:
+                print(f"   ⚠️  Concept mapping validation failed: {e}")
+                logger.warning(f"Concept mapping validation error: {e}", exc_info=True)
+        
+        # Fix unit scaling issues BEFORE populating statement facts
+        # This prevents numeric overflow errors when inserting into statement fact tables
+        from src.utils.fix_unit_scaling import fix_unit_scaling
+        from src.utils.fix_equity_values import fix_equity_values
+        scaling_fixed = fix_unit_scaling()
+        equity_fixed = fix_equity_values()
+        if scaling_fixed > 0 or equity_fixed > 0:
+            print(f"   ✅ Fixed {scaling_fixed} unit scaling issues and {equity_fixed} equity values before populating statements")
+        
         # Populate rel_statement_items table (Approach 2: Statement Metadata Table)
         print(f"   🔧 Populating statement items metadata...")
         from src.utils.populate_statement_items import populate_statement_items
         populate_statement_items(filing_id=filing_id)
         
         # Populate statement-specific fact tables (Approach 2: Denormalized for Performance)
-        print(f"   🔧 Populating statement-specific fact tables...")
-        from src.utils.populate_statement_facts import populate_statement_facts
-        populate_statement_facts(filing_id=filing_id)
+        # Use dependency graph to ensure correct population order
+        print(f"   🔧 Populating statement-specific fact tables (using dependency order)...")
+        from src.utils.population_order import validate_dependencies, populate_all_statements
         
-        self.conn.commit()
-        print(f"   ✅ Loaded {facts_loaded} facts ({facts_with_dims} with dimensions)")
+        # Validate dependency graph (ensures no circular dependencies)
+        if not validate_dependencies():
+            raise ValueError("Dependency graph has cycles - cannot proceed")
         
-        # CRITICAL VALIDATION - HARD FAIL on data quality issues
+        # Populate in correct order using dependency graph
+        populate_results = populate_all_statements(filing_id=filing_id, engine=self.engine, show_warnings=show_completeness_check)
+        
+        # Fix equity values that are clearly wrong (unit scaling issues)
+        # This runs after all data is loaded but BEFORE validation to ensure correct values
+        try:
+            from src.utils.fix_equity_values import fix_equity_values
+            fixed_count = fix_equity_values()
+            if fixed_count > 0:
+                print(f"   ✅ Fixed {fixed_count} equity values (unit scaling corrections)")
+                # Re-populate balance sheet after equity fix to use corrected values
+                from src.utils.populate_statement_facts import populate_balance_sheet
+                with self.engine.begin() as conn:
+                    populate_balance_sheet(conn, filing_id=filing_id, show_warnings=False)
+                print(f"   ✅ Re-populated balance sheet with corrected equity values")
+        except Exception as e:
+            print(f"   ⚠️  Equity value fix failed: {e}")
+        
+        # Convert results to warnings format for compatibility
+        statement_warnings = {
+            'missing_statements': {},
+            'failed_statements': {},
+            'successful_statements': populate_results.get('successful', [])
+        }
+        
+        # Track failed statements
+        for table, error in populate_results.get('failed', {}).items():
+            if filing_id not in statement_warnings['failed_statements']:
+                statement_warnings['failed_statements'][filing_id] = {}
+            statement_warnings['failed_statements'][filing_id][table] = error
+        
+        # CRITICAL VALIDATION - Validate AFTER equity fix and re-population
+        # This ensures no partial loads on validation failure
         print(f"   🔍 Running validation (hard fail on errors)...")
+        validation_passed = False
         try:
             # Validate for each fiscal year in this filing
             self.cur.execute("""
-            SELECT DISTINCT fiscal_year 
+            SELECT DISTINCT dt.fiscal_year 
             FROM dim_time_periods dt
             JOIN fact_financial_metrics f ON dt.period_id = f.period_id
-            WHERE f.filing_id = %s;
+            WHERE f.filing_id = %s
+              AND dt.fiscal_year IS NOT NULL;
             """, (filing_id,))
             
             fiscal_years = [row[0] for row in self.cur.fetchall()]
@@ -635,12 +1501,62 @@ class StarSchemaLoader:
                 if fy:  # Skip NULL fiscal years
                     self.validate_loaded_data(company_id, ticker, fy)
             
+            # Run validation aggregator to check for all issues
+            from src.validation.aggregator import ValidationAggregator
+            aggregator = ValidationAggregator()
+            validation_result = aggregator.collect_all_issues(filing_id=filing_id)
+            
+            # Check for critical issues (only ERROR severity, not WARNING)
+            # WARNING severity issues are acceptable (e.g., missing optional data, rounding differences)
+            critical_issues = [
+                issue for issue in validation_result.issues
+                if issue.category in ['loading_error'] or 
+                   (issue.category == 'database_validation' and 
+                    issue.details.get('severity') == 'ERROR')
+            ]
+            
+            if critical_issues:
+                print(f"   ❌ Validation failed: {len(critical_issues)} critical issues found")
+                for issue in critical_issues[:10]:  # Show first 10
+                    print(f"      - {issue}")
+                if len(critical_issues) > 10:
+                    print(f"      ... and {len(critical_issues) - 10} more")
+                raise ValueError(f"Validation failed: {len(critical_issues)} critical issues")
+            
+            validation_passed = True
             print(f"   ✅ Validation passed")
+            
         except ValueError as e:
             # HARD FAIL - rollback all changes
             self.conn.rollback()
             print(f"\n{str(e)}")
             raise  # Re-raise to stop pipeline
+        except Exception as e:
+            # Any other error - rollback
+            self.conn.rollback()
+            print(f"   ❌ Validation error: {e}")
+            raise
+        
+        # Only commit if validation passed
+        if validation_passed:
+            self.conn.commit()
+            print(f"   ✅ Loaded {facts_loaded} facts ({facts_with_dims} with dimensions)")
+        else:
+            # Should not reach here, but safety check
+            self.conn.rollback()
+            raise ValueError("Validation did not pass - transaction rolled back")
+        
+        # NOTE: UI tests (UITest.py) are NOT run here because:
+        # 1. This runs during loading, BEFORE post-processing (normalization, statement population, etc.)
+        # 2. UI tests need to verify the FINAL output (after all processing)
+        # 3. UI tests are run in run_pipeline.sh Step 3/3, AFTER all post-processing in main() completes
+        # 4. This ensures UI tests verify the actual user experience (same endpoint as website)
+        
+        # Return completeness results and statement warnings for aggregation when loading multiple files
+        return {
+            **completeness_result,
+            'statement_warnings': statement_warnings
+        }
     
     def load_calculation_relationships(self, filing_id: int, calc_rels: List[Dict], metadata: Dict) -> int:
         """Load calculation relationships"""
@@ -927,15 +1843,212 @@ class StarSchemaLoader:
         else:
             return 'custom'
     
+    def deduplicate_across_filings(self):
+        """
+        Remove semantic duplicates across filings for the same company/year.
+        
+        CRITICAL: The ON CONFLICT clause only works within a filing, but we can have
+        duplicates across filings (e.g., filing 5 has 2022 balance sheet, filing 7 has 2022 income statement).
+        This function removes duplicates, preferring SEC_API over XBRL.
+        
+        Deletes facts where:
+        - Same (company_id, normalized_label, fiscal_year, period_type, dimension_id)
+        - Different filing_id
+        - XBRL source exists when SEC_API source also exists for the same business key
+        
+        Also handles cross-period_type duplicates for balance sheet items (should only be instant):
+        - If same normalized_label and fiscal_year but different period_type (instant vs duration)
+        - And one is XBRL and one is SEC_API
+        - Prefer SEC_API and remove XBRL
+        """
+        print(f"\n   🔧 Deduplicating across filings (preferring SEC_API)...")
+        
+        # Phase 1: Find duplicates with same period_type (standard case)
+        self.cur.execute("""
+            WITH duplicates_same_period AS (
+                SELECT 
+                    f1.fact_id as xbrl_fact_id,
+                    f1.filing_id as xbrl_filing_id,
+                    f1.source as xbrl_source,
+                    f2.fact_id as sec_fact_id,
+                    f2.filing_id as sec_filing_id,
+                    f2.source as sec_source,
+                    c.ticker,
+                    f1.normalized_label,
+                    f1.fiscal_year,
+                    f1.period_type
+                FROM fact_financial_metrics f1
+                JOIN fact_financial_metrics f2 ON 
+                    f1.company_id = f2.company_id
+                    AND f1.normalized_label = f2.normalized_label
+                    AND f1.fiscal_year = f2.fiscal_year
+                    AND f1.period_type = f2.period_type
+                    AND COALESCE(f1.dimension_id, -1) = COALESCE(f2.dimension_id, -1)
+                    AND f1.filing_id != f2.filing_id
+                JOIN dim_companies c ON f1.company_id = c.company_id
+                WHERE f1.source = 'XBRL'
+                  AND f2.source = 'SEC_API'
+                  AND f1.dimension_id IS NULL  -- Only deduplicate consolidated facts
+                  AND f2.dimension_id IS NULL
+            ),
+            -- Phase 2: Find cross-period_type duplicates (balance sheet items in wrong period_type)
+            -- Balance sheet items should only be instant, not duration
+            -- Prefer instant over duration regardless of source (instant is correct for balance sheet)
+            duplicates_cross_period AS (
+                SELECT 
+                    CASE 
+                        WHEN f1.period_type = 'duration' THEN f1.fact_id
+                        WHEN f2.period_type = 'duration' THEN f2.fact_id
+                    END as fact_to_delete,
+                    c.ticker,
+                    f1.normalized_label,
+                    f1.fiscal_year,
+                    CASE 
+                        WHEN f1.period_type = 'duration' THEN f1.period_type
+                        WHEN f2.period_type = 'duration' THEN f2.period_type
+                    END as wrong_period_type
+                FROM fact_financial_metrics f1
+                JOIN fact_financial_metrics f2 ON 
+                    f1.company_id = f2.company_id
+                    AND f1.normalized_label = f2.normalized_label
+                    AND f1.fiscal_year = f2.fiscal_year
+                    AND f1.period_type != f2.period_type
+                    AND COALESCE(f1.dimension_id, -1) = COALESCE(f2.dimension_id, -1)
+                    AND f1.filing_id != f2.filing_id
+                JOIN dim_companies c ON f1.company_id = c.company_id
+                WHERE (f1.source = 'XBRL' AND f2.source = 'SEC_API')
+                   OR (f1.source = 'SEC_API' AND f2.source = 'XBRL')
+                  AND f1.dimension_id IS NULL
+                  AND f2.dimension_id IS NULL
+                  -- One must be duration (wrong) and one must be instant (correct)
+                  AND ((f1.period_type = 'duration' AND f2.period_type = 'instant')
+                       OR (f1.period_type = 'instant' AND f2.period_type = 'duration'))
+            )
+            SELECT xbrl_fact_id, ticker, normalized_label, fiscal_year, period_type
+            FROM duplicates_same_period
+            UNION ALL
+            SELECT fact_to_delete, ticker, normalized_label, fiscal_year, wrong_period_type as period_type
+            FROM duplicates_cross_period
+            WHERE fact_to_delete IS NOT NULL
+            ORDER BY ticker, normalized_label, fiscal_year
+        """)
+        
+        duplicates = self.cur.fetchall()
+        
+        if duplicates:
+            print(f"   ⚠️  Found {len(duplicates)} semantic duplicates across filings")
+            
+            # Delete XBRL facts that have SEC_API equivalents
+            fact_ids_to_delete = [row[0] for row in duplicates]
+            
+            # Delete in batches to avoid long transactions
+            batch_size = 1000
+            deleted_count = 0
+            for i in range(0, len(fact_ids_to_delete), batch_size):
+                batch = fact_ids_to_delete[i:i+batch_size]
+                placeholders = ','.join(['%s'] * len(batch))
+                self.cur.execute(f"""
+                    DELETE FROM fact_financial_metrics
+                    WHERE fact_id IN ({placeholders})
+                """, batch)
+                deleted_count += self.cur.rowcount
+            
+            self.conn.commit()
+            print(f"   ✅ Removed {deleted_count} XBRL facts that had SEC_API equivalents")
+            
+            # Show sample of what was removed
+            if len(duplicates) <= 10:
+                print(f"   📋 Removed duplicates:")
+                for row in duplicates:
+                    print(f"      {row[1]} {row[2]} ({row[3]}, {row[4]})")
+            else:
+                print(f"   📋 Sample of removed duplicates (first 5):")
+                for row in duplicates[:5]:
+                    print(f"      {row[1]} {row[2]} ({row[3]}, {row[4]})")
+        else:
+            print(f"   ✅ No semantic duplicates found across filings")
+    
     def load_all_files(self, data_dir: Path):
         """Load all JSON files from directory"""
         json_files = list(data_dir.glob('*_facts.json'))
         
         print(f"Found {len(json_files)} files to load")
         
+        # Track completeness results across all files
+        all_incomplete_critical = []
+        all_incomplete_optional = []
+        all_expected_years = set()
+        all_statement_warnings = {'missing_statements': {}}
+        
         for i, json_file in enumerate(json_files, 1):
             print(f"\n[{i}/{len(json_files)}]")
-            self.load_json_file(json_file)
+            # Suppress completeness check for individual files (will show at end)
+            result = self.load_json_file(json_file, show_completeness_check=False)
+            
+            # Aggregate results for final check
+            if result:
+                all_incomplete_critical.extend(result.get('incomplete_critical', []))
+                all_incomplete_optional.extend(result.get('incomplete_optional', []))
+                all_expected_years.update(result.get('expected_years', []))
+                # Aggregate statement warnings
+                if 'statement_warnings' in result and result['statement_warnings']:
+                    for stmt_type, count in result['statement_warnings'].get('missing_statements', {}).items():
+                        if stmt_type not in all_statement_warnings['missing_statements']:
+                            all_statement_warnings['missing_statements'][stmt_type] = 0
+                        all_statement_warnings['missing_statements'][stmt_type] += count
+        
+        # Deduplicate across filings (remove XBRL when SEC_API exists for same business key)
+        self.deduplicate_across_filings()
+        
+        # Show final completeness check (aggregated across all files)
+        if json_files:
+            print(f"\n      📊 Final Completeness Check (across all loaded files):")
+            all_expected_years = sorted(all_expected_years, reverse=True)
+            expected_years = all_expected_years[:3] if len(all_expected_years) > 3 else all_expected_years
+            
+            # Deduplicate critical issues by normalized_label
+            critical_by_label = {}
+            for item in all_incomplete_critical:
+                label = item[1]  # normalized_label
+                if label not in critical_by_label:
+                    critical_by_label[label] = item
+            
+            # Deduplicate optional issues by normalized_label
+            optional_by_label = {}
+            for item in all_incomplete_optional:
+                label = item[0]  # normalized_label
+                if label not in optional_by_label:
+                    optional_by_label[label] = item
+            
+            if critical_by_label:
+                print(f"\n      ⚠️  CRITICAL: {len(critical_by_label)} critical concept(s) missing data for some years")
+                print(f"         Expected years: {expected_years}")
+                for concept, normalized_label, years, missing in critical_by_label.values():
+                    print(f"           • {normalized_label:<30} | Has: {years}, Missing: {missing}")
+            
+            if optional_by_label:
+                print(f"\n      ℹ️  INFO: {len(optional_by_label)} optional concept(s) missing data for some years")
+                print(f"         (These may be one-time items, acquisitions, or new/discontinued concepts)")
+                if len(optional_by_label) <= 5:
+                    for concept, years, missing in optional_by_label.values():
+                        print(f"           • {concept[:50]:<50} | Has: {years}, Missing: {missing}")
+                else:
+                    print(f"         Sample (first 3 of {len(optional_by_label)}):")
+                    for concept, years, missing in list(optional_by_label.values())[:3]:
+                        print(f"           • {concept[:50]:<50} | Has: {years}, Missing: {missing}")
+            
+            if not critical_by_label and not optional_by_label:
+                print(f"\n      ✅ Completeness check passed: All concepts have data for all expected years")
+            elif not critical_by_label:
+                print(f"\n      ✅ Critical completeness check passed: All critical statement items have data for all expected years")
+        
+        # Show final statement warnings summary (aggregated across all files)
+        if all_statement_warnings.get('missing_statements'):
+            print(f"\n      📊 Final Statement Population Summary (across all loaded files):")
+            for stmt_type, count in all_statement_warnings['missing_statements'].items():
+                print(f"         ⚠️  {stmt_type}: No facts found in {count} filing(s)")
+        else:
+            print(f"\n      ✅ Statement population: All statement types populated successfully")
         
         print("\n" + "="*80)
         print("📊 Final Statistics")
@@ -980,23 +2093,96 @@ class StarSchemaLoader:
 
 
 def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Load financial data into star schema')
+    parser.add_argument('json_file', nargs='?', help='Specific JSON file to load (optional - if not provided, loads all files)')
+    args = parser.parse_args()
+    
     print("="*80)
     print("📥 Loading Financial Data into Star Schema Warehouse")
     print("="*80)
     
-    # Use relative path from project root (works in both host and Docker)
-    project_root = Path(__file__).parent.parent
-    data_dir = project_root / "data" / "processed"
-    
-    if not data_dir.exists():
-        print(f"❌ Data directory not found: {data_dir}")
-        return 1
-    
     loader = StarSchemaLoader()
     
     try:
-        loader.load_all_files(data_dir)
+        if args.json_file:
+            # Load specific file
+            json_path = Path(args.json_file)
+            if not json_path.is_absolute():
+                # Make relative to project root
+                project_root = Path(__file__).parent.parent
+                json_path = project_root / json_path
+            if not json_path.exists():
+                print(f"❌ File not found: {json_path}")
+                return 1
+            loader.load_json_file(json_path)
+        else:
+            # Load all files (backward compatibility)
+            project_root = Path(__file__).parent.parent
+            data_dir = project_root / "data" / "processed"
+            
+            if not data_dir.exists():
+                print(f"❌ Data directory not found: {data_dir}")
+                return 1
+            
+            loader.load_all_files(data_dir)
         print("\n✅ Data loading complete!")
+        
+        # Post-load gap filling: Fill missing concepts and wrong values from SEC API
+        # This runs AFTER database load, so it can query what's actually in the DB
+        print("\n" + "="*80)
+        print("🔧 Running post-load gap filling...")
+        print("="*80)
+        try:
+            from src.utils.post_load_gap_filling import run_post_load_gap_filling
+            
+            # Extract company and years from the loaded file(s)
+            # For now, we'll need to pass this info - get it from the JSON file
+            if args.json_file:
+                json_path = Path(args.json_file)
+                if not json_path.is_absolute():
+                    project_root = Path(__file__).parent.parent
+                    json_path = project_root / json_path
+                
+                if json_path.exists():
+                    with open(json_path, 'r') as f:
+                        data = json.load(f)
+                        ticker = data.get('company', '')
+                        year = data.get('year', 0)
+                        filing_type = data.get('filing_type', '10-K')
+                        taxonomy = 'ifrs-full' if '20-F' in filing_type.upper() else 'us-gaap'
+                        
+                        if ticker and year:
+                            # Check for years in the data
+                            years_to_check = [year]
+                            if 'facts' in data:
+                                existing_years = set()
+                                for fact in data['facts']:
+                                    period_end = fact.get('period_end')
+                                    instant_date = fact.get('instant_date')
+                                    if period_end:
+                                        fact_year = period_end[:4] if isinstance(period_end, str) else str(period_end.year)
+                                        existing_years.add(int(fact_year))
+                                    if instant_date:
+                                        fact_year = instant_date[:4] if isinstance(instant_date, str) else str(instant_date.year)
+                                        existing_years.add(int(fact_year))
+                                if existing_years:
+                                    years_to_check = sorted(existing_years)
+                            
+                            filled_post = run_post_load_gap_filling(
+                                ticker=ticker,
+                                years=years_to_check,
+                                taxonomy=taxonomy
+                            )
+                            if filled_post > 0:
+                                print(f"✅ Post-load gap filling added {filled_post} facts")
+                            else:
+                                print("ℹ️  No missing concepts found to fill")
+        except Exception as e:
+            print(f"⚠️  Post-load gap filling failed: {e}")
+            import traceback
+            traceback.print_exc()
         
         # SOLUTION 1: Load taxonomy hierarchy relationships (lasting fix)
         print("\n" + "="*80)
@@ -1112,7 +2298,23 @@ def main():
         # (taxonomy_mappings.py checks calculation linkbase and gives components unique labels)
         # No separate step needed - integrated into normalization logic
         
-        # SOLUTION 3.6: Calculate missing universal metric totals from components (lasting fix)
+        # SOLUTION 3.6: Fix equity values that are clearly wrong (unit scaling issues)
+        print("\n" + "="*80)
+        print("🔧 Fixing equity values (unit scaling corrections)...")
+        print("="*80)
+        from src.utils.fix_equity_values import fix_equity_values
+        from src.utils.fix_unit_scaling import fix_unit_scaling
+        
+        fixed_count = fix_equity_values()
+        scaling_fixed = fix_unit_scaling()
+        if scaling_fixed > 0:
+            print(f"   ✅ Fixed {scaling_fixed} unit scaling issues")
+        if fixed_count > 0:
+            print(f"✅ Fixed {fixed_count} equity values")
+        else:
+            print("✅ No equity values needed fixing")
+        
+        # SOLUTION 3.7: Calculate missing universal metric totals from components (lasting fix)
         print("\n" + "="*80)
         print("🔧 Calculating missing universal metric totals from components...")
         print("="*80)

@@ -185,6 +185,8 @@ CONCEPT_MAPPINGS = {
         "CashAndDueFromBanks",  # Bank-specific (BAC, JPM) - semantically equivalent to cash_and_equivalents
         "CashAndBankBalancesAtCentralBanks",
         "CashCashEquivalentsRestrictedCashAndRestrictedCashAndRestrictedCashEquivalents",  # When it represents total cash
+        "BalancesWithBanks",  # IFRS variant (NVO) - bank balances, semantically equivalent to cash_and_equivalents
+        "CashAtBank",  # Alternative label for bank balances
     ],
     
     "cash": [

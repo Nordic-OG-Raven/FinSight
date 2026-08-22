@@ -12,7 +12,7 @@ echo "="*80
 
 # Step 1: Generate normalization mappings from Python
 echo "Generating normalization mappings..."
-/Users/jonas/Thesis/.venv/bin/python << 'PYTHON'
+/Users/jonas/FinSight/.venv/bin/python << 'PYTHON'
 import sys
 sys.path.insert(0, 'src/utils')
 from taxonomy_mappings import get_normalized_label

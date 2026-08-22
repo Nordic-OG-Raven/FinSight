@@ -10,6 +10,8 @@ from datetime import datetime
 from collections import Counter
 
 from src.utils.normalize import identify_statement_type
+from src.utils.logging_utils import truncate_log_message
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +73,28 @@ class CompletenessReport:
 class CompletenessTracker:
     """Track data completeness and coverage"""
     
-    # Expected critical concepts per statement type
+    # Expected critical normalized labels (universal metrics) per statement type
+    # These are taxonomy-agnostic and work for both IFRS and US-GAAP companies
+    # Source: src/utils/taxonomy_mappings.py STATEMENT_TYPES
+    EXPECTED_NORMALIZED_LABELS = {
+        'income_statement': [
+            'revenue', 'cost_of_revenue', 'gross_profit', 'operating_income',
+            'income_before_tax', 'income_tax_expense', 'net_income',
+            'eps_basic', 'eps_diluted'
+        ],
+        'balance_sheet': [
+            'total_assets', 'current_assets', 'cash_and_equivalents',
+            'accounts_receivable', 'inventory', 'property_plant_equipment',
+            'total_liabilities', 'current_liabilities', 'accounts_payable',
+            'long_term_debt', 'stockholders_equity', 'retained_earnings'
+        ],
+        'cash_flow': [
+            'operating_cash_flow', 'investing_cash_flow', 'financing_cash_flow',
+            'capex', 'dividends_paid'
+        ]
+    }
+    
+    # Legacy: Keep for backward compatibility, but prefer EXPECTED_NORMALIZED_LABELS
     EXPECTED_CONCEPTS = {
         'income_statement': [
             'Revenue', 'Revenues', 'SalesRevenueNet',
@@ -166,7 +189,7 @@ class CompletenessTracker:
         taxonomy_counts = Counter(f.get('taxonomy') for f in facts if f.get('taxonomy'))
         report.facts_by_taxonomy = dict(taxonomy_counts)
         
-        # Calculate completeness scores
+        # Calculate completeness scores (using normalized labels - works for both IFRS and US-GAAP)
         report.overall_completeness = self._calculate_overall_completeness(facts)
         report.income_statement_completeness = self._calculate_statement_completeness(
             facts, 'income_statement'
@@ -184,36 +207,213 @@ class CompletenessTracker:
         
         return report
     
+    def fill_missing_with_sec_api(
+        self,
+        facts: List[Dict[str, Any]],
+        company: str,
+        year: int,
+        taxonomy: str = 'ifrs-full',
+        cache_dir: Optional[Path] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Fill missing concepts using SEC Company Facts API
+        
+        This is a workaround for extraction gaps. It identifies missing concepts
+        and fills them from the SEC API, marking them with source='SEC_API'.
+        
+        RATE LIMIT AWARENESS:
+        - Makes ONE API call per company/year (fetches all facts at once)
+        - Caches responses to disk to avoid repeated calls
+        - Only adds SEC_API data for MISSING concepts (not all concepts)
+        
+        Args:
+            facts: Existing facts list
+            company: Company ticker symbol
+            year: Fiscal year to fill
+            taxonomy: Taxonomy to use (default: 'ifrs-full' for IFRS companies)
+            cache_dir: Optional directory to cache SEC API responses
+            
+        Returns:
+            Updated facts list with gap-filled data
+        """
+        try:
+            from scripts.sec_api_validator import fetch_sec_facts, get_cik_from_ticker
+        except ImportError:
+            logger.warning("SEC API validator not available, skipping gap filling")
+            return facts
+        
+        # Get CIK
+        cik = get_cik_from_ticker(company)
+        if not cik:
+            logger.warning(f"CIK not found for {company}, skipping SEC API gap filling")
+            return facts
+        
+        # Check cache first (avoid API calls if we have cached data)
+        sec_facts = None
+        cache_file = None
+        if cache_dir:
+            cache_dir = Path(cache_dir)
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_file = cache_dir / f"sec_api_{company}_{year}_{taxonomy}.json"
+            if cache_file.exists():
+                try:
+                    import json
+                    with open(cache_file, 'r') as f:
+                        sec_facts = json.load(f)
+                    logger.debug(truncate_log_message(f"Using cached SEC API data for {company} {year}"))
+                except Exception as e:
+                    logger.debug(f"Cache read failed: {e}, fetching from API")
+        
+        # Fetch from API if not cached
+        if sec_facts is None:
+            logger.info(truncate_log_message(f"Fetching SEC API data for {company} {year}..."))
+            sec_facts = fetch_sec_facts(cik, year, taxonomy)
+            
+            # Cache the response
+            if sec_facts and cache_file:
+                try:
+                    import json
+                    with open(cache_file, 'w') as f:
+                        json.dump(sec_facts, f, indent=2)
+                    logger.debug(truncate_log_message(f"Cached SEC API response"))
+                except Exception as e:
+                    logger.debug(f"Cache write failed: {e}")
+        
+        if not sec_facts:
+            logger.warning("Failed to fetch SEC API data, skipping gap filling")
+            return facts
+        
+        # Fill ALL missing concepts from SEC API - check every SEC API fact
+        # Build sets of concepts AND normalized labels we already have for THIS SPECIFIC YEAR
+        # CRITICAL: Check both concept names AND normalized labels to catch cases where
+        # SEC API uses different concept name but same normalized label (e.g., PropertyPlantAndEquipment vs PropertyPlantAndEquipmentIncludingRightofuseAssets)
+        # CRITICAL FIX: Only check for THIS year, not all years - we need to fill missing years!
+        existing_concepts_for_year = set()
+        existing_normalized_for_year = set()
+        for fact in facts:
+            fact_year = None
+            period_end = fact.get('period_end')
+            instant_date = fact.get('instant_date')
+            if period_end:
+                fact_year = period_end[:4] if isinstance(period_end, str) else str(period_end.year)
+            elif instant_date:
+                fact_year = instant_date[:4] if isinstance(instant_date, str) else str(instant_date.year)
+            
+            # CRITICAL: Only check facts for THIS specific year
+            # Previous bug: Was checking all years, so if PPE existed for 2021, it wouldn't fill for 2024
+            if fact_year == str(year):
+                concept = fact.get('concept', '')
+                normalized = fact.get('normalized_label', '')
+                if concept:
+                    existing_concepts_for_year.add(concept.lower())
+                if normalized:
+                    existing_normalized_for_year.add(normalized.lower())
+        
+        # Fill ALL missing concepts from SEC API
+        filled_count = 0
+        filled_concepts = []
+        from src.utils.taxonomy_mappings import get_normalized_label
+        
+        for key, facts_list in sec_facts.items():
+            for sec_fact in facts_list:
+                concept_name = sec_fact.get('concept', '')
+                if not concept_name:
+                    continue
+                
+                # Get normalized label for this SEC API concept
+                sec_normalized = get_normalized_label(concept_name) if concept_name else None
+                
+                # RATE LIMIT OPTIMIZATION: Only add SEC_API data for MISSING concepts
+                # Don't add if we already have this concept for this year (even if XBRL)
+                # The loader's ON CONFLICT logic will prefer SEC_API over XBRL when both exist,
+                # but we should only fetch/add SEC_API when there's an actual gap
+                if (concept_name.lower() in existing_concepts_for_year or 
+                    (sec_normalized and sec_normalized.lower() in existing_normalized_for_year)):
+                    continue
+                
+                # Extract period
+                period = sec_fact.get('period', {})
+                # SEC API uses 'end' for balance sheet items (instant) and duration periods
+                # Check if it's an instant period (balance sheet) by looking at the frame or form
+                # For balance sheet items, use instant_date; for income/cash flow, use period_end
+                period_end = period.get('end') or period.get('instant', f'{year}-12-31')
+                is_instant = 'instant' in period or (period.get('frame', '').endswith('I') and 'end' in period)
+                
+                # Try to get normalized label
+                normalized_label = get_normalized_label(concept_name) if concept_name else None
+                
+                # Determine if this is a balance sheet item (instant) based on normalized label
+                # Balance sheet items: assets, liabilities, equity
+                is_balance_sheet = normalized_label and any(bs_term in normalized_label.lower() for bs_term in [
+                    'assets', 'liabilities', 'equity', 'property_plant_equipment', 'inventory',
+                    'accounts_receivable', 'cash_and_equivalents', 'accounts_payable', 'debt'
+                ])
+                
+                # Create new fact
+                new_fact = {
+                    'concept': concept_name,
+                    'value': sec_fact.get('value'),
+                    'value_numeric': sec_fact.get('value'),
+                    'period_end': period_end if not is_balance_sheet and 'end' in period else None,
+                    'instant_date': period_end if (is_balance_sheet or is_instant) else None,
+                    'unit_measure': sec_fact.get('unit', ''),
+                    'normalized_label': normalized_label,
+                    'source': 'SEC_API',
+                    'is_gap_filled': True,
+                    'taxonomy': sec_fact.get('taxonomy', taxonomy)
+                }
+                
+                facts.append(new_fact)
+                filled_count += 1
+                filled_concepts.append(concept_name)
+                # Only log at DEBUG level to reduce noise
+                logger.debug(f"Filled gap: {concept_name} = {sec_fact.get('value')} {sec_fact.get('unit', '')} ({year})")
+        
+        if filled_count > 0:
+            msg = f"✅ Filled {filled_count} missing concepts from SEC API for year {year}"
+            logger.info(truncate_log_message(msg))
+            # Log critical concepts that were filled (for debugging)
+            critical_filled = [c for c in filled_concepts if any(kw in c.lower() for kw in ['assets', 'liabilities', 'equity', 'revenue', 'income', 'property', 'plant', 'equipment'])]
+            if critical_filled:
+                logger.debug(truncate_log_message(f"   Critical concepts: {', '.join(critical_filled[:3])}"))
+        else:
+            logger.debug(truncate_log_message(f"ℹ️  No missing concepts found in SEC API for year {year}"))
+        
+        return facts
+    
     def _calculate_overall_completeness(self, facts: List[Dict[str, Any]]) -> float:
         """
         Calculate overall completeness score
         
         Based on:
-        - Presence of critical concepts
+        - Presence of critical normalized labels (universal metrics)
         - Data quality (numeric values, periods, units)
         - Dimensional coverage
         """
         if not facts:
             return 0.0
         
-        # Check for critical concepts across all statements
-        all_critical = []
-        for concepts in self.EXPECTED_CONCEPTS.values():
-            all_critical.extend(concepts)
+        # Check for critical normalized labels across all statements (taxonomy-agnostic)
+        all_critical_labels = []
+        for labels in self.EXPECTED_NORMALIZED_LABELS.values():
+            all_critical_labels.extend(labels)
         
-        found_critical = self._count_found_concepts(facts, all_critical)
-        concept_score = found_critical / len(all_critical)
+        found_critical = self._count_found_normalized_labels(facts, all_critical_labels)
+        concept_score = found_critical / len(all_critical_labels) if all_critical_labels else 0.0
         
         # Data quality score (what % of facts have complete metadata)
+        # Balance sheet items use instant_date, income/cash flow use period_end
         quality_score = (
-            sum(1 for f in facts if f.get('value_numeric') and f.get('period_end') and f.get('unit_measure'))
+            sum(1 for f in facts if f.get('value_numeric') and f.get('unit_measure') and 
+                (f.get('period_end') or f.get('instant_date')))
             / len(facts)
         )
         
         # Dimensional coverage (bonus for detailed breakdowns)
-        dimensional_score = min(1.0, sum(
-            1 for f in facts if f.get('dimensions') and len(f.get('dimensions', {})) > 0
-        ) / (len(facts) * 0.5))  # Expect at least 50% to have dimensions
+        # NOTE: Many companies don't report many dimensions, so this threshold may be too strict
+        # Adjusted to be more lenient - only expect 10% to have dimensions (many facts are consolidated totals)
+        facts_with_dims = sum(1 for f in facts if f.get('dimensions') and len(f.get('dimensions', {})) > 0)
+        dimensional_score = min(1.0, facts_with_dims / max(len(facts) * 0.1, 1))  # Expect at least 10% to have dimensions
         
         # Weighted average
         overall_score = (
@@ -229,7 +429,18 @@ class CompletenessTracker:
         facts: List[Dict[str, Any]],
         statement_type: str
     ) -> float:
-        """Calculate completeness for a specific financial statement"""
+        """
+        Calculate completeness for a specific financial statement
+        
+        Uses normalized labels (universal metrics) which work for both IFRS and US-GAAP companies.
+        """
+        # Prefer normalized labels (taxonomy-agnostic)
+        expected_labels = self.EXPECTED_NORMALIZED_LABELS.get(statement_type, [])
+        if expected_labels:
+            found = self._count_found_normalized_labels(facts, expected_labels)
+            return round(found / len(expected_labels), 3)
+        
+        # Fallback to legacy concept names (for backward compatibility)
         expected = self.EXPECTED_CONCEPTS.get(statement_type, [])
         if not expected:
             return 0.0
@@ -237,19 +448,117 @@ class CompletenessTracker:
         found = self._count_found_concepts(facts, expected)
         return round(found / len(expected), 3)
     
+    def _count_found_normalized_labels(
+        self,
+        facts: List[Dict[str, Any]],
+        expected_labels: List[str]
+    ) -> int:
+        """
+        Count how many expected normalized labels (universal metrics) are present in facts.
+        
+        This is taxonomy-agnostic and works for both IFRS and US-GAAP companies.
+        """
+        found = 0
+        
+        # Collect all normalized labels from facts
+        fact_normalized_labels = set()
+        for fact in facts:
+            normalized = fact.get('normalized_label')
+            if normalized:
+                fact_normalized_labels.add(normalized.lower())
+        
+        # Check for each expected normalized label
+        for expected_label in expected_labels:
+            if expected_label.lower() in fact_normalized_labels:
+                found += 1
+        
+        return found
+    
     def _count_found_concepts(
         self,
         facts: List[Dict[str, Any]],
         expected_concepts: List[str]
     ) -> int:
-        """Count how many expected concepts are present in facts"""
+        """
+        Count how many expected concepts are present in facts (legacy method).
+        
+        This is a fallback for backward compatibility. Prefer _count_found_normalized_labels.
+        """
         found = 0
-        fact_concepts = set(f.get('concept', '').lower() for f in facts)
+        
+        # Collect normalized labels and raw concept names
+        fact_normalized_labels = set()
+        fact_concepts = set()
+        
+        for fact in facts:
+            # Prefer normalized_label (taxonomy-agnostic)
+            normalized = fact.get('normalized_label')
+            if normalized:
+                fact_normalized_labels.add(normalized.lower())
+            # Also check raw concept name as fallback
+            concept = fact.get('concept', '')
+            if concept:
+                fact_concepts.add(concept.lower())
+        
+        # Map expected US-GAAP concept names to normalized labels
+        # This allows completeness to work for both IFRS and US-GAAP companies
+        normalized_mapping = {
+            'revenue': ['revenue', 'revenues'],
+            'grossprofit': ['gross_profit'],
+            'operatingincomeloss': ['operating_income'],
+            'netincomeloss': ['net_income'],
+            'profitloss': ['net_income'],
+            'costofgoodsandservicessold': ['cost_of_revenue'],
+            'costofrevenue': ['cost_of_revenue'],
+            'operatingexpenses': ['operating_expenses'],
+            'researchanddevelopmentexpense': ['research_and_development'],
+            'sellinggeneralandadministrativeexpense': ['selling_general_and_administrative'],
+            'incometaxexpensebenefit': ['income_tax_expense'],
+            'assets': ['total_assets'],
+            'assetscurrent': ['current_assets'],
+            'assetsnoncurrent': ['noncurrent_assets'],
+            'cash': ['cash_and_cash_equivalents'],
+            'cashandcashequivalentsatcarryingvalue': ['cash_and_cash_equivalents'],
+            'accountsreceivable': ['accounts_receivable'],
+            'inventory': ['inventory'],
+            'propertyplantandequipmentnet': ['property_plant_and_equipment'],
+            'liabilities': ['total_liabilities'],
+            'liabilitiescurrent': ['current_liabilities'],
+            'liabilitiesnoncurrent': ['noncurrent_liabilities'],
+            'accountspayable': ['accounts_payable'],
+            'debtcurrent': ['current_debt'],
+            'debtnoncurrent': ['noncurrent_debt'],
+            'stockholdersequity': ['stockholders_equity'],
+            'retainedearnings': ['retained_earnings'],
+            'commonstock': ['common_stock'],
+            'additionalpaidincapital': ['additional_paid_in_capital'],
+            'netcashprovidedbyusedinoperatingactivities': ['operating_cash_flow'],
+            'netcashprovidedbyusedininvestingactivities': ['investing_cash_flow'],
+            'netcashprovidedbyusedinfinancingactivities': ['financing_cash_flow'],
+            'depreciationdepletionandamortization': ['depreciation_amortization'],
+            'paymentstoacquirepropertyplantandequipment': ['capex'],
+            'dividendspaid': ['dividends_paid'],
+            'proceedsfromissuanceofdebt': ['debt_issued'],
+            'repaymentsofdebt': ['debt_repaid'],
+        }
         
         for expected in expected_concepts:
             expected_lower = expected.lower()
-            # Check if any fact concept contains the expected concept
-            if any(expected_lower in fc for fc in fact_concepts):
+            found_match = False
+            
+            # First, try to find via normalized label (works for both IFRS and US-GAAP)
+            if expected_lower in normalized_mapping:
+                for normalized_key in normalized_mapping[expected_lower]:
+                    if normalized_key in fact_normalized_labels:
+                        found_match = True
+                        break
+            
+            # Fallback: check raw concept name (for US-GAAP companies)
+            if not found_match:
+                if any(expected_lower in fc for fc in fact_concepts):
+                    found_match = True
+            
+            if found_match:
                 found += 1
         
         return found

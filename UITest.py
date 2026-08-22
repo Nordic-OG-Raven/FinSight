@@ -245,6 +245,10 @@ EXPECTED_NOVO_COMPREHENSIVE_INCOME_VALUES = {
 
 def humanize_label(label: str, statement_type: str = "income_statement") -> str:
     """Convert normalized_label to human-readable format matching Novo report"""
+    # UNIVERSAL FIX: Handle space items first (industry standard: empty spaces for visual formatting)
+    if label and ('space' in label.lower() or 'equity_statement_space' in label.lower()):
+        return ''  # Empty string for visual spacing
+    
     # Map normalized labels to Novo report labels
     label_map = {
         # Income statement
@@ -320,8 +324,9 @@ def check_api_running(api_base: str, timeout: int = 5) -> bool:
             response = requests.get(f"{api_base}?path=/api/companies", timeout=timeout)
             return response.status_code == 200
         else:
-            # Direct Flask API
-            response = requests.get(f"{api_base}/health", timeout=timeout)
+            # Direct Flask API - check /health endpoint
+            health_url = f"{api_base}/health" if not api_base.endswith('/health') else api_base
+            response = requests.get(health_url, timeout=timeout)
             return response.status_code == 200
     except (requests.exceptions.RequestException, requests.exceptions.Timeout):
         return False
@@ -384,20 +389,44 @@ def ensure_api_running(api_base: str, api_port: int = 5001) -> bool:
     print("Checking API Status")
     print(f"{'='*80}\n")
     
-    # Check if API is already running
+    # Check if API is already running (try both the specified base and port 5001)
     if check_api_running(api_base, timeout=2):
         print(f"✅ API is already running at {api_base}")
         return True
     
+    # Also check if API is running on port 5001 (common case when pipeline starts it)
+    if 'localhost:5001' not in api_base:
+        if check_api_running("http://localhost:5001", timeout=2):
+            print(f"✅ API is already running on http://localhost:5001 (using that instead)")
+            return True
+    
     print(f"⚠️  API is not running at {api_base}")
     print(f"   Starting API on port {api_port}...")
+    
+    # Check if port is already in use (API might be starting)
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    result = sock.connect_ex(('localhost', api_port))
+    sock.close()
+    
+    if result == 0:
+        print(f"   ⚠️  Port {api_port} is already in use - waiting for API to be ready...")
+        # Give it a moment and check again
+        time.sleep(3)
+        if check_api_running(f"http://localhost:{api_port}", timeout=5):
+            print(f"   ✅ API is ready on port {api_port}")
+            return True
+        else:
+            print(f"   ❌ Port {api_port} is in use but API is not responding")
+            return False
     
     try:
         # Start API
         _api_process = start_api(api_port)
         
-        # Wait for API to be ready
-        if wait_for_api(api_base):
+        # Wait for API to be ready (use direct port URL)
+        api_url = f"http://localhost:{api_port}"
+        if wait_for_api(api_url, max_wait=30):
             # Register cleanup function
             atexit.register(cleanup_api)
             return True
@@ -675,6 +704,69 @@ def test_income_statement(api_base: str, ticker: str = "NVO", year: int = 2024) 
         for issue in order_issues:
             print(f"   - {issue['item']}: expected position {issue['expected_position']}, actual position {issue['actual_position']}")
     
+    # CRITICAL: Check that ALL main items have data for ALL years (2024, 2023, 2022)
+    # The 2024 report contains ALL comparative data - every main item should have data for all years
+    print(f"\n{'='*80}")
+    print("YEAR COMPLETENESS CHECK (All Years Must Have Data)")
+    print(f"{'='*80}\n")
+    
+    years_to_check = data.get("years", [year, year - 1, year - 2])
+    year_completeness_issues = []
+    
+    # Group items by normalized_label to check year completeness
+    items_by_normalized = {}
+    for item in income_statement:
+        normalized = item.get("normalized_label", "")
+        if normalized not in items_by_normalized:
+            items_by_normalized[normalized] = []
+        items_by_normalized[normalized].append(item)
+    
+    # Check each found item for year completeness
+    for item_info in items_found:
+        normalized = None
+        is_header_item = False
+        for item in income_statement:
+            preferred = item.get("preferred_label") or humanize_label(item.get("normalized_label", ""), "income_statement")
+            if normalize_label_for_matching(preferred) == normalize_label_for_matching(item_info["found"]):
+                normalized = item.get("normalized_label", "")
+                is_header_item = item.get("is_header", False)
+                break
+        
+        if normalized and normalized in items_by_normalized:
+            item_years = set()
+            for item in items_by_normalized[normalized]:
+                # For headers: check if header exists for the year (value can be None)
+                # For non-headers: check if they have data values
+                if is_header_item:
+                    item_year = item.get("period_year")
+                    if item_year:  # Header exists for this year (value can be None)
+                        item_years.add(item_year)
+                else:
+                    # Skip headers when checking non-header items
+                    if item.get("is_header", False):
+                        continue
+                    item_year = item.get("period_year")
+                    if item_year and item.get("value") is not None:
+                        item_years.add(item_year)
+            
+            missing_years = set(years_to_check) - item_years
+            if missing_years:
+                year_completeness_issues.append({
+                    "item": item_info["found"],
+                    "normalized": normalized,
+                    "missing_years": sorted(missing_years),
+                    "has_years": sorted(item_years)
+                })
+    
+    if year_completeness_issues:
+        print(f"❌ Year Completeness Issues: {len(year_completeness_issues)} items missing data for some years")
+        for issue in year_completeness_issues[:20]:
+            print(f"   - {issue['item']}: missing years {issue['missing_years']} (has: {issue['has_years']})")
+        if len(year_completeness_issues) > 20:
+            print(f"   ... and {len(year_completeness_issues) - 20} more items")
+    else:
+        print(f"✅ Year Completeness: All items have data for all years ({years_to_check})")
+    
     # Overall result
     # CRITICAL: Test fails if there are NULL presentation_order_index values or ordering issues
     has_critical_errors = len(null_order_items) > 0 or len(order_issues_in_response) > 0
@@ -683,7 +775,8 @@ def test_income_statement(api_base: str, ticker: str = "NVO", year: int = 2024) 
         len(items_found) == len(EXPECTED_NOVO_INCOME_STATEMENT) and
         len(items_missing) == 0 and
         len(items_extra) == 0 and
-        order_correct
+        order_correct and
+        len(year_completeness_issues) == 0  # CRITICAL: All items must have data for all years
     )
     
     print(f"\n{'='*80}")
@@ -703,7 +796,9 @@ def test_income_statement(api_base: str, ticker: str = "NVO", year: int = 2024) 
         "null_order_items": null_order_items,
         "order_issues_in_response": order_issues_in_response,
         "total_items_expected": len(EXPECTED_NOVO_INCOME_STATEMENT),
-        "total_items_found": len(api_labels)
+        "total_items_found": len(api_labels),
+        "year_completeness_issues": year_completeness_issues,
+        "years_checked": years_to_check
     }
 
 
@@ -929,6 +1024,55 @@ def test_comprehensive_income(api_base: str, ticker: str = "NVO", year: int = 20
         for error in value_errors:
             print(f"   - {error['item']} ({error['year']}): expected {error['expected']}, got {error['actual']} (diff: {error['diff']})")
     
+    # CRITICAL: Check that ALL main items have data for ALL years (2024, 2023, 2022)
+    # The 2024 report contains ALL comparative data - every main item should have data for all years
+    print(f"\n{'='*80}")
+    print("YEAR COMPLETENESS CHECK (All Years Must Have Data)")
+    print(f"{'='*80}\n")
+    
+    years_to_check = data.get("years", [year, year - 1, year - 2])
+    year_completeness_issues = []
+    
+    # Check all found items for year completeness
+    # UNIVERSAL FIX: Exclude headers from completeness checks (headers don't have data)
+    # Also exclude items that are known headers by label (e.g., "Cash flow hedges")
+    header_labels = {"Cash flow hedges", "Other comprehensive income", "Items that will not be reclassified subsequently to the income statement", 
+                     "Items that will be reclassified subsequently to the income statement"}
+    
+    for item_info in items_found:
+        api_label = item_info["found"]
+        # Skip known headers
+        if api_label in header_labels:
+            continue
+            
+        if api_label in api_items_by_label:
+            api_items = api_items_by_label[api_label]
+            item_years = set()
+            for item in api_items:
+                # Skip headers - they don't have data
+                if item.get("is_header", False):
+                    continue
+                item_year = item.get("period_year")
+                if item_year and item.get("value") is not None:
+                    item_years.add(item_year)
+            
+            missing_years = set(years_to_check) - item_years
+            if missing_years:
+                year_completeness_issues.append({
+                    "item": api_label,
+                    "missing_years": sorted(missing_years),
+                    "has_years": sorted(item_years)
+                })
+    
+    if year_completeness_issues:
+        print(f"❌ Year Completeness Issues: {len(year_completeness_issues)} items missing data for some years")
+        for issue in year_completeness_issues[:20]:
+            print(f"   - {issue['item']}: missing years {issue['missing_years']} (has: {issue['has_years']})")
+        if len(year_completeness_issues) > 20:
+            print(f"   ... and {len(year_completeness_issues) - 20} more items")
+    else:
+        print(f"✅ Year Completeness: All items have data for all years ({years_to_check})")
+    
     # Overall result
     # Count non-empty expected items (spaces are visual separators, not data items)
     expected_non_empty = [x for x in EXPECTED_NOVO_COMPREHENSIVE_INCOME if x != ""]
@@ -936,7 +1080,8 @@ def test_comprehensive_income(api_base: str, ticker: str = "NVO", year: int = 20
         len(items_found) == len(expected_non_empty) and
         len(items_missing) == 0 and
         len(items_extra) == 0 and
-        len(value_errors) == 0
+        len(value_errors) == 0 and
+        len(year_completeness_issues) == 0  # CRITICAL: All items must have data for all years
     )
     
     print(f"\n{'='*80}")
@@ -954,7 +1099,9 @@ def test_comprehensive_income(api_base: str, ticker: str = "NVO", year: int = 20
         "value_errors": value_errors,
         "values_correct": len(value_errors) == 0,
         "total_items_expected": len([x for x in EXPECTED_NOVO_COMPREHENSIVE_INCOME if x != ""]),
-        "total_items_found": len(api_labels)
+        "total_items_found": len(api_labels),
+        "year_completeness_issues": year_completeness_issues,
+        "years_checked": years_to_check
     }
 
 
@@ -1118,6 +1265,16 @@ def test_balance_sheet(api_base: str, ticker: str = "NVO", year: int = 2024) -> 
     assets_found, assets_missing, assets_extra = check_items(EXPECTED_NOVO_BALANCE_SHEET_ASSETS, assets_labels, "Assets")
     liabilities_found, liabilities_missing, liabilities_extra = check_items(EXPECTED_NOVO_BALANCE_SHEET_LIABILITIES_EQUITY, liabilities_equity_labels, "Liabilities & Equity")
     
+    # Collect order issues for both sides
+    order_issues = []
+    for item_info in assets_found + liabilities_found:
+        if item_info["position_expected"] != item_info["position_actual"]:
+            order_issues.append({
+                "item": item_info["expected"],
+                "expected_position": item_info["position_expected"],
+                "actual_position": item_info["position_actual"]
+            })
+    
     print(f"ASSETS:")
     print(f"  ✅ Items Found: {len(assets_found)}/{len(EXPECTED_NOVO_BALANCE_SHEET_ASSETS)}")
     if assets_found:
@@ -1148,6 +1305,61 @@ def test_balance_sheet(api_base: str, ticker: str = "NVO", year: int = 2024) -> 
         for item in liabilities_extra[:10]:
             print(f"     - {item}")
     
+    if order_issues:
+        print(f"\n❌ Order Issues: {len(order_issues)}")
+        for issue in order_issues:
+            print(f"   - {issue['item']}: expected position {issue['expected_position']}, actual position {issue['actual_position']}")
+    
+    # CRITICAL: Check that ALL main items have data for ALL years (2024, 2023, 2022)
+    # The 2024 report contains ALL comparative data - every main item should have data for all years
+    print(f"\n{'='*80}")
+    print("YEAR COMPLETENESS CHECK (All Years Must Have Data)")
+    print(f"{'='*80}\n")
+    
+    years_to_check = data.get("years", [year, year - 1, year - 2])
+    year_completeness_issues = []
+    
+    # Check all found items for year completeness
+    # UNIVERSAL FIX: Headers should exist for all years (even with NULL values)
+    # Non-headers should have data values for all years
+    all_found_items = assets_items_with_order + liabilities_equity_items_with_order
+    for item_data in all_found_items:
+        item_years = set()
+        is_header = False
+        # Check if this is a header item
+        for item in item_data["items"]:
+            if item.get("is_header", False):
+                is_header = True
+                break
+        
+        for item in item_data["items"]:
+            item_year = item.get("period_year")
+            if item_year:
+                # For headers: existence is enough (value can be NULL)
+                # For non-headers: must have non-NULL value
+                if is_header:
+                    item_years.add(item_year)
+                elif item.get("value") is not None:
+                    item_years.add(item_year)
+        
+        missing_years = set(years_to_check) - item_years
+        if missing_years:
+            year_completeness_issues.append({
+                "item": item_data["humanized"],
+                "normalized": item_data["normalized"],
+                "missing_years": sorted(missing_years),
+                "has_years": sorted(item_years)
+            })
+    
+    if year_completeness_issues:
+        print(f"❌ Year Completeness Issues: {len(year_completeness_issues)} items missing data for some years")
+        for issue in year_completeness_issues[:20]:
+            print(f"   - {issue['item']}: missing years {issue['missing_years']} (has: {issue['has_years']})")
+        if len(year_completeness_issues) > 20:
+            print(f"   ... and {len(year_completeness_issues) - 20} more items")
+    else:
+        print(f"✅ Year Completeness: All items have data for all years ({years_to_check})")
+    
     # Overall result
     all_found = len(assets_found) + len(liabilities_found)
     all_expected = len(EXPECTED_NOVO_BALANCE_SHEET_ASSETS) + len(EXPECTED_NOVO_BALANCE_SHEET_LIABILITIES_EQUITY)
@@ -1159,7 +1371,8 @@ def test_balance_sheet(api_base: str, ticker: str = "NVO", year: int = 2024) -> 
         all_found == all_expected and
         all_missing == 0 and
         all_extra == 0 and
-        sides_correct
+        sides_correct and
+        len(year_completeness_issues) == 0  # CRITICAL: All items must have data for all years
     )
     
     print(f"\n{'='*80}")
@@ -1180,7 +1393,10 @@ def test_balance_sheet(api_base: str, ticker: str = "NVO", year: int = 2024) -> 
         "sides_correct": sides_correct,
         "items_without_side": len(items_without_side),
         "total_items_expected": all_expected,
-        "total_items_found": all_found
+        "total_items_found": all_found,
+        "year_completeness_issues": year_completeness_issues,
+        "years_checked": years_to_check,
+        "order_issues": order_issues  # Add order issues for aggregator
     }
 
 
@@ -1812,15 +2028,16 @@ def test_equity_statement(api_base: str, ticker: str = "NVO", year: int = 2024) 
         expected_label = expected_order[expected_idx]
         api_label = api_labels[api_idx] if api_idx < len(api_labels) else None
         
-        # Skip API spaces
-        if api_label == "":
-            api_idx += 1
-            continue
-        
         expected_norm = normalize_label_for_matching(expected_label) if expected_label else ""
         api_norm = normalize_label_for_matching(api_label) if api_label else ""
         
-        if expected_label == "":
+        # UNIVERSAL FIX: Handle spaces explicitly (both expected and API spaces)
+        if expected_label == "" and api_label == "":
+            # Both are spaces - match found, advance both indices
+            expected_idx += 1
+            api_idx += 1
+            continue
+        elif expected_label == "":
             # Expected space but got item - CRITICAL ERROR
             # This means ALL subsequent items will be out of position
             order_correct = False
@@ -1829,6 +2046,10 @@ def test_equity_statement(api_base: str, ticker: str = "NVO", year: int = 2024) 
             print(f"      This shifts ALL subsequent items by {space_offset} position(s)!")
             expected_idx += 1
             # DO NOT advance api_idx - check if current item matches next expected
+        elif api_label == "":
+            # Got space but expected item - extra space, skip it
+            api_idx += 1
+            continue
         elif expected_norm == api_norm:
             # Match found - check if position is correct
             expected_pos = expected_idx + 1
@@ -1842,17 +2063,21 @@ def test_equity_statement(api_base: str, ticker: str = "NVO", year: int = 2024) 
             })
             
             # Calculate expected position without spaces (API doesn't return spaces)
-            spaces_before = sum(1 for i in range(expected_idx) if expected_order[i] == "")
-            expected_pos_without_spaces = expected_pos - spaces_before
+            spaces_before_expected = sum(1 for i in range(expected_idx) if expected_order[i] == "")
+            expected_pos_without_spaces = expected_pos - spaces_before_expected
             
-            # Position should match when accounting for missing spaces
+            # Calculate actual position without spaces (count spaces in API response up to current item)
+            spaces_before_actual = sum(1 for i in range(api_idx) if api_labels[i] == "")
+            actual_pos_without_spaces = actual_pos - spaces_before_actual
+            
+            # Position should match when accounting for spaces in both expected and actual
             # Only report error if position doesn't match even after accounting for spaces
-            if actual_pos != expected_pos_without_spaces:
+            if actual_pos_without_spaces != expected_pos_without_spaces:
                 # This means item is truly out of order (not just shifted by missing spaces)
                 order_issues.append({
                     "item": expected_label,
-                    "expected_position": expected_pos,
-                    "actual_position": actual_pos
+                    "expected_position": expected_pos_without_spaces,
+                    "actual_position": actual_pos_without_spaces
                 })
                 order_correct = False
                 print(f"   ❌ OUT OF ORDER: '{expected_label}' - expected at position {expected_pos} (position {expected_pos_without_spaces} without spaces), found at {actual_pos}")
@@ -1914,6 +2139,7 @@ def test_equity_statement(api_base: str, ticker: str = "NVO", year: int = 2024) 
             items_extra.append(api_label)
     
     # Check values for found items
+    value_mismatches = []  # Collect value mismatches for return
     for item_info in items_found:
         expected_label = item_info["expected"]
         matching_item_data = next((item for item in api_items_with_order if item["humanized"] == item_info["found"]), None)
@@ -1958,7 +2184,14 @@ def test_equity_statement(api_base: str, ticker: str = "NVO", year: int = 2024) 
                         if expected_val is not None:
                             # Allow 1 million tolerance for rounding
                             if abs(val_millions - expected_val) > 1:
-                                print(f"   ⚠️  Value mismatch for {expected_label} {year_val}: expected {expected_val}, got {val_millions:.0f}")
+                                mismatch_msg = f"Value mismatch for {expected_label} {year_val}: expected {expected_val}, got {val_millions:.0f}"
+                                print(f"   ⚠️  {mismatch_msg}")
+                                value_mismatches.append({
+                                    'item': expected_label,
+                                    'year': year_val,
+                                    'expected': expected_val,
+                                    'actual': val_millions
+                                })
                 elif year_val in expected_values and expected_values[year_val] != 0:
                     print(f"   ⚠️  Missing value for {expected_label} {year_val}: expected {expected_values[year_val]}")
     
@@ -2053,7 +2286,8 @@ def test_equity_statement(api_base: str, ticker: str = "NVO", year: int = 2024) 
         "total_items_expected": len(expected_non_empty),
         "reporting_style": reporting_style,
         "total_items_found": len(api_labels),
-        "component_validation": validation_result
+        "component_validation": validation_result,
+        "value_mismatches": value_mismatches  # Return value mismatches for aggregator
     }
 
 
@@ -2062,7 +2296,7 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="Test FinSight API financial statements")
-    parser.add_argument("--api-base", default="http://localhost:3000/api/finsight", help="API base URL (default: Next.js proxy, same as website)")
+    parser.add_argument("--api-base", default="http://localhost:5001", help="API base URL (default: direct Flask API on port 5001)")
     parser.add_argument("--api-port", type=int, default=5001, help="API port (for starting API)")
     parser.add_argument("--ticker", default="NVO", help="Company ticker")
     parser.add_argument("--year", type=int, default=2024, help="Filing year")

@@ -103,6 +103,9 @@ CONCEPT_LABEL_MAP = {
     'TotalLiabilities': 'Total liabilities',
     
     # Equity Statement - Standard IFRS/US-GAAP terminology
+    # Space items: return empty string for visual spacing
+    'EquityStatementSpace1': '',  # Empty space for visual formatting
+    'EquityStatementSpace2': '',  # Empty space for visual formatting
     'BalanceAtBeginningOfYear': 'Balance at the beginning of the year',
     'EquityAtBeginningOfPeriod': 'Balance at the beginning of the year',
     'BalanceAtEndOfYear': 'Balance at the end of the year',
@@ -278,6 +281,10 @@ def get_humanized_label(concept_name: str, normalized_label: str = None, stateme
     """
     import re
     
+    # UNIVERSAL FIX: Handle space items first (industry standard: empty spaces for visual formatting)
+    if normalized_label and ('space' in normalized_label.lower() or 'equity_statement_space' in normalized_label):
+        return ''  # Empty string for visual spacing
+    
     if not concept_name:
         # Fallback to normalized_label
         if normalized_label:
@@ -294,14 +301,23 @@ def get_humanized_label(concept_name: str, normalized_label: str = None, stateme
             elif normalized_label == 'assets_header':
                 return 'Assets'
         
-        # Special case: 'CashAndCashEquivalents' in cash flow statement
-        # If it's in cash flow and appears at end of period, it's "Cash and cash equivalents at the end of the year"
-        if concept_name in ['CashAndCashEquivalents', 'CashAndEquivalents'] and statement_type == 'cash_flow':
+        # Special case: Cash equivalents in cash flow statement
+        # UNIVERSAL FIX: Map all cash equivalent concepts to "Cash and cash equivalents at the end of the year"
+        # when in cash flow statement (works for all companies)
+        cash_equiv_concepts = [
+            'CashAndCashEquivalents', 'CashAndEquivalents', 
+            'BalancesWithBanks', 'CashAtBank', 'CashAndDueFromBanks'
+        ]
+        if concept_name in cash_equiv_concepts and statement_type == 'cash_flow':
             if normalized_label and 'end' in normalized_label.lower():
                 return 'Cash and cash equivalents at the end of the year'
             elif normalized_label and 'beginning' in normalized_label.lower():
                 return 'Cash and cash equivalents at the beginning of the year'
+            # UNIVERSAL: For cash flow, if normalized_label is cash_and_equivalents and it's the last item,
+            # it's "Cash and cash equivalents at the end of the year"
             # Default for cash flow: assume end of year if no context
+            if normalized_label and normalized_label in ['cash_and_equivalents', 'cash_at_bank', 'balances_with_banks']:
+                return 'Cash and cash equivalents at the end of the year'
             return 'Cash and cash equivalents at the end of the year'
         
         return CONCEPT_LABEL_MAP[concept_name]

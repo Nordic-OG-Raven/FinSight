@@ -43,6 +43,7 @@ data/
 logs/
 *.log
 api/data/
+database/backup_*.sql
 
 # Testing
 .pytest_cache/
@@ -56,4 +57,7 @@ htmlcov/
 # Temporary files
 *.tmp
 temp/
+
+# Documentation
+GOFUCKYOURSELF.md
 

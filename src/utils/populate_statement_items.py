@@ -12,6 +12,7 @@ This is Approach 2 from STATEMENT_ORGANIZATION_STRATEGY.md
 """
 
 import sys
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 from sqlalchemy import create_engine, text
@@ -19,8 +20,10 @@ from config import DATABASE_URI
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+logger = logging.getLogger(__name__)
 
-def is_main_statement_item(role_uri: Optional[str], source: str, statement_type: str, normalized_label: Optional[str] = None) -> bool:
+
+def is_main_statement_item(role_uri: Optional[str], source: str, statement_type: str, normalized_label: Optional[str] = None, order_index: Optional[int] = None, concept_name: Optional[str] = None) -> bool:
     """
     Determine if a presentation hierarchy item is a main statement item (not detail/disclosure).
     
@@ -28,12 +31,41 @@ def is_main_statement_item(role_uri: Optional[str], source: str, statement_type:
         role_uri: XBRL role URI from presentation hierarchy
         source: 'xbrl' or 'standard'
         statement_type: 'income_statement', 'balance_sheet', etc.
+        normalized_label: Optional normalized label for additional filtering
+        order_index: Optional order index - items with order_index >= 1000 are typically disclosures
     
     Returns:
         True if this is a main statement item, False if it's a detail/disclosure
     """
-    # Standard templates are always main items
+    # UNIVERSAL FIX: Filter out disclosure items by order_index
+    # Items with order_index >= 1000 are typically disclosure items (notes, schedules, etc.)
+    # This works across all companies because XBRL uses high order_index values for disclosures
+    if order_index is not None and order_index >= 1000:
+        return False
+    
+    # UNIVERSAL FIX: Filter disclosure items by label patterns (works for all companies)
+    # These patterns indicate disclosure/note items that shouldn't be in main statements
+    label_lower = (normalized_label or '').lower()
+    concept_lower = (concept_name or '').lower()
+    combined_label = f"{label_lower} {concept_lower}"
+    
+    disclosure_patterns = [
+        'undiscounted cash flows', 'percent of', 'description of', 'number of',
+        'maximum borrowing capacity', 'not practicably determinable', 'recognised as of',
+        'transferred', 'carrying amount', 'fair value', 'discount rate',
+        'applied to', 'projections', 'indirect production costs', 'consequences of',
+        'granted each', 'outstanding in', 'as a percentage', 'other provisions',
+        'provisions for', 'provisions recognised', 'line of credit', 'shortterm borrowings'
+    ]
+    
+    if any(pattern in combined_label for pattern in disclosure_patterns):
+        return False
+    
+    # Standard templates are always main items (but still check for disclosure patterns)
     if source == 'standard':
+        # Even standard templates can have disclosure items - filter them out
+        if any(pattern in combined_label for pattern in disclosure_patterns):
+            return False
         return True
     
     # CRITICAL: For comprehensive_income, allow NULL role_uri (items routed from other statement types)
@@ -429,8 +461,11 @@ def compute_cash_flow_order(normalized_label: str) -> int:
         return 25
     
     # Cash and cash equivalents at the end of the year
+    # UNIVERSAL FIX: Handle all cash equivalent variants (works for all companies)
     # Handle both full label and shortened "cash_and_equivalents" (which is end-of-year cash)
-    if 'cash_and_cash_equivalents_at_the_end' in label_lower or (label_lower == 'cash_and_equivalents' and 'beginning' not in label_lower):
+    # Also handle bank-specific labels like "cash_at_bank", "balances_with_banks" in cash flow
+    if ('cash_and_cash_equivalents_at_the_end' in label_lower or 
+        (label_lower in ['cash_and_equivalents', 'cash_at_bank', 'balances_with_banks'] and 'beginning' not in label_lower)):
         return 26
     
     # Fallback: use a high number so unmapped items appear at the end
@@ -469,89 +504,538 @@ def compute_equity_order(normalized_label: str) -> int:
     if 'net_income' in label_lower or ('profit_loss' in label_lower and 'comprehensive' not in label_lower):
         return 1
     
+    # Space 1: After Net profit (synthetic, handled separately)
+    # Expected position: 3 (after Net profit at 1, before Other comprehensive income at 4)
+    # UNIVERSAL FIX: Handle both normalized_label variants (with and without underscore)
+    if 'equity_statement_space_1' in label_lower or 'equity_statement_space1' in label_lower:
+        return 3
+    
     # Other comprehensive income (must come before total)
     # Handle both "other_comprehensive_income" and "oci_total" patterns
+    # Expected position: 4 (after space at 3)
     if 'oci_total' in label_lower or ('other_comprehensive_income' in label_lower and 'total' not in label_lower and 'net_of_tax' not in label_lower):
-        return 2
+        return 4
     
     # Total comprehensive income
     # Handle both "total_comprehensive_income" and "comprehensive_income" (without "other" prefix)
+    # Expected position: 5 (after Other comprehensive income at 4)
     if 'total_comprehensive_income' in label_lower or (label_lower == 'comprehensive_income' and 'other' not in label_lower):
-        return 3
-    
-    # Transfer of cash flow hedge reserve to intangible assets
-    if 'amount_removed_from_reserve_of_cash_flow_hedges' in label_lower or ('transfer' in label_lower and 'cash_flow_hedge' in label_lower):
-        return 4
-    
-    # Transactions with owners (header) - synthetic, handled separately
-    if 'transactions_with_owners_header' in label_lower:
         return 5
     
-    # Dividends (first transaction item)
-    if 'dividends_paid' in label_lower or ('dividend' in label_lower and 'paid' in label_lower):
+    # Transfer of cash flow hedge reserve to intangible assets
+    # Expected position: 6 (after Total comprehensive income at 5)
+    if 'amount_removed_from_reserve_of_cash_flow_hedges' in label_lower or ('transfer' in label_lower and 'cash_flow_hedge' in label_lower):
         return 6
     
-    # Share-based payments (second transaction item)
-    if 'increase_decrease_through_sharebased_payment' in label_lower or ('sharebased_payment' in label_lower and 'tax' not in label_lower):
+    # Space 2: After Transfer of cash flow hedge reserve (synthetic, handled separately)
+    # Expected position: 7 (after Transfer at 6, before Transactions with owners at 8)
+    # UNIVERSAL FIX: Handle both normalized_label variants (with and without underscore)
+    if 'equity_statement_space_2' in label_lower or 'equity_statement_space2' in label_lower:
         return 7
     
-    # Purchase of treasury shares (third transaction item)
-    if 'purchase_of_treasury_shares' in label_lower or ('payments_to_acquire_or_redeem_entitys_shares' in label_lower):
+    # Transactions with owners (header) - synthetic, handled separately
+    # Expected position: 8 (after space at 7)
+    if 'transactions_with_owners_header' in label_lower:
         return 8
     
-    # Reduction of the B share capital (fourth transaction item)
-    if 'reduction_of_issued_capital' in label_lower or ('reduction' in label_lower and 'capital' in label_lower):
+    # Dividends (first transaction item)
+    # Expected position: 9 (after Transactions with owners header at 8)
+    if 'dividends_paid' in label_lower or ('dividend' in label_lower and 'paid' in label_lower):
         return 9
     
-    # Tax related to transactions with owners (last transaction item - must come after all others)
-    if 'decrease_increase_through_tax_on_sharebased' in label_lower or ('tax' in label_lower and 'sharebased' in label_lower and 'payment' in label_lower):
+    # Share-based payments (second transaction item)
+    # Expected position: 10 (after Dividends at 9)
+    if 'increase_decrease_through_sharebased_payment' in label_lower or ('sharebased_payment' in label_lower and 'tax' not in label_lower):
         return 10
     
-    # Balance at the end of the year
-    if 'balance' in label_lower and 'end' in label_lower:
+    # Purchase of treasury shares (third transaction item)
+    # Expected position: 11 (after Share-based payments at 10)
+    if 'purchase_of_treasury_shares' in label_lower or ('payments_to_acquire_or_redeem_entitys_shares' in label_lower):
         return 11
+    
+    # Reduction of the B share capital (fourth transaction item)
+    # Expected position: 12 (after Purchase of treasury shares at 11)
+    if 'reduction_of_issued_capital' in label_lower or ('reduction' in label_lower and 'capital' in label_lower):
+        return 12
+    
+    # Tax related to transactions with owners (last transaction item - must come after all others)
+    # Expected position: 13 (after Reduction at 12)
+    if 'decrease_increase_through_tax_on_sharebased' in label_lower or ('tax' in label_lower and 'sharebased' in label_lower and 'payment' in label_lower):
+        return 13
+    
+    # Balance at the end of the year
+    # Expected position: 14 (after Tax at 13)
+    if 'balance' in label_lower and 'end' in label_lower:
+        return 14
     
     # Fallback: use a high number so unmapped items appear at the end
     return 999
 
 
-def compute_display_order(order_index: int, normalized_label: str, statement_type: str, max_order_in_statement: Optional[int] = None) -> int:
+def infer_display_order_from_other_years(
+    conn, 
+    filing_id: int, 
+    concept_id: int, 
+    statement_type: str
+) -> Optional[int]:
     """
-    Compute display_order from order_index, handling special cases like EPS items.
+    Infer display_order from other filings of the same company where XBRL succeeded.
+    
+    Priority:
+    1. Most recent filing with valid order_index
+    2. Most common order_index across all years (if multiple exist)
+    3. None (fallback to standard templates)
+    
+    Args:
+        conn: Database connection
+        filing_id: Current filing ID (to exclude from search)
+        concept_id: Concept ID to find order for
+        statement_type: Statement type (income_statement, balance_sheet, etc.)
+    
+    Returns:
+        Inferred display_order or None if no valid orders found
+    """
+    query = text("""
+        WITH company_filings AS (
+            SELECT f2.filing_id, f2.fiscal_year_end
+            FROM dim_filings f1
+            JOIN dim_filings f2 ON f1.company_id = f2.company_id
+            WHERE f1.filing_id = :filing_id
+              AND f2.filing_id != :filing_id
+        ),
+        valid_orders AS (
+            SELECT si.display_order, COUNT(*) as count, MAX(cf.fiscal_year_end) as latest_year
+            FROM rel_statement_items si
+            JOIN company_filings cf ON si.filing_id = cf.filing_id
+            WHERE si.concept_id = :concept_id
+              AND si.statement_type = :statement_type
+              AND si.display_order IS NOT NULL
+              AND si.source = 'xbrl'  -- Only trust XBRL orders
+            GROUP BY si.display_order
+        )
+        SELECT display_order
+        FROM valid_orders
+        ORDER BY latest_year DESC, count DESC
+        LIMIT 1
+    """)
+    
+    try:
+        result = conn.execute(query, {
+            'filing_id': filing_id,
+            'concept_id': concept_id,
+            'statement_type': statement_type
+        })
+        row = result.fetchone()
+        if row:
+            logger.info(f"Inferred display_order={row[0]} for filing_id={filing_id}, concept_id={concept_id}, statement_type={statement_type} from other years")
+            return row[0]
+    except Exception as e:
+        logger.warning(f"Failed to infer display_order for filing_id={filing_id}, concept_id={concept_id}: {e}")
+    
+    return None
+
+
+def compute_display_order(
+    order_index: int, 
+    normalized_label: str, 
+    statement_type: str, 
+    max_order_in_statement: Optional[int] = None,
+    use_xbrl_order: bool = True  # NEW: Flag to enable/disable XBRL-first
+) -> int:
+    """
+    Compute display_order with XBRL-first approach.
+    
+    Priority:
+    1. XBRL order_index (if available and valid)
+    2. Standard templates (only when XBRL is broken/missing)
     
     Args:
         order_index: Original order_index from presentation hierarchy
         normalized_label: Normalized label of the concept
         statement_type: Statement type
         max_order_in_statement: Maximum order_index in the statement (for EPS positioning)
+        use_xbrl_order: If True, use XBRL order_index as primary source (default: True)
     
     Returns:
         Corrected display_order
     """
     label_lower = normalized_label.lower()
     
-    # For comprehensive income, use standard IFRS ordering (UNIVERSAL)
+    # PRIMARY: Use XBRL order if available and valid
+    if use_xbrl_order and order_index is not None and order_index < 1000:
+        # Only apply minimal corrections (e.g., EPS positioning)
+        if statement_type == 'income_statement' and 'earnings' in label_lower and 'share' in label_lower:
+            # EPS items: place after net profit (minimal correction)
+            if max_order_in_statement is not None:
+                return max_order_in_statement + 2 + order_index
+            else:
+                # Fallback: use fixed offset (net income typically at 13, so header at 14, basic at 15, diluted at 16)
+                return 15 + order_index
+        
+        # CRITICAL FIX: Cash flow tie-breaker - Net profit must come before Income taxes
+        # When both have XBRL order_index = 1, use template order as tie-breaker
+        if statement_type == 'cash_flow' and order_index == 1:
+            if 'net_income' in label_lower or 'net_profit' in label_lower or 'profit_loss' in label_lower:
+                return 1.0  # Net profit at exactly 1.0
+            elif 'adjustments_for_income_tax' in label_lower or ('income_tax' in label_lower and 'adjustment' in label_lower):
+                return 1.01  # Income taxes slightly after (1.01) so it comes after Net profit (1.0)
+        
+        return order_index  # Use XBRL order directly
+    
+    # FALLBACK: Use standard templates only when XBRL is broken/missing
     if statement_type == 'comprehensive_income':
         return compute_comprehensive_income_order(normalized_label)
-    
-    # For cash flow, use standard IFRS/US-GAAP ordering (UNIVERSAL)
     if statement_type == 'cash_flow':
         return compute_cash_flow_order(normalized_label)
-    
-    # For equity statement, use standard IFRS/US-GAAP ordering (UNIVERSAL)
     if statement_type == 'equity_statement':
         return compute_equity_order(normalized_label)
     
-    # For income statement, EPS items should appear after net profit (order 13)
-    # If we know the max order, place EPS items after it
-    if statement_type == 'income_statement':
-        if 'earnings' in label_lower and 'share' in label_lower:
-            # EPS items: push to end (after net income which is typically order 13)
-            # Use 15 + order_index to ensure they come after net income (13) and header (14)
-            # This way: basic_eps (order 1) -> display_order 15, diluted_eps (order 2) -> display_order 16
-            return 15 + order_index
+    return 999  # Unmapped items
+
+
+def populate_templates_from_items(conn, filing_id: Optional[int], items: List[Dict]):
+    """
+    Populate dim_statement_templates and rel_statement_overrides from rel_statement_items.
     
-    return order_index
+    This function:
+    1. Checks if items match existing templates (standard items)
+    2. Creates templates for common items (if not exists)
+    3. Creates overrides for custom items (filing-specific)
+    
+    Args:
+        conn: Database connection
+        filing_id: Filing ID (if None, skip override population)
+        items: List of statement items from populate_statement_items
+    """
+    if not items or filing_id is None:
+        return
+    
+    # Get company accounting standard to determine format_type
+    company_query = text("""
+        SELECT c.accounting_standard
+        FROM dim_filings f
+        JOIN dim_companies c ON f.company_id = c.company_id
+        WHERE f.filing_id = :filing_id
+    """)
+    result = conn.execute(company_query, {"filing_id": filing_id})
+    row = result.fetchone()
+    if not row:
+        return
+    
+    accounting_standard = row[0] or 'US-GAAP'
+    format_type = 'ifrs' if accounting_standard == 'IFRS' else 'us_gaap' if accounting_standard == 'US-GAAP' else 'standard'
+    
+    # Get concept info for items
+    concept_ids = [item['concept_id'] for item in items if item.get('concept_id')]
+    if not concept_ids:
+        return
+    
+    concept_query = text("""
+        SELECT concept_id, normalized_label, preferred_label
+        FROM dim_concepts
+        WHERE concept_id = ANY(:concept_ids)
+    """)
+    concept_result = conn.execute(concept_query, {"concept_ids": concept_ids})
+    concepts = {row[0]: {'normalized_label': row[1], 'preferred_label': row[2]} for row in concept_result}
+    
+    # Process each item
+    for item in items:
+        concept_id = item.get('concept_id')
+        if not concept_id:
+            continue
+        
+        concept_info = concepts.get(concept_id, {})
+        normalized_label = concept_info.get('normalized_label')
+        preferred_label = concept_info.get('preferred_label')
+        statement_type = item.get('statement_type')
+        display_order = item.get('display_order')
+        is_header = item.get('is_header', False)
+        side = item.get('side')
+        
+        if not statement_type or display_order is None:
+            continue
+        
+        # Determine item_label
+        item_label = preferred_label or normalized_label or ('Header' if is_header else 'Item')
+        
+        # Check if template exists for this (statement_type, format_type, item_order)
+        template_check = text("""
+            SELECT template_id FROM dim_statement_templates
+            WHERE statement_type = :statement_type
+              AND format_type = :format_type
+              AND item_order = :item_order
+        """)
+        template_result = conn.execute(template_check, {
+            "statement_type": statement_type,
+            "format_type": format_type,
+            "item_order": display_order
+        })
+        template_row = template_result.fetchone()
+        
+        if template_row:
+            # Template exists - check if we need an override
+            template_id = template_row[0]
+            
+            # Check if override already exists
+            override_check = text("""
+                SELECT override_id FROM rel_statement_overrides
+                WHERE filing_id = :filing_id AND item_order = :item_order
+            """)
+            override_result = conn.execute(override_check, {
+                "filing_id": filing_id,
+                "item_order": display_order
+            })
+            
+            if not override_result.fetchone():
+                # Create override if item differs from template or is custom
+                # For now, only create override if item_label differs significantly
+                # (This is a simple heuristic - can be enhanced)
+                try:
+                    conn.execute(text("""
+                        INSERT INTO rel_statement_overrides (
+                            filing_id, template_id, item_order, item_label,
+                            normalized_label, is_header, is_spacer, side, is_custom
+                        ) VALUES (
+                            :filing_id, :template_id, :item_order, :item_label,
+                            :normalized_label, :is_header, FALSE, :side, FALSE
+                        )
+                        ON CONFLICT (filing_id, item_order) DO NOTHING
+                    """), {
+                        "filing_id": filing_id,
+                        "template_id": template_id,
+                        "item_order": display_order,
+                        "item_label": item_label,
+                        "normalized_label": normalized_label,
+                        "is_header": is_header,
+                        "side": side
+                    })
+                except Exception:
+                    # Table might not exist - skip silently
+                    pass
+        else:
+            # No template exists - could create one, but for now just create override
+            # (Templates should be populated via migration script for canonical items)
+            try:
+                conn.execute(text("""
+                    INSERT INTO rel_statement_overrides (
+                        filing_id, template_id, item_order, item_label,
+                        normalized_label, is_header, is_spacer, side, is_custom
+                    ) VALUES (
+                        :filing_id, NULL, :item_order, :item_label,
+                        :normalized_label, :is_header, FALSE, :side, TRUE
+                    )
+                    ON CONFLICT (filing_id, item_order) DO NOTHING
+                """), {
+                    "filing_id": filing_id,
+                    "item_order": display_order,
+                    "item_label": item_label,
+                    "normalized_label": normalized_label,
+                    "is_header": is_header,
+                    "side": side
+                })
+            except Exception:
+                # Table might not exist - skip silently
+                pass
+    
+    conn.commit()
+
+
+def detect_xbrl_label_role_headers(
+    conn,
+    filing_id: int,
+    statement_type: str
+) -> List[Dict]:
+    """
+    Detect headers from XBRL label roles.
+    
+    A concept is a header if:
+    1. It has label_role='documentation' in dim_concepts
+    2. It's in rel_presentation_hierarchy for this statement
+    3. It has no facts (or all facts are NULL)
+    
+    Returns:
+        List of header items with concept_id, display_order, header_source='xbrl_label_role'
+    """
+    documentation_role = "http://www.xbrl.org/2003/role/documentation"
+    
+    query = text("""
+        WITH concepts_with_documentation_role AS (
+            SELECT 
+                co.concept_id,
+                co.normalized_label,
+                co.preferred_label
+            FROM dim_concepts co
+            WHERE co.label_role = :documentation_role
+        ),
+        concepts_in_presentation AS (
+            SELECT DISTINCT
+                ph.child_concept_id as concept_id,
+                MIN(ph.order_index) as min_order_index
+            FROM rel_presentation_hierarchy ph
+            WHERE ph.filing_id = :filing_id
+              AND ph.statement_type = :statement_type
+            GROUP BY ph.child_concept_id
+        ),
+        concepts_without_facts AS (
+            SELECT 
+                cpr.concept_id,
+                cpr.min_order_index
+            FROM concepts_in_presentation cpr
+            JOIN concepts_with_documentation_role cdr ON cpr.concept_id = cdr.concept_id
+            WHERE NOT EXISTS (
+                SELECT 1 
+                FROM fact_financial_metrics fm
+                WHERE fm.filing_id = :filing_id
+                  AND fm.concept_id = cpr.concept_id
+                  AND fm.dimension_id IS NULL
+                  AND fm.value_numeric IS NOT NULL
+            )
+        )
+        SELECT 
+            cwf.concept_id,
+            CASE 
+                -- Position headers BEFORE their children to avoid conflicts
+                -- Use min_order_index - 0.5 to place header before first child
+                WHEN cwf.min_order_index > 0 THEN cwf.min_order_index - 0.5
+                ELSE 0  -- If children start at 0, header goes at -0.5 (will be adjusted to 0)
+            END as display_order,
+            co.normalized_label,
+            co.preferred_label
+        FROM concepts_without_facts cwf
+        JOIN dim_concepts co ON cwf.concept_id = co.concept_id
+        WHERE NOT EXISTS (
+            -- Exclude if already in rel_statement_items (avoid duplicates)
+            SELECT 1 FROM rel_statement_items si
+            WHERE si.filing_id = :filing_id
+              AND si.concept_id = cwf.concept_id
+              AND si.statement_type = :statement_type
+        )
+        ORDER BY cwf.min_order_index
+    """)
+    
+    try:
+        result = conn.execute(query, {
+            'filing_id': filing_id,
+            'statement_type': statement_type,
+            'documentation_role': documentation_role
+        })
+        headers = []
+        for row in result.fetchall():
+            headers.append({
+                'concept_id': row[0],
+                'display_order': row[1],
+                'normalized_label': row[2],
+                'preferred_label': row[3]
+            })
+        
+        if headers:
+            logger.info(f"Detected {len(headers)} XBRL label role headers for filing_id={filing_id}, statement_type={statement_type}")
+        
+        return headers
+    except Exception as e:
+        logger.warning(f"Failed to detect XBRL label role headers for filing_id={filing_id}, statement_type={statement_type}: {e}")
+        return []
+
+
+def detect_xbrl_parent_headers(
+    conn,
+    filing_id: int,
+    statement_type: str
+) -> List[Dict]:
+    """
+    Detect headers from XBRL parent-child relationships.
+    
+    A parent concept is a header if:
+    1. It has children in rel_presentation_hierarchy
+    2. It has no facts in fact_financial_metrics (or all facts are NULL)
+    3. It's in the same statement_type
+    
+    Returns:
+        List of header items with concept_id, display_order, header_source='xbrl_parent'
+    """
+    query = text("""
+        WITH parent_concepts AS (
+            SELECT DISTINCT ph.parent_concept_id, ph.filing_id, ph.statement_type
+            FROM rel_presentation_hierarchy ph
+            WHERE ph.filing_id = :filing_id
+              AND ph.statement_type = :statement_type
+              AND ph.parent_concept_id IS NOT NULL
+        ),
+        parents_with_children AS (
+            SELECT 
+                pc.parent_concept_id,
+                pc.filing_id,
+                pc.statement_type,
+                MIN(ph.order_index) as min_order_index  -- Use minimum order_index of children as header position
+            FROM parent_concepts pc
+            JOIN rel_presentation_hierarchy ph ON 
+                ph.filing_id = pc.filing_id
+                AND ph.parent_concept_id = pc.parent_concept_id
+                AND ph.statement_type = pc.statement_type
+            GROUP BY pc.parent_concept_id, pc.filing_id, pc.statement_type
+            HAVING COUNT(ph.child_concept_id) > 0  -- Must have at least one child
+        ),
+        parents_without_facts AS (
+            SELECT 
+                pwc.parent_concept_id,
+                pwc.filing_id,
+                pwc.statement_type,
+                pwc.min_order_index
+            FROM parents_with_children pwc
+            WHERE NOT EXISTS (
+                SELECT 1 
+                FROM fact_financial_metrics fm
+                WHERE fm.filing_id = pwc.filing_id
+                  AND fm.concept_id = pwc.parent_concept_id
+                  AND fm.dimension_id IS NULL
+                  AND fm.value_numeric IS NOT NULL
+            )
+        )
+        SELECT 
+            pwf.parent_concept_id as concept_id,
+            CASE 
+                -- Position headers BEFORE their children to avoid conflicts
+                -- Use min_order_index - 0.5 to place header before first child
+                WHEN pwf.min_order_index > 0 THEN pwf.min_order_index - 0.5
+                ELSE 0  -- If children start at 0, header goes at -0.5 (will be adjusted to 0)
+            END as display_order,
+            co.normalized_label,
+            co.preferred_label,
+            co.is_abstract
+        FROM parents_without_facts pwf
+        JOIN dim_concepts co ON pwf.parent_concept_id = co.concept_id
+        WHERE NOT EXISTS (
+            -- Exclude if already in rel_statement_items (avoid duplicates)
+            SELECT 1 FROM rel_statement_items si
+            WHERE si.filing_id = pwf.filing_id
+              AND si.concept_id = pwf.parent_concept_id
+              AND si.statement_type = pwf.statement_type
+        )
+        ORDER BY pwf.min_order_index
+    """)
+    
+    try:
+        result = conn.execute(query, {
+            'filing_id': filing_id,
+            'statement_type': statement_type
+        })
+        headers = []
+        for row in result.fetchall():
+            headers.append({
+                'concept_id': row[0],
+                'display_order': row[1],
+                'normalized_label': row[2],
+                'preferred_label': row[3],
+                'is_abstract': row[4]
+            })
+        
+        if headers:
+            logger.info(f"Detected {len(headers)} XBRL parent headers for filing_id={filing_id}, statement_type={statement_type}")
+        
+        return headers
+    except Exception as e:
+        logger.warning(f"Failed to detect XBRL parent headers for filing_id={filing_id}, statement_type={statement_type}: {e}")
+        return []
 
 
 def populate_statement_items(filing_id: Optional[int] = None):
@@ -595,14 +1079,28 @@ def populate_statement_items(filing_id: Optional[int] = None):
                 JOIN dim_concepts co ON ph.child_concept_id = co.concept_id
                 WHERE ph.filing_id = :filing_id
                 AND ph.order_index IS NOT NULL
+                AND ph.order_index < 1000  -- UNIVERSAL: Exclude disclosure items (order_index >= 1000)
                 ORDER BY ph.child_concept_id, ph.statement_type,
                     CASE 
                         -- For income_statement: prioritize main income statement role_uri (case-insensitive)
                         WHEN ph.statement_type = 'income_statement' AND LOWER(ph.role_uri) LIKE '%incomestatementandstatement%' AND LOWER(ph.role_uri) NOT LIKE '%segment%' AND LOWER(ph.role_uri) NOT LIKE '%detail%' AND LOWER(ph.role_uri) NOT LIKE '%disclosure%' THEN 1
                         WHEN ph.statement_type = 'income_statement' AND LOWER(ph.role_uri) LIKE '%incomestatement%' AND LOWER(ph.role_uri) NOT LIKE '%segment%' AND LOWER(ph.role_uri) NOT LIKE '%detail%' AND LOWER(ph.role_uri) NOT LIKE '%disclosure%' THEN 2
+                        
+                        -- For cash_flow: prioritize main cash flow statement role_uri (case-insensitive)
+                        WHEN ph.statement_type = 'cash_flow' AND LOWER(ph.role_uri) LIKE '%statementofcashflows%' AND LOWER(ph.role_uri) NOT LIKE '%segment%' AND LOWER(ph.role_uri) NOT LIKE '%detail%' AND LOWER(ph.role_uri) NOT LIKE '%disclosure%' AND LOWER(ph.role_uri) NOT LIKE '%reconciliation%' THEN 1
+                        WHEN ph.statement_type = 'cash_flow' AND LOWER(ph.role_uri) LIKE '%cashflow%' AND LOWER(ph.role_uri) NOT LIKE '%segment%' AND LOWER(ph.role_uri) NOT LIKE '%detail%' AND LOWER(ph.role_uri) NOT LIKE '%disclosure%' AND LOWER(ph.role_uri) NOT LIKE '%reconciliation%' THEN 2
+                        
+                        -- For balance_sheet: prioritize main balance sheet role_uri (case-insensitive)
+                        WHEN ph.statement_type = 'balance_sheet' AND (LOWER(ph.role_uri) LIKE '%balancesheet%' OR LOWER(ph.role_uri) LIKE '%statementoffinancialposition%') AND LOWER(ph.role_uri) NOT LIKE '%segment%' AND LOWER(ph.role_uri) NOT LIKE '%detail%' AND LOWER(ph.role_uri) NOT LIKE '%disclosure%' THEN 1
+                        
+                        -- For equity_statement: prioritize main equity statement role_uri (case-insensitive)
+                        WHEN ph.statement_type = 'equity_statement' AND (LOWER(ph.role_uri) LIKE '%equitystatement%' OR LOWER(ph.role_uri) LIKE '%statementofchangesinequity%' OR LOWER(ph.role_uri) LIKE '%changesinequity%') AND LOWER(ph.role_uri) NOT LIKE '%segment%' AND LOWER(ph.role_uri) NOT LIKE '%detail%' AND LOWER(ph.role_uri) NOT LIKE '%disclosure%' THEN 1
+                        
                         -- For comprehensive_income: prioritize comprehensive income role_uri (case-insensitive)
                         WHEN LOWER(ph.role_uri) LIKE '%statementofcomprehensiveincome%' THEN 3
                         WHEN LOWER(ph.role_uri) LIKE '%incomestatementandstatement%' THEN 4
+                        
+                        -- Generic fallback: any role_uri that's not detail/disclosure/segment (lowest priority)
                         WHEN ph.role_uri IS NOT NULL AND LOWER(ph.role_uri) NOT LIKE '%segment%' AND LOWER(ph.role_uri) NOT LIKE '%detail%' AND LOWER(ph.role_uri) NOT LIKE '%disclosure%' THEN 5
                         WHEN ph.role_uri IS NOT NULL THEN 6
                         ELSE 7
@@ -633,6 +1131,7 @@ def populate_statement_items(filing_id: Optional[int] = None):
                 FROM rel_presentation_hierarchy ph
                 JOIN dim_concepts co ON ph.child_concept_id = co.concept_id
                 WHERE ph.order_index IS NOT NULL
+                AND ph.order_index < 1000  -- UNIVERSAL: Exclude disclosure items (order_index >= 1000)
                 ORDER BY ph.filing_id, ph.child_concept_id, ph.statement_type,
                     CASE 
                         -- For income_statement: prioritize main income statement role_uri (case-insensitive)
@@ -682,10 +1181,22 @@ def populate_statement_items(filing_id: Optional[int] = None):
                 if normalized_label and ('earnings' in normalized_label.lower() and 'share' in normalized_label.lower()):
                     eps_concepts_by_statement[key].append(concept_id)
         
+        # Get all concept_names in one query for efficiency
+        concept_ids_list = [row[2] for row in rows]  # concept_id is at index 2
+        concept_names_map = {}
+        if concept_ids_list:
+            concept_names_query = text("""
+                SELECT concept_id, concept_name FROM dim_concepts 
+                WHERE concept_id = ANY(:concept_ids)
+            """)
+            concept_names_result = conn.execute(concept_names_query, {'concept_ids': concept_ids_list})
+            concept_names_map = {row[0]: row[1] for row in concept_names_result}
+        
         # Process each item
         items_to_insert = []
         for row in rows:
             pres_id, filing_id_val, concept_id, stmt_type, order_idx, role_uri, source, normalized_label = row
+            concept_name_val = concept_names_map.get(concept_id)
             
             # CRITICAL: Only use standard templates if XBRL data doesn't exist for this filing/statement_type
             if source == 'standard':
@@ -724,7 +1235,7 @@ def populate_statement_items(filing_id: Optional[int] = None):
                     stmt_type = 'comprehensive_income'
             
             # Check if this is a main statement item
-            is_main = is_main_statement_item(role_uri, source or 'xbrl', stmt_type or 'other', normalized_label)
+            is_main = is_main_statement_item(role_uri, source or 'xbrl', stmt_type or 'other', normalized_label, order_idx, concept_name_val)
             
             if not is_main:
                 continue  # Skip detail/disclosure items
@@ -739,16 +1250,46 @@ def populate_statement_items(filing_id: Optional[int] = None):
                 if role_uri and any(pattern in role_uri.lower() for pattern in ['detail', 'disclosure', 'reconciliation', 'note', 'schedule']):
                     continue  # Skip detail items from standard templates
             
+            # UNIVERSAL FIX: Filter disclosure items by label patterns BEFORE adding to items_to_insert
+            # This prevents disclosure items from appearing in main statements
+            label_lower = (normalized_label or '').lower()
+            concept_lower = (concept_name_val or '').lower() if concept_name_val else ''
+            combined_label = f"{label_lower} {concept_lower}"
+            
+            disclosure_patterns = [
+                'undiscounted cash flows', 'percent of', 'description of', 'number of',
+                'maximum borrowing capacity', 'not practicably determinable', 'recognised as of',
+                'transferred', 'carrying amount', 'fair value', 'discount rate',
+                'applied to', 'projections', 'indirect production costs', 'consequences of',
+                'granted each', 'outstanding in', 'as a percentage', 'other provisions',
+                'provisions for', 'provisions recognised', 'line of credit', 'shortterm borrowings'
+            ]
+            
+            if any(pattern in combined_label for pattern in disclosure_patterns):
+                continue  # Skip disclosure items
+            
             # Compute display_order
             # For XBRL items: use order_index directly (EPS items handled separately)
             # For standard items: use large offset to ensure they come after XBRL items
+            inferred_order = False
             if source == 'xbrl':
                 max_order = xbrl_items_by_statement.get((filing_id_val, stmt_type), None)
-                display_order = compute_display_order(order_idx, normalized_label or '', stmt_type or 'other', max_order)
-                
-                # CRITICAL: For comprehensive_income, use standard IFRS ordering
-                # This is handled by compute_display_order() which calls compute_comprehensive_income_order()
-                # No additional adjustment needed here
+                # Check if order_idx is NULL (XBRL extraction failed for this item)
+                if order_idx is None:
+                    # Try to infer from other years
+                    inferred_display_order = infer_display_order_from_other_years(
+                        conn, filing_id_val, concept_id, stmt_type or 'other'
+                    )
+                    if inferred_display_order is not None:
+                        display_order = inferred_display_order
+                        inferred_order = True
+                    else:
+                        # Fallback to standard templates
+                        display_order = compute_display_order(999, normalized_label or '', stmt_type or 'other', max_order, use_xbrl_order=False)
+                        logger.info(f"Using standard template for display_order: filing_id={filing_id}, concept_id={concept_id}, statement_type={stmt_type}, normalized_label={normalized_label}")
+                else:
+                    display_order = compute_display_order(order_idx, normalized_label or '', stmt_type or 'other', max_order, use_xbrl_order=True)
+                    logger.debug(f"Using XBRL order_index={order_idx} for filing_id={filing_id}, concept_id={concept_id}, statement_type={stmt_type}")
             else:
                 # Standard template items: use order_index + large offset
                 display_order = 10000 + order_idx
@@ -803,10 +1344,296 @@ def populate_statement_items(filing_id: Optional[int] = None):
                 'is_main_item': True,
                 'role_uri': role_uri,
                 'source': source or 'xbrl',
-                'side': side  # For balance sheet: 'assets' or 'liabilities_equity'
+                'side': side,  # For balance sheet: 'assets' or 'liabilities_equity'
+                'inferred_order': inferred_order,  # TRUE if order was inferred from other years
+                'header_source': None  # Not a header (or will be set later for headers)
             })
         
-        # Second pass: Add "Net profit" to comprehensive income (references income statement)
+        # Second pass: Detect XBRL parent-child headers (PRIMARY SOURCE)
+        # This should run BEFORE synthetic header creation to avoid duplicates
+        filing_ids = set(item['filing_id'] for item in items_to_insert)
+        statement_types = ['income_statement', 'balance_sheet', 'cash_flow', 'comprehensive_income', 'equity_statement']
+        
+        for filing_id_val in filing_ids:
+            for stmt_type in statement_types:
+                # Check if we have items for this statement type
+                has_items = any(
+                    item['filing_id'] == filing_id_val and item['statement_type'] == stmt_type
+                    for item in items_to_insert
+                )
+                if has_items:
+                    # Detect XBRL parent headers
+                    xbrl_headers = detect_xbrl_parent_headers(conn, filing_id_val, stmt_type)
+                    for header in xbrl_headers:
+                        # Check if header already exists (avoid duplicates)
+                        header_exists = any(
+                            item['filing_id'] == filing_id_val
+                            and item['concept_id'] == header['concept_id']
+                            and item['statement_type'] == stmt_type
+                            for item in items_to_insert
+                        )
+                        if not header_exists:
+                            # Determine side for balance sheet
+                            side = None
+                            display_order = header['display_order']
+                            
+                            if stmt_type == 'balance_sheet':
+                                side = determine_balance_sheet_side(header.get('normalized_label', '') or '', '')
+                                # Special handling for balance sheet section headers
+                                # "Assets" and "Equity and liabilities" should be at position 0.0 for their sides
+                                # Other headers preserve their decimal values (e.g., 0.5) from SQL query
+                                normalized_label_lower = (header.get('normalized_label', '') or '').lower()
+                                if 'asset' in normalized_label_lower and side == 'assets':
+                                    display_order = 0.0  # Assets header at position 0.0
+                                elif ('equity' in normalized_label_lower or 'liabilit' in normalized_label_lower) and side == 'liabilities_equity':
+                                    display_order = 0.0  # Equity and liabilities header at position 0.0
+                                # For all other headers, preserve the decimal value from SQL query (already set above)
+                            
+                            items_to_insert.append({
+                                'filing_id': filing_id_val,
+                                'concept_id': header['concept_id'],
+                                'statement_type': stmt_type,
+                                'display_order': display_order,
+                                'is_header': True,
+                                'is_main_item': True,
+                                'role_uri': None,  # Headers don't have role_uri
+                                'source': 'xbrl',
+                                'side': side,
+                                'inferred_order': False,
+                                'header_source': 'xbrl_parent'  # Track source
+                            })
+        
+        # Third pass: Detect XBRL label role headers (SECONDARY SOURCE)
+        # This runs after XBRL parent headers to fill in any gaps
+        for filing_id_val in filing_ids:
+            for stmt_type in statement_types:
+                # Check if we have items for this statement type
+                has_items = any(
+                    item['filing_id'] == filing_id_val and item['statement_type'] == stmt_type
+                    for item in items_to_insert
+                )
+                if has_items:
+                    # Detect XBRL label role headers
+                    label_role_headers = detect_xbrl_label_role_headers(conn, filing_id_val, stmt_type)
+                    for header in label_role_headers:
+                        # Check if header already exists (avoid duplicates)
+                        header_exists = any(
+                            item['filing_id'] == filing_id_val
+                            and item['concept_id'] == header['concept_id']
+                            and item['statement_type'] == stmt_type
+                            for item in items_to_insert
+                        )
+                        if not header_exists:
+                            # Determine side for balance sheet
+                            side = None
+                            display_order = header['display_order']
+                            
+                            if stmt_type == 'balance_sheet':
+                                side = determine_balance_sheet_side(header.get('normalized_label', '') or '', '')
+                                # Special handling for balance sheet section headers
+                                # "Assets" and "Equity and liabilities" should be at position 0.0 for their sides
+                                # Other headers preserve their decimal values (e.g., 0.5) from SQL query
+                                normalized_label_lower = (header.get('normalized_label', '') or '').lower()
+                                if 'asset' in normalized_label_lower and side == 'assets':
+                                    display_order = 0.0  # Assets header at position 0.0
+                                elif ('equity' in normalized_label_lower or 'liabilit' in normalized_label_lower) and side == 'liabilities_equity':
+                                    display_order = 0.0  # Equity and liabilities header at position 0.0
+                                # For all other headers, preserve the decimal value from SQL query (already set above)
+                            
+                            items_to_insert.append({
+                                'filing_id': filing_id_val,
+                                'concept_id': header['concept_id'],
+                                'statement_type': stmt_type,
+                                'display_order': display_order,
+                                'is_header': True,
+                                'is_main_item': True,
+                                'role_uri': None,  # Headers don't have role_uri
+                                'source': 'xbrl',
+                                'side': side,
+                                'inferred_order': False,
+                                'header_source': 'xbrl_label_role'  # Track source
+                            })
+        
+        # Fourth pass: Apply standard template headers (TERTIARY SOURCE)
+        # Only used when XBRL doesn't provide headers
+        from src.utils.header_templates import get_template_headers, should_apply_template_header
+        
+        for filing_id_val in filing_ids:
+            # Get accounting standard for this filing
+            accounting_standard_query = text("""
+                SELECT c.accounting_standard
+                FROM dim_filings f
+                JOIN dim_companies c ON f.company_id = c.company_id
+                WHERE f.filing_id = :filing_id
+            """)
+            standard_result = conn.execute(accounting_standard_query, {"filing_id": filing_id_val})
+            standard_row = standard_result.fetchone()
+            accounting_standard = standard_row[0] if standard_row and standard_row[0] else 'us_gaap'
+            
+            for stmt_type in statement_types:
+                # Check if we have items for this statement type
+                existing_items = [
+                    item for item in items_to_insert
+                    if item['filing_id'] == filing_id_val and item['statement_type'] == stmt_type
+                ]
+                
+                if not existing_items:
+                    continue
+                
+                # Get template headers for this statement type
+                template_headers = get_template_headers(stmt_type, accounting_standard)
+                
+                # Build concept_id -> normalized_label mapping for existing items
+                concept_ids = [item['concept_id'] for item in existing_items]
+                if concept_ids:
+                    concept_label_query = text("""
+                        SELECT concept_id, normalized_label
+                        FROM dim_concepts
+                        WHERE concept_id = ANY(:concept_ids)
+                    """)
+                    label_result = conn.execute(concept_label_query, {"concept_ids": concept_ids})
+                    concept_labels = {row[0]: row[1] for row in label_result.fetchall()}
+                else:
+                    concept_labels = {}
+                
+                # Apply template headers if needed
+                for template_header in template_headers:
+                    if should_apply_template_header(template_header, existing_items, concept_labels):
+                        # Check if header concept exists, create if not
+                        header_concept_query = text("""
+                            SELECT concept_id FROM dim_concepts
+                            WHERE normalized_label = :normalized_label
+                            LIMIT 1
+                        """)
+                        header_result = conn.execute(header_concept_query, {
+                            "normalized_label": template_header['normalized_label']
+                        })
+                        header_row = header_result.fetchone()
+                        
+                        if not header_row:
+                            # Create header concept
+                            create_header_query = text("""
+                                INSERT INTO dim_concepts (
+                                    concept_name, taxonomy, normalized_label, concept_type,
+                                    balance_type, period_type, data_type, is_abstract, 
+                                    statement_type, preferred_label
+                                ) VALUES (
+                                    :concept_name, 'synthetic', :normalized_label, 'string',
+                                    NULL, 'duration', 'string', TRUE, :statement_type, :preferred_label
+                                )
+                                RETURNING concept_id
+                            """)
+                            concept_name = template_header['normalized_label'].replace('_', ' ').title().replace(' ', '')
+                            create_result = conn.execute(create_header_query, {
+                                "concept_name": concept_name,
+                                "normalized_label": template_header['normalized_label'],
+                                "statement_type": stmt_type,
+                                "preferred_label": template_header['preferred_label']
+                            })
+                            header_concept_id = create_result.fetchone()[0]
+                            conn.commit()
+                        else:
+                            header_concept_id = header_row[0]
+                        
+                        # Check if header already in items_to_insert
+                        header_exists = any(
+                            item['filing_id'] == filing_id_val
+                            and item['concept_id'] == header_concept_id
+                            and item['statement_type'] == stmt_type
+                            for item in items_to_insert
+                        )
+                        
+                        if not header_exists:
+                            # Determine side for balance sheet
+                            side = None
+                            display_order = template_header['display_order']
+                            
+                            # Special handling: Position headers after items that should come before them
+                            if stmt_type == 'cash_flow' and template_header['normalized_label'] == 'adjustment_of_non_cash_items_header':
+                                # Check if Net profit exists in items_to_insert first, then database
+                                # If so, header should be at 1.5 (after Net profit, before adjustment items)
+                                net_profit_order = None
+                                # Check items_to_insert first
+                                for item in existing_items:
+                                    concept_label = concept_labels.get(item.get('concept_id', ''), '')
+                                    if concept_label in ('net_profit', 'net_income'):
+                                        net_profit_order = item.get('display_order')
+                                        break
+                                
+                                # If not found in items_to_insert, check database
+                                if net_profit_order is None:
+                                    net_profit_query = text("""
+                                        SELECT MIN(display_order) 
+                                        FROM rel_statement_items si
+                                        JOIN dim_concepts co ON si.concept_id = co.concept_id
+                                        WHERE si.filing_id = :filing_id
+                                          AND si.statement_type = 'cash_flow'
+                                          AND (co.normalized_label = 'net_profit' OR co.normalized_label = 'net_income')
+                                    """)
+                                    net_profit_result = conn.execute(net_profit_query, {"filing_id": filing_id_val})
+                                    net_profit_order = net_profit_result.scalar()
+                                
+                                if net_profit_order is not None:
+                                    display_order = net_profit_order + 0.5  # After Net profit
+                                else:
+                                    display_order = 1.5  # Default: after position 1.0
+                            
+                            elif stmt_type == 'comprehensive_income' and template_header['normalized_label'] == 'other_comprehensive_income_header':
+                                # Check if Net profit exists in items_to_insert first, then database
+                                # If so, header should be at 2.0 (after Net profit and space)
+                                net_profit_order = None
+                                # Check items_to_insert first
+                                for item in existing_items:
+                                    concept_label = concept_labels.get(item.get('concept_id', ''), '')
+                                    if concept_label in ('net_profit', 'net_income'):
+                                        net_profit_order = item.get('display_order')
+                                        break
+                                
+                                # If not found in items_to_insert, check database
+                                if net_profit_order is None:
+                                    net_profit_query = text("""
+                                        SELECT MIN(display_order) 
+                                        FROM rel_statement_items si
+                                        JOIN dim_concepts co ON si.concept_id = co.concept_id
+                                        WHERE si.filing_id = :filing_id
+                                          AND si.statement_type = 'comprehensive_income'
+                                          AND (co.normalized_label = 'net_profit' OR co.normalized_label = 'net_income')
+                                    """)
+                                    net_profit_result = conn.execute(net_profit_query, {"filing_id": filing_id_val})
+                                    net_profit_order = net_profit_result.scalar()
+                                
+                                if net_profit_order is not None:
+                                    display_order = net_profit_order + 1.0  # After Net profit (1.0) and space (1.5) = 2.0
+                                else:
+                                    display_order = 2.0  # Default: after position 1.0
+                            
+                            elif stmt_type == 'balance_sheet':
+                                # Get side from template if specified, otherwise determine
+                                side = template_header.get('side')
+                                if not side:
+                                    side = determine_balance_sheet_side(template_header.get('normalized_label', '') or '', '')
+                                # Balance sheet section headers should be at position 0.0
+                                # Other headers preserve their decimal values from template
+                                if template_header.get('side'):
+                                    display_order = 0.0
+                                # Otherwise, use the display_order from template (may be decimal like 0.5)
+                            
+                            items_to_insert.append({
+                                'filing_id': filing_id_val,
+                                'concept_id': header_concept_id,
+                                'statement_type': stmt_type,
+                                'display_order': display_order,
+                                'is_header': True,
+                                'is_main_item': True,
+                                'role_uri': None,
+                                'source': 'template',
+                                'side': side,
+                                'inferred_order': False,
+                                'header_source': 'template'  # Track source
+                            })
+                            logger.info(f"Applied template header '{template_header['preferred_label']}' for filing_id={filing_id_val}, statement_type={stmt_type}")
+        
+        # Fifth pass: Add "Net profit" to comprehensive income (references income statement)
         # UNIVERSAL: Comprehensive income statements ALWAYS start with net profit from income statement
         # This is standard IFRS/US-GAAP practice - all companies do this
         filing_ids = set(item['filing_id'] for item in items_to_insert)
@@ -817,14 +1644,23 @@ def populate_statement_items(filing_id: Optional[int] = None):
                 for item in items_to_insert
             )
             if has_comprehensive:
-                # Find net_income concept_id directly from database
-                # UNIVERSAL: Comprehensive income statements ALWAYS start with net profit from income statement
+                # Find net_income concept_id - try multiple normalized labels (UNIVERSAL - works for all companies)
+                # Try net_income_including_noncontrolling_interest first, then net_profit, then net_income
                 concept_check = text("""
                     SELECT concept_id FROM dim_concepts 
-                    WHERE normalized_label = 'net_income_including_noncontrolling_interest'
+                    WHERE normalized_label IN (
+                        'net_income_including_noncontrolling_interest',
+                        'net_profit',
+                        'net_income'
+                    )
+                    AND concept_id IN (
+                        SELECT DISTINCT concept_id FROM fact_financial_metrics fm
+                        JOIN dim_filings f ON fm.filing_id = f.filing_id
+                        WHERE f.filing_id = :filing_id
+                    )
                     LIMIT 1
                 """)
-                concept_result = conn.execute(concept_check)
+                concept_result = conn.execute(concept_check, {'filing_id': filing_id_val})
                 concept_row = concept_result.fetchone()
                 if concept_row:
                     net_income_concept_id = concept_row[0]
@@ -837,6 +1673,7 @@ def populate_statement_items(filing_id: Optional[int] = None):
                     )
                     if not already_added:
                         # Add net_income to comprehensive_income with display_order=0 (first)
+                        # UNIVERSAL: Comprehensive income statements ALWAYS start with net profit from income statement
                         items_to_insert.append({
                             'filing_id': filing_id_val,
                             'concept_id': net_income_concept_id,
@@ -845,121 +1682,130 @@ def populate_statement_items(filing_id: Optional[int] = None):
                             'is_header': False,
                             'is_main_item': True,
                             'role_uri': None,  # Synthetic - references income statement
-                            'source': 'xbrl'
+                            'source': 'synthetic',
+                            'side': None,
+                            'inferred_order': False  # Not inferred - synthetic item
                         })
         
-        # Third pass: Create synthetic "Earnings per share" header for income statements with EPS items
-        # This header should appear before EPS items (display_order = 13.5, between net income and EPS)
-        for (filing_id_val, stmt_type), eps_concept_ids in eps_concepts_by_statement.items():
-            if stmt_type == 'income_statement' and len(eps_concept_ids) > 0:
-                # Check if header already exists
-                header_exists = False
-                for item in items_to_insert:
-                    if (item['filing_id'] == filing_id_val and 
-                        item['statement_type'] == stmt_type and 
-                        item.get('is_header') and
-                        'earnings' in (item.get('normalized_label', '') or '').lower() and
-                        'share' in (item.get('normalized_label', '') or '').lower()):
-                        header_exists = True
-                        break
-                
-                if not header_exists:
-                    # Find or create a synthetic concept for "Earnings per share" header
-                    # We'll use a special normalized_label that the frontend can recognize
-                    header_concept_query = text("""
-                        SELECT concept_id FROM dim_concepts
-                        WHERE normalized_label = 'earnings_per_share_header'
-                        LIMIT 1
-                    """)
-                    header_concept_result = conn.execute(header_concept_query)
-                    header_concept_row = header_concept_result.fetchone()
+        # Third pass: Add balance sheet concepts that have facts but aren't in presentation hierarchy
+        # UNIVERSAL FIX: If a concept has balance sheet facts in fact_financial_metrics, it should be included
+        # This ensures ALL data from the XBRL filing is captured, even if presentation hierarchy is incomplete
+        # CRITICAL: Check BOTH consolidated AND dimension facts (many balance sheet concepts only have dimension facts)
+        filing_ids_processed = set(item['filing_id'] for item in items_to_insert)
+        for filing_id_val in filing_ids_processed:
+            # Find balance sheet concepts with facts but not in rel_statement_items
+            # CRITICAL: Check for concepts with EITHER consolidated OR dimension facts for ANY instant period
+            # The 2024 report contains ALL comparative data (2022, 2023, 2024) - we need ALL of it
+            missing_bs_query = text("""
+                SELECT DISTINCT
+                    co.concept_id,
+                    co.normalized_label,
+                    co.concept_name
+                FROM dim_concepts co
+                WHERE co.concept_id IN (
+                    -- Concepts with consolidated facts for ANY instant period in this filing
+                    SELECT DISTINCT fm.concept_id
+                    FROM fact_financial_metrics fm
+                    JOIN dim_time_periods p ON fm.period_id = p.period_id
+                    WHERE fm.filing_id = :filing_id
+                      AND p.period_type = 'instant'
+                      AND fm.dimension_id IS NULL
+                      AND fm.value_numeric IS NOT NULL
                     
-                    if header_concept_row:
-                        header_concept_id = header_concept_row[0]
-                        # Check if header already in items_to_insert (avoid duplicate)
-                        header_already_added = any(
-                            item['concept_id'] == header_concept_id and 
-                            item['filing_id'] == filing_id_val and 
-                            item['statement_type'] == stmt_type
-                            for item in items_to_insert
-                        )
-                        if not header_already_added:
-                            # Add header item with display_order = 14 (right before EPS items at 15-16)
-                            # Use 14 to ensure it comes after net income (13) but before EPS (15-16)
-                            items_to_insert.append({
-                                'filing_id': filing_id_val,
-                                'concept_id': header_concept_id,
-                                'statement_type': stmt_type,
-                                'display_order': 14,  # Right before EPS items (15-16)
-                                'is_header': True,
-                                'is_main_item': True,
-                                'role_uri': None,
-                                'source': 'xbrl'
-                            })
-        
-        # Fourth pass: Create synthetic "Other comprehensive income" header for comprehensive income
-        # This header should appear right after Net profit, before OCI items
-        for filing_id_val in filing_ids:
-            # Check if we have comprehensive_income items (excluding Net profit)
-            has_oci_items = any(
-                item['filing_id'] == filing_id_val and 
-                item['statement_type'] == 'comprehensive_income' and
-                item.get('display_order', 999) > 0  # Exclude Net profit (order 0)
-                for item in items_to_insert
-            )
+                    UNION
+                    
+                    -- Concepts with dimension facts for ANY instant period in this filing
+                    SELECT DISTINCT fm.concept_id
+                    FROM fact_financial_metrics fm
+                    JOIN dim_time_periods p ON fm.period_id = p.period_id
+                    WHERE fm.filing_id = :filing_id
+                      AND p.period_type = 'instant'
+                      AND fm.dimension_id IS NOT NULL
+                      AND fm.value_numeric IS NOT NULL
+                )
+                -- Check if concept looks like a balance sheet concept
+                AND (
+                    co.normalized_label LIKE '%asset%' 
+                    OR co.normalized_label LIKE '%liability%'
+                    OR co.normalized_label LIKE '%equity%'
+                    OR co.normalized_label LIKE '%receivable%'
+                    OR co.normalized_label LIKE '%payable%'
+                    OR co.normalized_label LIKE '%inventory%'
+                    OR co.normalized_label LIKE '%cash%'
+                    OR co.normalized_label LIKE '%capital%'
+                    OR co.normalized_label LIKE '%borrowing%'
+                    OR co.normalized_label LIKE '%provision%'
+                    OR co.concept_name LIKE '%Asset%'
+                    OR co.concept_name LIKE '%Liability%'
+                    OR co.concept_name LIKE '%Equity%'
+                    OR co.concept_name LIKE '%Receivable%'
+                    OR co.concept_name LIKE '%Payable%'
+                    OR co.concept_name LIKE '%Inventory%'
+                    OR co.concept_name LIKE '%Cash%'
+                    OR co.concept_name LIKE '%Capital%'
+                    OR co.concept_name LIKE '%Borrowing%'
+                    OR co.concept_name LIKE '%Provision%'
+                )
+                -- Exclude if already in rel_statement_items
+                AND NOT EXISTS (
+                    SELECT 1 FROM rel_statement_items si
+                    WHERE si.filing_id = :filing_id
+                      AND si.concept_id = co.concept_id
+                      AND si.statement_type = 'balance_sheet'
+                )
+                -- Exclude detail/disclosure items
+                AND co.normalized_label NOT LIKE '%_note%'
+                AND co.normalized_label NOT LIKE '%_disclosure%'
+                AND co.normalized_label NOT LIKE '%_reconciliation%'
+                AND co.normalized_label NOT LIKE '%_schedule%'
+            """)
+            missing_result = conn.execute(missing_bs_query, {"filing_id": filing_id_val})
+            missing_rows = missing_result.fetchall()
             
-            if has_oci_items:
-                # Find or create "Other comprehensive income" header concept
-                header_concept_query = text("""
-                    SELECT concept_id FROM dim_concepts
-                    WHERE normalized_label = 'other_comprehensive_income_header'
-                    LIMIT 1
-                """)
-                header_concept_result = conn.execute(header_concept_query)
-                header_concept_row = header_concept_result.fetchone()
+            if missing_rows:
+                # Get max display_order for balance sheet items to append new items
+                max_bs_order = max(
+                    (item['display_order'] for item in items_to_insert 
+                     if item['filing_id'] == filing_id_val and item['statement_type'] == 'balance_sheet'),
+                    default=0
+                )
                 
-                if not header_concept_row:
-                    # Create the header concept if it doesn't exist
-                    create_header_query = text("""
-                        INSERT INTO dim_concepts (
-                            concept_name, taxonomy, normalized_label, preferred_label,
-                            concept_type, is_abstract, statement_type
-                        ) VALUES (
-                            'OtherComprehensiveIncomeHeader', 'custom', 'other_comprehensive_income_header', 'Other comprehensive income',
-                            'text', TRUE, 'comprehensive_income'
-                        )
-                        RETURNING concept_id
-                    """)
-                    header_concept_result = conn.execute(create_header_query)
-                    header_concept_row = header_concept_result.fetchone()
-                    conn.commit()
-                
-                if header_concept_row:
-                    header_concept_id = header_concept_row[0]
-                    # Check if header already in items_to_insert
-                    header_already_added = any(
-                        item['concept_id'] == header_concept_id and 
-                        item['filing_id'] == filing_id_val and 
-                        item['statement_type'] == 'comprehensive_income'
-                        for item in items_to_insert
-                    )
+                for concept_id, normalized_label, concept_name in missing_rows:
+                    # Determine side
+                    side = determine_balance_sheet_side(normalized_label or '', concept_name or '')
                     
-                    if not header_already_added:
-                        # "Other comprehensive income" header comes right after Net profit (order 0)
-                        # and before first OCI item (Remeasurements, order 1)
+                    # Only add if we can determine it's a balance sheet item
+                    if side:
                         items_to_insert.append({
                             'filing_id': filing_id_val,
-                            'concept_id': header_concept_id,
-                            'statement_type': 'comprehensive_income',
-                            'display_order': 1,  # Right after Net profit (0), before Remeasurements (1)
-                            'is_header': True,
+                            'concept_id': concept_id,
+                            'statement_type': 'balance_sheet',
+                            'display_order': max_bs_order + 1000,  # Append at end
+                            'is_header': False,
                             'is_main_item': True,
-                            'role_uri': None,
-                            'source': 'xbrl'
+                            'role_uri': None,  # Not in presentation hierarchy
+                            'source': 'xbrl',
+                            'side': side,
+                            'inferred_order': False  # Not inferred - from XBRL
                         })
         
-        # Fifth pass: Create synthetic "Cash flow hedges" header for comprehensive income
-        # This header should appear before cash flow hedge items
+        # Sixth pass: Removed hardcoded header creation - now handled by:
+        # - XBRL parent-child relationships (Phase 3)
+        # - XBRL label roles (Phase 4)
+        # - Standard templates (Phase 5)
+        # Headers are now detected automatically from XBRL data
+        
+        # Note: "Earnings per share" and "Other comprehensive income" headers are now handled by templates
+        # "Cash flow hedges" and other headers are detected from XBRL parent-child relationships
+        
+        # Seventh pass: Create synthetic headers as LAST RESORT (only if not detected from XBRL/templates)
+        # Check if headers already exist before creating synthetic ones
+        # Most headers should now be detected from XBRL parent-child relationships or label roles
+        
+        # Note: The following sections create synthetic headers only if they don't already exist
+        # This ensures we don't duplicate headers that were detected from XBRL
+        
+        # "Cash flow hedges" header (if not detected from XBRL)
         for filing_id_val in filing_ids:
             # Check if we have comprehensive_income items with cash flow hedges
             # Query database to get normalized_label for concept_ids
@@ -987,6 +1833,20 @@ def populate_statement_items(filing_id: Optional[int] = None):
             ]
             
             if len(cash_flow_hedge_items) > 0:
+                # Check if header already exists (from XBRL parent-child or label role)
+                header_exists = any(
+                    item['filing_id'] == filing_id_val
+                    and item['statement_type'] == 'comprehensive_income'
+                    and item.get('is_header', False)
+                    and ('cash_flow_hedge' in (item.get('normalized_label', '') or '').lower() or
+                         'cash flow hedge' in (item.get('preferred_label', '') or '').lower())
+                    for item in items_to_insert
+                )
+                
+                if not header_exists:
+                    # Only create if not detected from XBRL - log warning
+                    logger.warning(f"Creating synthetic 'Cash flow hedges' header for filing_id={filing_id_val} - not detected from XBRL")
+                    
                 # Find or create "Cash flow hedges" header concept
                 header_concept_query = text("""
                     SELECT concept_id FROM dim_concepts
@@ -997,13 +1857,12 @@ def populate_statement_items(filing_id: Optional[int] = None):
                 header_concept_row = header_concept_result.fetchone()
                 
                 if not header_concept_row:
-                    # Create the header concept if it doesn't exist
                     create_header_query = text("""
                         INSERT INTO dim_concepts (
                             concept_name, taxonomy, normalized_label, preferred_label,
                             concept_type, is_abstract, statement_type
                         ) VALUES (
-                            'CashFlowHedgesHeader', 'custom', 'cash_flow_hedges_header', 'Cash flow hedges',
+                                'CashFlowHedgesHeader', 'synthetic', 'cash_flow_hedges_header', 'Cash flow hedges',
                             'text', TRUE, 'comprehensive_income'
                         )
                         RETURNING concept_id
@@ -1014,163 +1873,103 @@ def populate_statement_items(filing_id: Optional[int] = None):
                 
                 if header_concept_row:
                     header_concept_id = header_concept_row[0]
-                    # Check if header already in items_to_insert
-                    header_already_added = any(
-                        item['concept_id'] == header_concept_id and 
-                        item['filing_id'] == filing_id_val and 
-                        item['statement_type'] == 'comprehensive_income'
-                        for item in items_to_insert
-                    )
+                    # Position header after "Exchange rate adjustments" (typically at order 7.0)
+                    # So header should be at 7.5, before hedge items at 8.0+
+                    exchange_adj_order = None
                     
-                    if not header_already_added:
-                        # Cash flow hedges header should appear before cash flow hedge items
-                        # Based on standard IFRS structure, cash flow hedges header comes after exchange rate adjustments (3)
-                        # and before realisation of previously deferred (4)
-                        header_order = 4  # Standard IFRS position for "Cash flow hedges" header
-                        
-                        items_to_insert.append({
-                            'filing_id': filing_id_val,
-                            'concept_id': header_concept_id,
-                            'statement_type': 'comprehensive_income',
-                            'display_order': header_order,
-                            'is_header': True,
-                            'is_main_item': True,
-                            'role_uri': None,
-                            'source': 'xbrl'
-                        })
-        
-        # Fifth pass: Create synthetic "Assets" header for balance sheet
-        # This header should appear at position 0 (first item in assets section)
-        for filing_id_val in filing_ids:
-            # Check if we have balance_sheet items with assets side
-            has_assets_items = any(
-                item['filing_id'] == filing_id_val and 
-                item['statement_type'] == 'balance_sheet' and
-                item.get('side') == 'assets'
-                for item in items_to_insert
-            )
-            
-            if has_assets_items:
-                # Find or create "Assets" header concept
-                header_concept_query = text("""
-                    SELECT concept_id FROM dim_concepts
-                    WHERE normalized_label = 'assets_header'
-                    LIMIT 1
-                """)
-                header_concept_result = conn.execute(header_concept_query)
-                header_concept_row = header_concept_result.fetchone()
-                
-                if not header_concept_row:
-                    # Create the header concept if it doesn't exist
-                    create_header_query = text("""
-                        INSERT INTO dim_concepts (
-                            concept_name, taxonomy, normalized_label, preferred_label,
-                            concept_type, is_abstract, statement_type
-                        ) VALUES (
-                            'AssetsHeader', 'synthetic', 'assets_header', 'Assets',
-                            'text', TRUE, 'balance_sheet'
+                    # Check items_to_insert first
+                    for item in items_to_insert:
+                        if (item['filing_id'] == filing_id_val and 
+                            item['statement_type'] == 'comprehensive_income'):
+                            # Query normalized_label from database
+                            label_query = text("""
+                                SELECT normalized_label FROM dim_concepts
+                                WHERE concept_id = :concept_id
+                            """)
+                            label_result = conn.execute(label_query, {'concept_id': item['concept_id']})
+                            label_row = label_result.fetchone()
+                            if label_row:
+                                normalized_label = (label_row[0] or '').lower()
+                                if 'exchange' in normalized_label and 'translation' in normalized_label:
+                                    exchange_adj_order = item.get('display_order')
+                                    break
+                    
+                    # If not found in items_to_insert, check database
+                    if exchange_adj_order is None:
+                        exchange_adj_query = text("""
+                            SELECT MIN(display_order) 
+                            FROM rel_statement_items si
+                            JOIN dim_concepts co ON si.concept_id = co.concept_id
+                            WHERE si.filing_id = :filing_id
+                              AND si.statement_type = 'comprehensive_income'
+                              AND (co.normalized_label LIKE '%exchange%' AND co.normalized_label LIKE '%translation%')
+                        """)
+                        exchange_adj_result = conn.execute(exchange_adj_query, {"filing_id": filing_id_val})
+                        exchange_adj_order = exchange_adj_result.scalar()
+                    
+                    if exchange_adj_order is not None:
+                        cash_flow_hedges_order = exchange_adj_order + 0.5  # After exchange adjustments
+                    else:
+                        # Fallback: Find minimum order for cash flow hedge items
+                        min_hedge_order = min(
+                            (item.get('display_order', 999) for item in cash_flow_hedge_items),
+                            default=7
                         )
-                        RETURNING concept_id
-                    """)
-                    create_result = conn.execute(create_header_query)
-                    header_concept_id = create_result.fetchone()[0]
-                    conn.commit()
-                else:
-                    header_concept_id = header_concept_row[0]
-                
-                # Check if header already in items_to_insert (avoid duplicate)
-                header_already_added = any(
-                    item['concept_id'] == header_concept_id and 
-                    item['filing_id'] == filing_id_val and 
-                    item['statement_type'] == 'balance_sheet'
-                    for item in items_to_insert
-                )
-                
-                if not header_already_added:
-                    # "Assets" header comes first (display_order = 0, before first asset at 1)
+                        cash_flow_hedges_order = min_hedge_order - 0.5  # Before first hedge item
+                    
                     items_to_insert.append({
                         'filing_id': filing_id_val,
                         'concept_id': header_concept_id,
-                        'statement_type': 'balance_sheet',
-                        'display_order': 0,  # First item in balance sheet (before all assets)
+                        'statement_type': 'comprehensive_income',
+                        'display_order': cash_flow_hedges_order,  # After exchange adjustments (7.0) = 7.5
                         'is_header': True,
                         'is_main_item': True,
                         'role_uri': None,
-                        'source': 'xbrl',
-                        'side': 'assets'  # Assets header is on assets side
+                        'source': 'synthetic',
+                        'side': None,
+                        'inferred_order': False,
+                        'header_source': 'synthetic'  # Track as synthetic
                     })
         
-        # Sixth pass: Create synthetic "Equity and liabilities" header for balance sheet
-        # This header should appear at the start of the liabilities_equity section
+        # "Assets" and "Equity and liabilities" headers for balance sheet (if not detected from XBRL)
+        # These should typically be detected from XBRL parent-child relationships
         for filing_id_val in filing_ids:
-            # Check if we have balance_sheet items with liabilities_equity side
-            has_liabilities_equity_items = any(
+            has_balance_sheet_items = any(
                 item['filing_id'] == filing_id_val and 
-                item['statement_type'] == 'balance_sheet' and
-                item.get('side') == 'liabilities_equity'
+                    item['statement_type'] == 'balance_sheet'
                 for item in items_to_insert
             )
             
-            if has_liabilities_equity_items:
-                # Find or create "Equity and liabilities" header concept
-                header_concept_query = text("""
-                    SELECT concept_id FROM dim_concepts
-                    WHERE normalized_label = 'equity_and_liabilities_header'
-                    LIMIT 1
-                """)
-                header_concept_result = conn.execute(header_concept_query)
-                header_concept_row = header_concept_result.fetchone()
-                
-                if not header_concept_row:
-                    # Create the header concept if it doesn't exist
-                    create_header_query = text("""
-                        INSERT INTO dim_concepts (
-                            concept_name, taxonomy, normalized_label, preferred_label,
-                            concept_type, is_abstract, statement_type
-                        ) VALUES (
-                            'EquityAndLiabilitiesHeader', 'synthetic', 'equity_and_liabilities_header', 'Equity and liabilities',
-                            'text', TRUE, 'balance_sheet'
-                        )
-                        RETURNING concept_id
-                    """)
-                    create_result = conn.execute(create_header_query)
-                    header_concept_id = create_result.fetchone()[0]
-                    conn.commit()
-                else:
-                    header_concept_id = header_concept_row[0]
-                
-                # Check if header already in items_to_insert (avoid duplicate)
-                header_already_added = any(
-                    item['concept_id'] == header_concept_id and 
-                    item['filing_id'] == filing_id_val and 
-                    item['statement_type'] == 'balance_sheet'
+            if has_balance_sheet_items:
+                # Check if "Assets" header exists
+                assets_header_exists = any(
+                    item['filing_id'] == filing_id_val
+                    and item['statement_type'] == 'balance_sheet'
+                    and item.get('is_header', False)
+                    and item.get('side') == 'assets'
+                    and ('asset' in (item.get('normalized_label', '') or '').lower() or
+                         'asset' in (item.get('preferred_label', '') or '').lower())
+                for item in items_to_insert
+            )
+            
+                # Check if "Equity and liabilities" header exists
+                equity_liab_header_exists = any(
+                    item['filing_id'] == filing_id_val
+                    and item['statement_type'] == 'balance_sheet'
+                    and item.get('is_header', False)
+                    and item.get('side') == 'liabilities_equity'
+                    and ('equity' in (item.get('normalized_label', '') or '').lower() or
+                         'liabilit' in (item.get('normalized_label', '') or '').lower())
                     for item in items_to_insert
                 )
                 
-                if not header_already_added:
-                    # Find the minimum display_order for liabilities_equity items
-                    min_liabilities_order = min(
-                        (item.get('display_order', 999) for item in items_to_insert
-                         if item['filing_id'] == filing_id_val and 
-                         item['statement_type'] == 'balance_sheet' and
-                         item.get('side') == 'liabilities_equity'),
-                        default=1
-                    )
-                    # "Equity and liabilities" header comes before first liabilities_equity item
-                    items_to_insert.append({
-                        'filing_id': filing_id_val,
-                        'concept_id': header_concept_id,
-                        'statement_type': 'balance_sheet',
-                        'display_order': min_liabilities_order - 1,  # Before first liabilities_equity item
-                        'is_header': True,
-                        'is_main_item': True,
-                        'role_uri': None,
-                        'source': 'xbrl',
-                        'side': 'liabilities_equity'  # Equity and liabilities header is on right side
-                    })
+                # Only create if not detected from XBRL - these should be rare
+                if not assets_header_exists or not equity_liab_header_exists:
+                    logger.warning(f"Balance sheet headers not fully detected from XBRL for filing_id={filing_id_val} - may need synthetic headers")
+                    # Note: Synthetic header creation for balance sheet removed - should be detected from XBRL
         
-        # Seventh pass: Create synthetic "Adjustment of non-cash items" header for cash flow statements
-        # This header should appear right after Net profit, before adjustment items
+        # "Adjustment of non-cash items" header for cash flow (if not detected from XBRL)
+        # This should typically be detected from XBRL parent-child relationships
         for filing_id_val in filing_ids:
             # Check if we have cash_flow items with adjustments (excluding Net profit)
             # Query database to get normalized_label for concept_ids in items_to_insert
@@ -1201,53 +2000,146 @@ def populate_statement_items(filing_id: Optional[int] = None):
                 has_adjustment_items = False
             
             if has_adjustment_items:
-                # Find or create "Adjustment of non-cash items" header concept
-                header_concept_query = text("""
-                    SELECT concept_id FROM dim_concepts
-                    WHERE normalized_label = 'adjustment_of_non_cash_items_header'
-                    LIMIT 1
-                """)
-                header_concept_result = conn.execute(header_concept_query)
-                header_concept_row = header_concept_result.fetchone()
-                
-                if not header_concept_row:
-                    # Create the header concept if it doesn't exist
-                    create_header_query = text("""
-                        INSERT INTO dim_concepts (
-                            concept_name, taxonomy, normalized_label, concept_type,
-                            balance_type, period_type, data_type, is_abstract, statement_type, preferred_label
-                        ) VALUES (
-                            'AdjustmentOfNonCashItemsHeader', 'synthetic', 'adjustment_of_non_cash_items_header', 'string',
-                            NULL, 'duration', 'string', TRUE, 'cash_flow', 'Adjustment of non-cash items'
-                        )
-                        RETURNING concept_id
-                    """)
-                    create_result = conn.execute(create_header_query)
-                    header_concept_id = create_result.fetchone()[0]
-                    conn.commit()
-                else:
-                    header_concept_id = header_concept_row[0]
-                
-                # Check if header already in items_to_insert (avoid duplicate)
-                header_already_added = any(
-                    item['concept_id'] == header_concept_id and 
-                    item['filing_id'] == filing_id_val and 
-                    item['statement_type'] == 'cash_flow'
+                # Check if header already exists (from XBRL parent-child or label role)
+                header_exists = any(
+                    item['filing_id'] == filing_id_val
+                    and item['statement_type'] == 'cash_flow'
+                    and item.get('is_header', False)
+                    and ('adjustment' in (item.get('normalized_label', '') or '').lower() or
+                         'non-cash' in (item.get('preferred_label', '') or '').lower())
                     for item in items_to_insert
                 )
-                if not header_already_added:
+                
+                if not header_exists:
+                    # Only create if not detected from XBRL - log warning
+                    logger.warning(f"Creating synthetic 'Adjustment of non-cash items' header for filing_id={filing_id_val} - not detected from XBRL")
+                    # Note: Synthetic header creation removed - should be detected from XBRL parent-child relationships
+        
+        # Eighth pass: Create synthetic space headers for equity statements (industry-standard formatting)
+        # IFRS/EU equity statements require visual spacing for readability
+        # Space 1: After "Total comprehensive income" (position 3)
+        # Space 2: After "Transfer of cash flow hedge reserve" (position 7)
+        for filing_id_val in filing_ids:
+            # Check if we have equity_statement items
+            has_equity_items = any(
+                item['filing_id'] == filing_id_val and 
+                item['statement_type'] == 'equity_statement'
+                for item in items_to_insert
+            )
+            
+            if has_equity_items:
+                # Space 1: After "Total comprehensive income" (display_order 3)
+                # Create space header concept if it doesn't exist
+                space1_concept_query = text("""
+                    SELECT concept_id FROM dim_concepts
+                    WHERE concept_name = 'EquityStatementSpace1' AND taxonomy = 'synthetic'
+                    LIMIT 1
+                """)
+                space1_result = conn.execute(space1_concept_query)
+                space1_row = space1_result.fetchone()
+                
+                if not space1_row:
+                    create_space1_query = text("""
+                        INSERT INTO dim_concepts (
+                            concept_name, taxonomy, normalized_label, preferred_label,
+                            concept_type, is_abstract, statement_type
+                        ) VALUES (
+                            'EquityStatementSpace1', 'synthetic', 'equity_statement_space_1', '',
+                            'text', TRUE, 'equity_statement'
+                        )
+                        ON CONFLICT (concept_name, taxonomy) DO UPDATE SET
+                            normalized_label = EXCLUDED.normalized_label,
+                            preferred_label = EXCLUDED.preferred_label,
+                            statement_type = EXCLUDED.statement_type
+                        RETURNING concept_id
+                    """)
+                    space1_result = conn.execute(create_space1_query)
+                    space1_concept_id = space1_result.fetchone()[0]
+                    conn.commit()
+                else:
+                    space1_concept_id = space1_row[0]
+                
+                # Check if space 1 already added
+                space1_already_added = any(
+                    item['concept_id'] == space1_concept_id and 
+                    item['filing_id'] == filing_id_val and 
+                    item['statement_type'] == 'equity_statement'
+                    for item in items_to_insert
+                )
+                
+                if not space1_already_added:
+                    # Space 1: After "Net profit" (display_order 1), before "Other comprehensive income" (display_order 4)
+                    # Industry standard: Visual spacing after net profit section
+                    # Expected position: 3 (after Net profit at 1, before Other comprehensive income at 4)
                     items_to_insert.append({
                         'filing_id': filing_id_val,
-                        'concept_id': header_concept_id,
-                        'statement_type': 'cash_flow',
-                        'display_order': 1,  # Right after Net profit (0)
+                        'concept_id': space1_concept_id,
+                        'statement_type': 'equity_statement',
+                        'display_order': 3,  # Between Net profit (1) and Other comprehensive income (4)
                         'is_header': True,
                         'is_main_item': True,
                         'role_uri': None,
-                        'source': 'xbrl'
+                        'source': 'synthetic',
+                        'side': None,
+                        'inferred_order': False  # Not inferred - synthetic space
+                    })
+                
+                # Space 2: After "Transfer of cash flow hedge reserve" (display_order 6), before "Transactions with owners" (display_order 8)
+                space2_concept_query = text("""
+                    SELECT concept_id FROM dim_concepts
+                    WHERE concept_name = 'EquityStatementSpace2' AND taxonomy = 'synthetic'
+                    LIMIT 1
+                """)
+                space2_result = conn.execute(space2_concept_query)
+                space2_row = space2_result.fetchone()
+                
+                if not space2_row:
+                    create_space2_query = text("""
+                        INSERT INTO dim_concepts (
+                            concept_name, taxonomy, normalized_label, preferred_label,
+                            concept_type, is_abstract, statement_type
+                        ) VALUES (
+                            'EquityStatementSpace2', 'synthetic', 'equity_statement_space_2', '',
+                            'text', TRUE, 'equity_statement'
+                        )
+                        ON CONFLICT (concept_name, taxonomy) DO UPDATE SET
+                            normalized_label = EXCLUDED.normalized_label,
+                            preferred_label = EXCLUDED.preferred_label,
+                            statement_type = EXCLUDED.statement_type
+                        RETURNING concept_id
+                    """)
+                    space2_result = conn.execute(create_space2_query)
+                    space2_concept_id = space2_result.fetchone()[0]
+                    conn.commit()
+                else:
+                    space2_concept_id = space2_row[0]
+                
+                # Check if space 2 already added
+                space2_already_added = any(
+                    item['concept_id'] == space2_concept_id and 
+                    item['filing_id'] == filing_id_val and 
+                    item['statement_type'] == 'equity_statement'
+                    for item in items_to_insert
+                )
+                
+                if not space2_already_added:
+                    # Space 2: After "Transfer of cash flow hedge reserve" (display_order 6), before "Transactions with owners" (display_order 8)
+                    # Industry standard: Visual spacing before transactions section
+                    # Expected position: 7 (after Transfer at 6, before Transactions with owners at 8)
+                    items_to_insert.append({
+                        'filing_id': filing_id_val,
+                        'concept_id': space2_concept_id,
+                        'statement_type': 'equity_statement',
+                        'display_order': 7,  # Between Transfer (6) and Transactions with owners (8)
+                        'is_header': True,
+                        'is_main_item': True,
+                        'role_uri': None,
+                        'source': 'synthetic',
+                        'side': None,
+                        'inferred_order': False  # Not inferred - synthetic space
                     })
         
-        # Eighth pass: Create synthetic "Cash and cash equivalents at the beginning of the year" for cash flow statements
+        # Ninth pass: Create synthetic "Cash and cash equivalents at the beginning of the year" for cash flow statements
         # This is calculated from the previous year's end-of-year cash balance (universal accounting principle)
         for filing_id_val in filing_ids:
             # Check if we have cash_flow items (need to add beginning cash)
@@ -1301,153 +2193,95 @@ def populate_statement_items(filing_id: Optional[int] = None):
                         'is_header': False,
                         'is_main_item': True,
                         'role_uri': None,
-                        'source': 'calculated'  # Mark as calculated, not from XBRL
+                        'source': 'calculated',  # Mark as calculated, not from XBRL
+                        'side': None,
+                        'inferred_order': False  # Not inferred - calculated item
                     })
         
-        # Ninth pass: Create synthetic "Transactions with owners" header for equity statements
-        # This header should appear before transaction items (dividends, share-based payments, etc.)
-        for filing_id_val in filing_ids:
-            # Check if we have equity_statement items with transaction items
-            equity_statement_concept_ids = [
-                item['concept_id'] for item in items_to_insert
-                if item['filing_id'] == filing_id_val and 
-                   item['statement_type'] == 'equity_statement' and
-                   item.get('display_order', 999) >= 6  # Transaction items start at order 6
-            ]
-            
-            if equity_statement_concept_ids:
-                # Query normalized_labels from database
-                label_query = text("""
-                    SELECT normalized_label FROM dim_concepts
-                    WHERE concept_id = ANY(:concept_ids)
-                """)
-                label_result = conn.execute(label_query, {'concept_ids': equity_statement_concept_ids})
-                normalized_labels = [row[0] or '' for row in label_result]
-                
-                # Check if any are transaction items (dividends, share-based payments, etc.)
-                has_transaction_items = any(
-                    ('dividend' in label.lower() or
-                     'sharebased' in label.lower() or
-                     'treasury' in label.lower() or
-                     'reduction' in label.lower() or
-                     'tax_on_sharebased' in label.lower())
-                    for label in normalized_labels
-                )
-            else:
-                has_transaction_items = False
-            
-            if has_transaction_items:
-                # Find or create "Transactions with owners" header concept
-                header_concept_query = text("""
-                    SELECT concept_id FROM dim_concepts
-                    WHERE normalized_label = 'transactions_with_owners_header'
-                    LIMIT 1
-                """)
-                header_concept_result = conn.execute(header_concept_query)
-                header_concept_row = header_concept_result.fetchone()
-                
-                if not header_concept_row:
-                    # Create the header concept if it doesn't exist
-                    create_header_query = text("""
-                        INSERT INTO dim_concepts (
-                            concept_name, taxonomy, normalized_label, concept_type,
-                            balance_type, period_type, data_type, is_abstract, statement_type, preferred_label
-                        ) VALUES (
-                            'TransactionsWithOwnersHeader', 'synthetic', 'transactions_with_owners_header', 'string',
-                            NULL, 'duration', 'string', TRUE, 'equity_statement', 'Transactions with owners'
-                        )
-                        RETURNING concept_id
-                    """)
-                    create_result = conn.execute(create_header_query)
-                    header_concept_id = create_result.fetchone()[0]
-                    conn.commit()
-                else:
-                    header_concept_id = header_concept_row[0]
-                
-                # Check if header already in items_to_insert (avoid duplicate)
-                header_already_added = any(
-                    item['concept_id'] == header_concept_id and 
-                    item['filing_id'] == filing_id_val and 
-                    item['statement_type'] == 'equity_statement'
-                    for item in items_to_insert
-                )
-                if not header_already_added:
-                    items_to_insert.append({
-                        'filing_id': filing_id_val,
-                        'concept_id': header_concept_id,
-                        'statement_type': 'equity_statement',
-                        'display_order': 5,  # Before transaction items (6+)
-                        'is_header': True,
-                        'is_main_item': True,
-                        'role_uri': None,
-                        'source': 'xbrl'
-                    })
+        # "Transactions with owners" header is now handled by standard templates (Phase 5)
+        # No need for hardcoded creation - template system handles it
         
-        # Tenth pass: Create synthetic "Balance at the beginning of the year" and "Balance at the end of the year" for equity statements
+        # Balance at beginning/end of year for equity statements (not headers - these are actual items)
+        # UNIVERSAL FIX: Always create these concepts if they don't exist, then add to rel_statement_items for any filing with equity statements
         # Beginning balance = previous year's end balance (from balance sheet)
         # End balance = current year's end balance (from balance sheet)
+        
+        # First, ensure the concepts exist (create if needed) - UNIVERSAL: works for all companies
+        beginning_concept_query = text("""
+            SELECT concept_id FROM dim_concepts
+            WHERE concept_name = 'BalanceAtBeginningOfYearEquity' AND taxonomy = 'synthetic'
+            LIMIT 1
+        """)
+        beginning_result = conn.execute(beginning_concept_query)
+        beginning_row = beginning_result.fetchone()
+        
+        if not beginning_row:
+            create_beginning_query = text("""
+                INSERT INTO dim_concepts (
+                    concept_name, taxonomy, normalized_label, concept_type,
+                    balance_type, period_type, data_type, is_abstract, statement_type, preferred_label
+                ) VALUES (
+                    'BalanceAtBeginningOfYearEquity', 'synthetic', 'balance_at_the_beginning_of_the_year_equity', 'monetary',
+                    NULL, 'instant', 'xbrli:monetaryItemType', FALSE, 'equity_statement', 'Balance at the beginning of the year'
+                )
+                RETURNING concept_id
+            """)
+            create_beginning_result = conn.execute(create_beginning_query)
+            beginning_concept_id = create_beginning_result.fetchone()[0]
+            conn.commit()
+        else:
+            beginning_concept_id = beginning_row[0]
+        
+        # End balance concept - ensure it exists
+        end_concept_query = text("""
+            SELECT concept_id FROM dim_concepts
+            WHERE concept_name = 'BalanceAtEndOfYearEquity' AND taxonomy = 'synthetic'
+            LIMIT 1
+        """)
+        end_result = conn.execute(end_concept_query)
+        end_row = end_result.fetchone()
+        
+        if not end_row:
+            create_end_query = text("""
+                INSERT INTO dim_concepts (
+                    concept_name, taxonomy, normalized_label, concept_type,
+                    balance_type, period_type, data_type, is_abstract, statement_type, preferred_label
+                ) VALUES (
+                    'BalanceAtEndOfYearEquity', 'synthetic', 'balance_at_the_end_of_the_year_equity', 'monetary',
+                    NULL, 'instant', 'xbrli:monetaryItemType', FALSE, 'equity_statement', 'Balance at the end of the year'
+                )
+                RETURNING concept_id
+            """)
+            create_end_result = conn.execute(create_end_query)
+            end_concept_id = create_end_result.fetchone()[0]
+            conn.commit()
+        else:
+            end_concept_id = end_row[0]
+        
+        # Now add to rel_statement_items for all filings with equity statements
+        # UNIVERSAL FIX: Check database directly for filings with equity statements, not just items_to_insert
+        # This ensures we add beginning/ending balances even if equity_statement items aren't in items_to_insert yet
         for filing_id_val in filing_ids:
-            # Check if we have equity_statement items
+            # Check if we have equity_statement items in items_to_insert OR in database
             has_equity_statement_items = any(
                 item['filing_id'] == filing_id_val and 
                 item['statement_type'] == 'equity_statement'
                 for item in items_to_insert
             )
             
+            # Also check database directly
+            if not has_equity_statement_items:
+                equity_check_query = text("""
+                    SELECT COUNT(*) FROM rel_statement_items si
+                    JOIN dim_filings f ON si.filing_id = f.filing_id
+                    WHERE si.filing_id = :filing_id AND si.statement_type = 'equity_statement'
+                """)
+                equity_check_result = conn.execute(equity_check_query, {'filing_id': filing_id_val})
+                equity_count = equity_check_result.scalar()
+                has_equity_statement_items = equity_count > 0
+            
             if has_equity_statement_items:
-                # Beginning balance concept
-                beginning_concept_query = text("""
-                    SELECT concept_id FROM dim_concepts
-                    WHERE normalized_label = 'balance_at_the_beginning_of_the_year_equity'
-                    LIMIT 1
-                """)
-                beginning_result = conn.execute(beginning_concept_query)
-                beginning_row = beginning_result.fetchone()
-                
-                if not beginning_row:
-                    create_beginning_query = text("""
-                        INSERT INTO dim_concepts (
-                            concept_name, taxonomy, normalized_label, concept_type,
-                            balance_type, period_type, data_type, is_abstract, statement_type, preferred_label
-                        ) VALUES (
-                            'BalanceAtBeginningOfYearEquity', 'synthetic', 'balance_at_the_beginning_of_the_year_equity', 'monetary',
-                            NULL, 'instant', 'xbrli:monetaryItemType', FALSE, 'equity_statement', 'Balance at the beginning of the year'
-                        )
-                        RETURNING concept_id
-                    """)
-                    create_beginning_result = conn.execute(create_beginning_query)
-                    beginning_concept_id = create_beginning_result.fetchone()[0]
-                    conn.commit()
-                else:
-                    beginning_concept_id = beginning_row[0]
-                
-                # End balance concept
-                end_concept_query = text("""
-                    SELECT concept_id FROM dim_concepts
-                    WHERE normalized_label = 'balance_at_the_end_of_the_year_equity'
-                    LIMIT 1
-                """)
-                end_result = conn.execute(end_concept_query)
-                end_row = end_result.fetchone()
-                
-                if not end_row:
-                    create_end_query = text("""
-                        INSERT INTO dim_concepts (
-                            concept_name, taxonomy, normalized_label, concept_type,
-                            balance_type, period_type, data_type, is_abstract, statement_type, preferred_label
-                        ) VALUES (
-                            'BalanceAtEndOfYearEquity', 'synthetic', 'balance_at_the_end_of_the_year_equity', 'monetary',
-                            NULL, 'instant', 'xbrli:monetaryItemType', FALSE, 'equity_statement', 'Balance at the end of the year'
-                        )
-                        RETURNING concept_id
-                    """)
-                    create_end_result = conn.execute(create_end_query)
-                    end_concept_id = create_end_result.fetchone()[0]
-                    conn.commit()
-                else:
-                    end_concept_id = end_row[0]
-                
-                # Add beginning balance (order 0)
+                # Add beginning balance (order 0) - concepts already created above
                 if not any(item['concept_id'] == beginning_concept_id and item['filing_id'] == filing_id_val and item['statement_type'] == 'equity_statement' for item in items_to_insert):
                     items_to_insert.append({
                         'filing_id': filing_id_val,
@@ -1457,20 +2291,25 @@ def populate_statement_items(filing_id: Optional[int] = None):
                         'is_header': False,
                         'is_main_item': True,
                         'role_uri': None,
-                        'source': 'calculated'
+                        'source': 'calculated',
+                        'side': None,  # Not applicable for equity statement
+                        'inferred_order': False  # Not inferred - calculated item
                     })
                 
-                # Add end balance (order 11)
+                # Add end balance (order 14) - concepts already created above
+                # UNIVERSAL FIX: Use compute_equity_order to ensure correct display_order
                 if not any(item['concept_id'] == end_concept_id and item['filing_id'] == filing_id_val and item['statement_type'] == 'equity_statement' for item in items_to_insert):
                     items_to_insert.append({
                         'filing_id': filing_id_val,
                         'concept_id': end_concept_id,
                         'statement_type': 'equity_statement',
-                        'display_order': 11,  # Last item
+                        'display_order': compute_equity_order('balance_at_end_of_year_equity'),  # Use compute_equity_order for correct position (14)
                         'is_header': False,
                         'is_main_item': True,
                         'role_uri': None,
-                        'source': 'calculated'
+                        'source': 'calculated',
+                        'side': None,  # Not applicable for equity statement
+                        'inferred_order': False  # Not inferred - calculated item
                     })
         
         # Deduplicate items_to_insert by (filing_id, concept_id, statement_type)
@@ -1483,6 +2322,152 @@ def populate_statement_items(filing_id: Optional[int] = None):
                 deduplicated_items.append(item)
         
         items_to_insert = deduplicated_items
+        
+        # Eleventh pass: Create synthetic "Total equity and liabilities" for balance sheet
+        # UNIVERSAL FIX: Add this AFTER all other items so we can calculate correct max display_order
+        # This is a calculated total (total_equity + total_liabilities)
+        # First, ensure the concept exists
+        total_eq_liab_concept_query = text("""
+            SELECT concept_id FROM dim_concepts
+            WHERE concept_name = 'TotalEquityAndLiabilities' AND taxonomy = 'synthetic'
+            LIMIT 1
+        """)
+        total_eq_liab_result = conn.execute(total_eq_liab_concept_query)
+        total_eq_liab_row = total_eq_liab_result.fetchone()
+        
+        if not total_eq_liab_row:
+            create_total_eq_liab_query = text("""
+                INSERT INTO dim_concepts (
+                    concept_name, taxonomy, normalized_label, preferred_label,
+                    concept_type, is_abstract, statement_type
+                ) VALUES (
+                    'TotalEquityAndLiabilities', 'synthetic', 'total_equity_and_liabilities', 'Total equity and liabilities',
+                    'monetary', FALSE, 'balance_sheet'
+                )
+                RETURNING concept_id
+            """)
+            create_result = conn.execute(create_total_eq_liab_query)
+            total_eq_liab_concept_id = create_result.fetchone()[0]
+            conn.commit()
+        else:
+            total_eq_liab_concept_id = total_eq_liab_row[0]
+        
+        # Add to rel_statement_items for all filings with balance sheet items
+        # CRITICAL: Calculate max_liab_equity_order from FINAL items_to_insert (after all passes)
+        for filing_id_val in filing_ids:
+            has_balance_sheet_items = any(
+                item['filing_id'] == filing_id_val and 
+                item['statement_type'] == 'balance_sheet'
+                for item in items_to_insert
+            )
+            
+            if has_balance_sheet_items:
+                # Check if already added
+                already_added = any(
+                    item['concept_id'] == total_eq_liab_concept_id and 
+                    item['filing_id'] == filing_id_val and 
+                    item['statement_type'] == 'balance_sheet'
+                    for item in items_to_insert
+                )
+                
+                if not already_added:
+                    # UNIVERSAL FIX: Calculate max from FINAL items_to_insert (after all passes)
+                    # CRITICAL: Exclude disclosure items (display_order >= 1000) from max calculation
+                    max_liab_equity_order = 0
+                    for item in items_to_insert:
+                        if (item['filing_id'] == filing_id_val and 
+                            item['statement_type'] == 'balance_sheet' and
+                            item.get('side') == 'liabilities_equity' and
+                            item.get('display_order', 0) < 1000 and  # Exclude disclosure items
+                            item.get('display_order', 0) > max_liab_equity_order):
+                            max_liab_equity_order = item.get('display_order', 0)
+                    
+                    # Total equity and liabilities goes at the end of liabilities_equity side
+                    items_to_insert.append({
+                        'filing_id': filing_id_val,
+                        'concept_id': total_eq_liab_concept_id,
+                        'statement_type': 'balance_sheet',
+                        'display_order': max_liab_equity_order + 1,  # After all liabilities_equity items
+                        'is_header': False,
+                        'is_main_item': True,
+                        'role_uri': None,
+                        'source': 'calculated',
+                        'side': 'liabilities_equity',
+                        'inferred_order': False  # Not inferred - calculated item
+                    })
+        
+        # UNIVERSAL FIX: Map "Cash at bank" to "Cash and cash equivalents at the end of the year" for cash flow
+        # AND deduplicate if both exist
+        # This works for all companies (IFRS and US-GAAP)
+        for filing_id_val in filing_ids:
+            # Get all cash flow items for this filing
+            cash_flow_items = [
+                item for item in items_to_insert
+                if item['filing_id'] == filing_id_val and item['statement_type'] == 'cash_flow'
+            ]
+            
+            if not cash_flow_items:
+                continue
+            
+            # Query normalized_labels for these concepts
+            concept_ids = [item['concept_id'] for item in cash_flow_items]
+            label_query = text("""
+                SELECT concept_id, normalized_label FROM dim_concepts
+                WHERE concept_id = ANY(:concept_ids)
+            """)
+            label_result = conn.execute(label_query, {'concept_ids': concept_ids})
+            concept_labels = {row[0]: row[1] for row in label_result}
+            
+            # UNIVERSAL FIX: Map "cash_at_bank" or "cash_and_equivalents" to "cash_and_cash_equivalents_at_the_end_of_the_year"
+            # First, check if we have "cash_and_cash_equivalents_at_the_end_of_the_year" concept
+            end_cash_concept_query = text("""
+                SELECT concept_id FROM dim_concepts
+                WHERE normalized_label = 'cash_and_cash_equivalents_at_the_end_of_the_year'
+                LIMIT 1
+            """)
+            end_cash_result = conn.execute(end_cash_concept_query)
+            end_cash_row = end_cash_result.fetchone()
+            end_cash_concept_id = end_cash_row[0] if end_cash_row else None
+            
+            # Check if we have "cash_at_bank" or "cash_and_equivalents" in cash flow
+            cash_at_bank_items = [
+                item for item in cash_flow_items
+                if concept_labels.get(item['concept_id']) in ['cash_at_bank', 'balances_with_banks', 'cash_and_equivalents']
+                and 'beginning' not in (concept_labels.get(item['concept_id']) or '').lower()
+            ]
+            
+            has_end_cash_label = any(
+                concept_labels.get(item['concept_id']) == 'cash_and_cash_equivalents_at_the_end_of_the_year'
+                for item in cash_flow_items
+            )
+            
+            # If we have cash_at_bank but not end_cash_label, map it
+            if cash_at_bank_items and not has_end_cash_label and end_cash_concept_id:
+                # Replace cash_at_bank with end_cash concept
+                for item in items_to_insert:
+                    if (item['filing_id'] == filing_id_val and
+                        item['statement_type'] == 'cash_flow' and
+                        concept_labels.get(item['concept_id']) in ['cash_at_bank', 'balances_with_banks', 'cash_and_equivalents'] and
+                        'beginning' not in (concept_labels.get(item['concept_id']) or '').lower()):
+                        # Map to end_cash concept
+                        item['concept_id'] = end_cash_concept_id
+                        # Update normalized_label in concept_labels for future checks
+                        concept_labels[item['concept_id']] = 'cash_and_cash_equivalents_at_the_end_of_the_year'
+                        break  # Only map first occurrence
+            
+            # If we have both, remove cash_at_bank/balances_with_banks (deduplication)
+            if has_end_cash_label or (cash_at_bank_items and end_cash_concept_id):
+                items_to_insert = [
+                    item for item in items_to_insert
+                    if not (
+                        item['filing_id'] == filing_id_val and
+                        item['statement_type'] == 'cash_flow' and
+                        concept_labels.get(item['concept_id']) in ['cash_at_bank', 'balances_with_banks'] and
+                        'beginning' not in (concept_labels.get(item['concept_id']) or '').lower() and
+                        # Don't remove if we just mapped it to end_cash
+                        item['concept_id'] != end_cash_concept_id
+                    )
+                ]
         
         # Delete existing items for this filing/statement_type combination first
         # This ensures we don't have stale standard template items when XBRL exists
@@ -1500,22 +2485,70 @@ def populate_statement_items(filing_id: Optional[int] = None):
         # Insert items
         if items_to_insert:
             # Handle NULL side values properly
+            # Set defaults for any missing fields
             for item in items_to_insert:
                 if 'side' not in item or item['side'] is None:
                     item['side'] = None  # Explicitly set to None for non-balance-sheet items
+                if 'inferred_order' not in item:
+                    item['inferred_order'] = False  # Default to False if not set
+                if 'header_source' not in item:
+                    # Set header_source based on is_header flag
+                    if item.get('is_header', False):
+                        # If is_header=True but header_source not set, it's likely synthetic (will be updated later)
+                        item['header_source'] = 'synthetic'  # Default for headers without explicit source
+                    else:
+                        item['header_source'] = None  # Not a header
             
             insert_query = text("""
                 INSERT INTO rel_statement_items (
                     filing_id, concept_id, statement_type, display_order,
-                    is_header, is_main_item, role_uri, source, side
+                    is_header, is_main_item, role_uri, source, side, inferred_order, header_source
                 ) VALUES (
                     :filing_id, :concept_id, :statement_type, :display_order,
-                    :is_header, :is_main_item, :role_uri, :source, :side
+                    :is_header, :is_main_item, :role_uri, :source, :side, :inferred_order, :header_source
                 )
             """)
             
             conn.execute(insert_query, items_to_insert)
             conn.commit()
+            
+            # UNIVERSAL FIX: Update display_order for equity statement items to ensure correct order
+            # This ensures that display_order matches compute_equity_order() results
+            if any(item.get('statement_type') == 'equity_statement' for item in items_to_insert):
+                # Get all equity statement items and their normalized_labels
+                equity_items_query = text("""
+                    SELECT si.filing_id, si.concept_id, co.normalized_label
+                    FROM rel_statement_items si
+                    JOIN dim_concepts co ON si.concept_id = co.concept_id
+                    WHERE si.statement_type = 'equity_statement'
+                      AND (:filing_id IS NULL OR si.filing_id = :filing_id)
+                """)
+                equity_items_result = conn.execute(equity_items_query, {"filing_id": filing_id})
+                equity_items = equity_items_result.fetchall()
+                
+                # Update display_order for each item using compute_equity_order
+                for filing_id_val, concept_id_val, normalized_label in equity_items:
+                    correct_order = compute_equity_order(normalized_label)
+                    update_query = text("""
+                        UPDATE rel_statement_items
+                        SET display_order = :display_order
+                        WHERE filing_id = :filing_id
+                          AND concept_id = :concept_id
+                          AND statement_type = 'equity_statement'
+                    """)
+                    conn.execute(update_query, {
+                        "filing_id": filing_id_val,
+                        "concept_id": concept_id_val,
+                        "display_order": correct_order
+                    })
+                conn.commit()
+            
+            # Also populate templates/overrides if template tables exist
+            try:
+                populate_templates_from_items(conn, filing_id, items_to_insert)
+            except Exception as e:
+                # Don't fail if templates don't exist yet (backward compatibility)
+                print(f"   ⚠️  Template population skipped: {e}")
             
             print(f"   ✅ Populated {len(items_to_insert)} statement items")
             return len(items_to_insert)

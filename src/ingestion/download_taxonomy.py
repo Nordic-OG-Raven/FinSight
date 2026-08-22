@@ -17,6 +17,7 @@ from arelle import Cntlr, ModelManager
 from arelle import XbrlConst
 import json
 import logging
+from src.utils.logging_utils import truncate_log_message
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -35,9 +36,9 @@ def download_and_extract_taxonomy(taxonomy_url, taxonomy_name, output_file, is_z
     Returns:
         Number of relationships extracted
     """
-    logger.info(f"Downloading {taxonomy_name} taxonomy...")
-    logger.info(f"  URL: {taxonomy_url}")
-    logger.info(f"  (First run may take 5-10 minutes to download)")
+    logger.info(truncate_log_message(f"Downloading {taxonomy_name} taxonomy..."))
+    logger.debug(f"  URL: {taxonomy_url}")
+    logger.debug(f"  (First run may take 5-10 minutes to download)")
     
     controller = Cntlr.Cntlr(logFileName="logToBuffer")
     controller.webCache.workOffline = False  # Enable network access
@@ -50,20 +51,28 @@ def download_and_extract_taxonomy(taxonomy_url, taxonomy_name, output_file, is_z
     
     try:
         if is_zip:
-            logger.info(f"  Downloading ZIP file...")
+            logger.debug(f"  Downloading ZIP file...")
             # Download ZIP to temp file
             temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
             temp_zip_path = temp_zip.name
             temp_zip.close()
             
-            urllib.request.urlretrieve(taxonomy_url, temp_zip_path)
-            logger.info(f"  ✅ ZIP downloaded")
+            try:
+                urllib.request.urlretrieve(taxonomy_url, temp_zip_path)
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    logger.warning(f"  ⚠️  ESEF taxonomy ZIP not found at {taxonomy_url} (404)")
+                    logger.warning(f"  This is expected - ESEF taxonomy URLs change frequently")
+                    logger.warning(f"  Skipping ESEF taxonomy download")
+                    return 0
+                raise
+            logger.debug(f"  ✅ ZIP downloaded")
             
             # Extract ZIP
             temp_dir = tempfile.mkdtemp()
             with zipfile.ZipFile(temp_zip_path, 'r') as zip_ref:
                 zip_ref.extractall(temp_dir)
-            logger.info(f"  ✅ ZIP extracted to {temp_dir}")
+            logger.debug(f"  ✅ ZIP extracted")
             
             # Find entry point XSD (look for files ending in -entryPoint-all-*.xsd or similar)
             entry_points = list(Path(temp_dir).rglob('*-entryPoint-all-*.xsd'))
@@ -87,7 +96,7 @@ def download_and_extract_taxonomy(taxonomy_url, taxonomy_name, output_file, is_z
             
             # Convert to file:// URL for Arelle
             actual_taxonomy_url = entry_point.as_uri()
-            logger.info(f"  ✅ Found entry point: {entry_point.name}")
+            logger.debug(f"  ✅ Found entry point: {entry_point.name}")
         
         # Load taxonomy (Arelle will download and cache, or use local file)
         taxonomy = model_manager.load(actual_taxonomy_url)
@@ -96,7 +105,7 @@ def download_and_extract_taxonomy(taxonomy_url, taxonomy_name, output_file, is_z
             logger.error(f"Failed to load {taxonomy_name}")
             return 0
         
-        logger.info(f"  ✅ Taxonomy loaded")
+        logger.debug(f"  ✅ Taxonomy loaded")
         
         # Extract calculation relationships
         calc_arcrole = 'http://www.xbrl.org/2003/arcrole/summation-item'
@@ -171,7 +180,7 @@ def download_and_extract_taxonomy(taxonomy_url, taxonomy_name, output_file, is_z
         ref_rels = taxonomy.relationshipSet(ref_arcrole)
         
         if ref_rels:
-            logger.info(f"  Reference linkbase found, extracting authoritative references...")
+            logger.debug(f"  Reference linkbase found, extracting authoritative references...")
             concept_references = {}  # concept_name -> list of authoritative references
             
             for rel in ref_rels.modelRelationships:
@@ -259,13 +268,13 @@ def download_and_extract_taxonomy(taxonomy_url, taxonomy_name, output_file, is_z
                     canonical = min(concepts, key=len)
                     semantic_equivalence[canonical] = concepts
             
-            logger.info(f"  ✅ Extracted reference linkbase for {len(concept_references)} concepts")
-            logger.info(f"  ✅ Found {len(semantic_equivalence)} semantic equivalence groups")
+            logger.debug(f"  ✅ Extracted reference linkbase for {len(concept_references)} concepts")
+            logger.debug(f"  ✅ Found {len(semantic_equivalence)} semantic equivalence groups")
         else:
             logger.warning(f"  No reference linkbase found, will use label linkbase as fallback")
         
         # ALSO: Extract concept labels for synonym mapping (fallback)
-        logger.info(f"  Extracting concept labels for synonym detection (fallback)...")
+        logger.debug(f"  Extracting concept labels for synonym detection (fallback)...")
         concepts_with_labels = []
         synonym_groups = {}  # label -> list of concept names
         

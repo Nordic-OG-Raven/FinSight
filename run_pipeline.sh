@@ -10,7 +10,8 @@
 #   ./run_pipeline.sh AAPL 2023 10-K    # Extract Apple 2023 10-K
 #
 
-set -e  # Exit on error
+# Don't use set -e because we want to continue even if UI tests fail
+# set -e  # Exit on error
 
 # Configuration
 TICKER="${1:-NVO}"
@@ -23,6 +24,7 @@ PROJECT_ROOT="/Users/jonas/FinSight"
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 YELLOW='\033[1;33m'
+RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo "========================================================================"
@@ -55,11 +57,14 @@ fi
 
 cd "$PROJECT_ROOT"
 
+# Enable unbuffered Python output for real-time progress bars
+export PYTHONUNBUFFERED=1
+
 # Step 1: Extract data using Python pipeline
-echo -e "${BLUE}Step 1/2: Extracting XBRL data...${NC}"
+echo -e "${BLUE}Step 1/3: Extracting XBRL data...${NC}"
 echo "------------------------------------------------------------------------"
 
-"$VENV_PATH/bin/python" src/main.py \
+"$VENV_PATH/bin/python" -u src/main.py \
     --ticker "$TICKER" \
     --year "$YEAR" \
     --filing-type "$FILING_TYPE" \
@@ -75,8 +80,8 @@ fi
 
 echo ""
 
-# Step 2: Load to PostgreSQL (using existing JSON)
-echo -e "${BLUE}Step 2/2: Loading to PostgreSQL...${NC}"
+# Step 2: Load to PostgreSQL using proper ETL loader (star schema)
+echo -e "${BLUE}Step 2/3: Loading to PostgreSQL (star schema)...${NC}"
 echo "------------------------------------------------------------------------"
 
 JSON_FILE="data/processed/${TICKER}_${YEAR}_${FILING_TYPE//-/}_facts.json"
@@ -86,91 +91,140 @@ if [ ! -f "$JSON_FILE" ]; then
     exit 1
 fi
 
-echo "  → Loading JSON data to PostgreSQL..."
+echo "  → Loading JSON data to PostgreSQL using StarSchemaLoader..."
 echo "  → File: $JSON_FILE"
+echo "  → This applies normalization, validation, and loads into star schema"
 
-# Convert JSON to CSV for easy loading
-CSV_FILE="/tmp/finsight_${TICKER}_${YEAR}.csv"
+# Use the proper ETL loader (database/load_financial_data.py)
+# This loads into fact_financial_metrics (star schema), not financial_facts (old flat schema)
+# Load only the specific file we just extracted
+"$VENV_PATH/bin/python" -u database/load_financial_data.py "$JSON_FILE"
 
-"$VENV_PATH/bin/python" << PYTHON
-import json
-import pandas as pd
+LOAD_EXIT_CODE=$?
 
-# Load JSON
-with open('$JSON_FILE') as f:
-    data = json.load(f)
+if [ $LOAD_EXIT_CODE -ne 0 ]; then
+    echo ""
+    echo -e "${YELLOW}⚠️  Data loading failed. Check output above for details.${NC}"
+    echo ""
+fi
 
-facts = data['facts']
-df = pd.DataFrame(facts)
+echo ""
 
-# Select key columns for database
-columns = ['concept', 'taxonomy', 'value_text', 'value_numeric', 
-           'period_type', 'period_end', 'unit_measure']
-df_export = df[[col for col in columns if col in df.columns]]
+# Step 3: Start API (if not already running)
+echo -e "${BLUE}Step 3/4: Starting API...${NC}"
+echo "------------------------------------------------------------------------"
 
-# Add metadata
-df_export.insert(0, 'company', '$TICKER')
-df_export.insert(1, 'filing_type', '$FILING_TYPE')  
-df_export.insert(2, 'fiscal_year_end', '$YEAR-12-31')
+FINSIGHT_API="/Users/jonas/FinSight/api"
+FLASK_PORT=5001
+API_LOG="/Users/jonas/FinSight/api.log"
 
-df_export.to_csv('$CSV_FILE', index=False)
-print(f"  → Prepared {len(df_export)} facts for loading")
-PYTHON
+# Function to check if API is running
+check_api_status() {
+    curl -s "http://localhost:$FLASK_PORT/health" > /dev/null 2>&1
+}
 
-# Copy to Docker and load
-echo "  → Copying to Docker container..."
-docker cp "$CSV_FILE" superset_db:/tmp/finsight_data.csv
+# Function to kill process on port
+kill_port() {
+    local port=$1
+    local pids=$(lsof -ti:$port 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+        echo -e "${YELLOW}Killing existing processes on port $port...${NC}"
+        echo "$pids" | xargs kill -9 2>/dev/null || true
+        sleep 1
+    fi
+}
 
-echo "  → Loading to database..."
-docker exec superset_db psql -U superset -d finsight << SQL
--- Ensure table exists
-CREATE TABLE IF NOT EXISTS financial_facts (
-    id SERIAL PRIMARY KEY,
-    company VARCHAR(50),
-    filing_type VARCHAR(20),
-    fiscal_year_end DATE,
-    concept TEXT,
-    taxonomy VARCHAR(50),
-    value_text TEXT,
-    value_numeric DOUBLE PRECISION,  -- Changed from DECIMAL(20,4) to handle large numbers
-    period_type VARCHAR(20),
-    period_end DATE,
-    unit_measure VARCHAR(50)
-);
+# Check if API is already running
+if check_api_status; then
+    echo -e "${GREEN}✅ API is already running on http://localhost:$FLASK_PORT${NC}"
+else
+    echo -e "${YELLOW}⚠️  API is not running at http://localhost:$FLASK_PORT${NC}"
+    echo "   Starting API on port $FLASK_PORT..."
+    
+    # Kill any existing processes on the port
+    kill_port $FLASK_PORT
+    
+    # Start Flask API
+    cd "$FINSIGHT_API"
+    source "$VENV_PATH/bin/activate"
+    nohup python main.py > "$API_LOG" 2>&1 &
+    FLASK_PID=$!
+    echo $FLASK_PID > /tmp/flask_finsight.pid
+    sleep 3
+    
+    # Verify Flask started
+    if ! kill -0 $FLASK_PID 2>/dev/null; then
+        echo -e "${RED}❌ Flask failed to start. Check $API_LOG${NC}"
+        tail -20 "$API_LOG"
+        exit 1
+    fi
+    
+    # Wait for Flask to be ready
+    API_READY=false
+    for i in {1..30}; do
+        if check_api_status; then
+            echo -e "${GREEN}✅ Flask API running on http://localhost:$FLASK_PORT${NC}"
+            API_READY=true
+            break
+        fi
+        if [ $i -eq 30 ]; then
+            echo -e "${RED}❌ Flask API not responding after 30s${NC}"
+            tail -20 "$API_LOG"
+            exit 1
+        fi
+        sleep 1
+    done
+    
+    if [ "$API_READY" = false ]; then
+        echo -e "${RED}❌ Failed to start API. Exiting.${NC}"
+        exit 1
+    fi
+fi
 
--- Load data (delete old data for this company/year first)
-DELETE FROM financial_facts 
-WHERE company = '$TICKER' 
-  AND EXTRACT(YEAR FROM fiscal_year_end) = $YEAR;
+cd "$PROJECT_ROOT"
+echo ""
 
--- Copy from CSV
-\COPY financial_facts(company, filing_type, fiscal_year_end, concept, taxonomy, value_text, value_numeric, period_type, period_end, unit_measure) FROM '/tmp/finsight_data.csv' WITH CSV HEADER;
+# Step 4: Run UI tests
+echo -e "${BLUE}Step 4/4: Running UI tests...${NC}"
+echo "------------------------------------------------------------------------"
 
--- Show stats
-SELECT 
-    company,
-    filing_type,
-    fiscal_year_end,
-    COUNT(*) as fact_count
-FROM financial_facts
-GROUP BY company, filing_type, fiscal_year_end
-ORDER BY company, fiscal_year_end DESC;
-SQL
+"$VENV_PATH/bin/python" -u UITest.py \
+    --ticker "$TICKER" \
+    --year "$YEAR" \
+    --test all \
+    --api-base "http://localhost:$FLASK_PORT"
 
-# Cleanup
-rm -f "$CSV_FILE"
+UI_TEST_EXIT_CODE=$?
+
+if [ $UI_TEST_EXIT_CODE -ne 0 ]; then
+    echo ""
+    echo -e "${YELLOW}⚠️  UI tests failed. Check output above for details.${NC}"
+    echo ""
+fi
 
 echo ""
 echo "========================================================================"
-echo -e "${GREEN}✅ Pipeline Complete!${NC}"
+if [ $UI_TEST_EXIT_CODE -eq 0 ]; then
+    echo -e "${GREEN}✅ Pipeline Complete!${NC}"
+else
+    echo -e "${YELLOW}⚠️  Pipeline Complete with Warnings${NC}"
+fi
 echo "========================================================================"
 echo ""
 echo "📊 Database: finsight"
-echo "📊 Table: financial_facts"
+echo "📊 Tables: fact_financial_metrics (star schema)"
+echo ""
+echo "🌐 API: http://localhost:$FLASK_PORT/api/finsight"
+echo "   Log file: $API_LOG"
+if [ -f /tmp/flask_finsight.pid ]; then
+    FLASK_PID=$(cat /tmp/flask_finsight.pid)
+    echo "   Process ID: $FLASK_PID"
+    echo "   To stop: kill $FLASK_PID"
+fi
 echo ""
 echo "Next steps:"
 echo "  1. Query data:"
-echo "     docker exec superset_db psql -U superset -d finsight -c \"SELECT COUNT(*) FROM financial_facts;\""
+echo "     docker exec superset_db psql -U superset -d finsight -c \"SELECT COUNT(*) FROM fact_financial_metrics;\""
 echo ""
 echo "  2. Connect Superset:"
 echo "     Host: superset_db"
@@ -178,6 +232,9 @@ echo "     Port: 5432"
 echo "     Database: finsight"
 echo "     Username: superset"
 echo "     Password: superset"
+echo ""
+echo "  3. Test API:"
+echo "     curl http://localhost:$FLASK_PORT/health"
 echo ""
 echo "========================================================================"
 

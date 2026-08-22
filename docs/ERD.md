@@ -20,13 +20,43 @@
 │    industry              │     │
 │    country               │     │
 │    accounting_standard   │     │
+│ FK framework_id →        │─────┤──► dim_reporting_frameworks
+│    default_reporting_    │     │
+│      frequency           │     │
 │    created_at            │     │
 │    updated_at            │     │
 └──────────────────────────┘     │
                                  │
+┌──────────────────────────┐     │
+│ dim_reporting_frameworks │     │
+├──────────────────────────┤     │
+│ PK framework_id (SERIAL)  │◄────┘
+│    framework_name        │
+│    framework_code         │
+│    jurisdiction           │
+│    standard_setter        │
+│    effective_date         │
+│    is_active              │
+└──────────────────────────┘
+                                 │
+┌──────────────────────────┐     │
+│    dim_taxonomies        │     │
+├──────────────────────────┤     │
+│ PK taxonomy_id (SERIAL)  │◄────┤
+│ FK reporting_framework_  │─────┘
+│    id                    │
+│    taxonomy_name         │
+│    taxonomy_version       │
+│    jurisdiction           │
+│    effective_date         │
+│    superseded_date        │
+│ FK parent_taxonomy_id     │─────┐
+│    is_active              │     │
+└──────────────────────────┘     │
                                  │
 ┌──────────────────────────┐     │
 │    dim_concepts          │     │
+│ FK taxonomy_id →          │─────┘
 ├──────────────────────────┤     │
 │ PK concept_id (SERIAL)   │◄────┤
 │    concept_name          │     │
@@ -151,13 +181,20 @@
 │    dim_concepts (NULL OK)        │  -- NULL for root nodes
 │ FK child_concept_id →            │
 │    dim_concepts                  │
-│    order_index                   │
+│    order_index                   │  -- PRIMARY SOURCE: XBRL presentation order
+│                                  │     (company's actual filing order, used as-is)
 │    preferred_label               │
 │    statement_type                │  -- balance_sheet, income_statement, etc.
 │    arcrole                       │
 │    priority                      │
 │ UK (filing_id, parent_concept_id,│
 │     child_concept_id, order_index)│
+│                                  │
+│ Note: order_index is the PRIMARY │
+│ source for display_order in      │
+│ rel_statement_items. Only        │
+│ minimal corrections applied      │
+│ (e.g., EPS positioning).         │
 └──────────────────────────────────┘
 
 ┌──────────────────────────────────┐
@@ -186,14 +223,42 @@
 │ FK filing_id → dim_filings       │
 │ FK concept_id → dim_concepts      │
 │    statement_type VARCHAR(50)     │  -- income_statement, balance_sheet, etc.
-│    display_order INTEGER          │  -- Corrected order (handles EPS, headers)
+│    display_order INTEGER          │  -- Ordering for statement items (see derivation logic below)
 │    is_header BOOLEAN              │  -- TRUE for header items (e.g., "Earnings per share")
 │    is_main_item BOOLEAN           │  -- TRUE for main statement items (not detail/disclosure)
 │    role_uri VARCHAR(500)          │  -- For reference (from presentation hierarchy)
 │    source VARCHAR(20)             │  -- 'xbrl' or 'standard'
+│    side VARCHAR(20)               │  -- For balance_sheet: 'assets' or 'liabilities_equity'
+│    inferred_order BOOLEAN         │  -- TRUE if display_order was inferred from other years
+│    header_source VARCHAR(20)     │  -- Source of header: 'xbrl_parent', 'xbrl_label_role',
+│                                   │    'template', 'synthetic', or NULL (not a header)
 │    created_at TIMESTAMP           │
 │ UK (filing_id, concept_id,        │
 │     statement_type)               │
+│                                   │
+│ display_order Derivation Logic:  │
+│ 1. PRIMARY: XBRL order_index from │
+│    rel_presentation_hierarchy     │
+│    (company's actual filing order)│
+│ 2. FALLBACK 1: Infer from other   │
+│    years (same company/statement/ │
+│    concept) when XBRL extraction │
+│    fails for this filing          │
+│ 3. FALLBACK 2: Standard templates│
+│    (IFRS/US-GAAP) when XBRL      │
+│    completely unavailable         │
+│                                   │
+│ is_header Derivation Logic:       │
+│ 1. PRIMARY: XBRL parent-child     │
+│    relationships (parent concepts │
+│    with children but no facts)    │
+│ 2. SECONDARY: XBRL label roles    │
+│    (documentation role indicates │
+│    headers)                       │
+│ 3. TERTIARY: Standard templates  │
+│    (IFRS/US-GAAP header patterns)│
+│ 4. FALLBACK: Synthetic headers    │
+│    (only when XBRL unavailable)  │
 └──────────────────────────────────┘
 
 ┌──────────────────────────────────┐
@@ -246,10 +311,172 @@
 │ PK equity_statement_id (SERIAL) │
 │ (Same structure as               │
 │  fact_income_statement)          │
-│ NOTE: Not yet implemented in    │
-│       schema.sql (future)        │
+│ NOTE: DEPRECATED - Use views     │
+│       instead (see below)        │
+└──────────────────────────────────┘
+
+┌──────────────────────────────────┐
+│  staging_facts (ELT Staging)      │
+├──────────────────────────────────┤
+│ PK staging_id (SERIAL)          │
+│ FK filing_id                     │
+│    concept_name TEXT              │
+│    value_numeric                 │
+│    period_type, period_start,    │
+│    period_end, instant_date      │
+│    dimensions_json (JSONB)       │
+│    unit_measure, unit_type        │
+│    source, extraction_method     │
+│    is_processed BOOLEAN          │
+│                                  │
+│ Purpose: Raw extracted data      │
+│ before transformation            │
+└──────────────────────────────────┘
+
+┌──────────────────────────────────┐
+│  dim_statement_templates         │
+├──────────────────────────────────┤
+│ PK template_id (SERIAL)         │
+│    statement_type                │
+│    format_type                   │
+│    item_order                    │
+│    item_label                    │
+│    normalized_label              │
+│    item_type                     │
+│    is_header, is_spacer          │
+│    hierarchy_level               │
+│    side (for balance sheet)      │
+│                                  │
+│ Purpose: Canonical templates     │
+│ (80-90% standard items)          │
+└──────────────────────────────────┘
+
+┌──────────────────────────────────┐
+│  rel_statement_overrides         │
+├──────────────────────────────────┤
+│ PK override_id (SERIAL)         │
+│ FK filing_id                     │
+│ FK template_id (nullable)        │
+│    item_order, item_label        │
+│    normalized_label              │
+│    is_custom BOOLEAN             │
+│                                  │
+│ Purpose: Filing-specific         │
+│ custom items (10-20%)            │
+└──────────────────────────────────┘
+
+┌──────────────────────────────────┐
+│  VIEWS (Template-Based)          │
+├──────────────────────────────────┤
+│ v_income_statement               │
+│ v_balance_sheet                  │
+│ v_cash_flow                      │
+│ v_comprehensive_income           │
+│ v_equity_statement               │
+│                                  │
+│ Purpose: Combine templates +     │
+│ facts (replaces denormalized     │
+│ fact tables)                     │
 └──────────────────────────────────┘
 ```
+
+## New ERD Enhancements (Swiss Army Knife Features)
+
+### Foundation Dimensions
+
+**dim_reporting_frameworks**
+- Stores framework metadata (IFRS, US-GAAP, UK-GAAP, etc.)
+- Links to companies via `dim_companies.framework_id`
+- Tracks standard setter (IASB, FASB, FRC), jurisdiction, effective dates
+
+**dim_taxonomies**
+- Stores taxonomy metadata (us-gaap, ifrs-full, ifrs-eu, etc.)
+- Links to concepts via `dim_concepts.taxonomy_id`
+- Supports taxonomy versioning (2021, 2022, 2023, etc.)
+- Tracks parent taxonomies and superseded dates
+
+**rel_concept_mappings**
+- Maps concepts across taxonomies (IFRS Revenue → US-GAAP Revenue)
+- Enables cross-standard analysis
+- Supports mapping types (equivalent, similar, approximate)
+- Includes confidence scores and mapping sources
+
+### Analysis Dimensions
+
+**dim_fiscal_periods**
+- Stores company-specific fiscal period metadata
+- Enables period normalization for cross-company analysis
+- Tracks fiscal year end dates, calendar vs fiscal year
+
+**dim_currencies**
+- Stores currency metadata (USD, EUR, DKK, etc.)
+- Links to facts via `fact_financial_metrics.currency_id`
+- Supports multi-currency analysis
+
+**fact_exchange_rates**
+- Stores exchange rate history
+- Links currencies and periods
+- Enables currency conversion analysis
+
+**fact_ratios**
+- Stores pre-calculated financial ratios (ROE, ROA, current ratio, etc.)
+- Links to numerator/denominator concepts
+- Pre-calculated for performance
+
+**dim_segments**
+- Stores segment metadata (geographic, business, product)
+- Supports segment hierarchy
+- Links to facts via dimensions
+
+### Advanced Features
+
+**fact_financial_notes**
+- Stores structured notes to financial statements
+- Supports note types (accounting policies, contingencies, related parties)
+- Links to filings
+
+**rel_fact_notes**
+- Links notes to specific facts (many-to-many)
+- Enables "show me all notes related to revenue" queries
+
+**fact_gaap_reconciliation**
+- Tracks GAAP → non-GAAP adjustments
+- Links non-GAAP facts to GAAP facts
+- Stores adjustment types and amounts
+
+**audit_fact_changes**
+- Audit trail for all fact changes
+- Tracks old/new values, change type, reason, timestamp
+- Enables time-travel queries and restatement analysis
+
+**fact_restatements**
+- Tracks restatement events
+- Links to filings and companies
+- Stores restatement date, reason, impact, affected periods
+
+**dim_consolidation_levels**
+- Stores consolidation level metadata
+- Supports entity hierarchy
+- Links via `dim_xbrl_dimensions`
+
+### Enhanced Columns
+
+**fact_financial_metrics**
+- `currency_id`: Links to `dim_currencies` for multi-currency support
+- `is_gaap`: Boolean flag for GAAP vs non-GAAP classification
+
+**dim_companies**
+- `framework_id`: Links to `dim_reporting_frameworks`
+- `default_reporting_frequency`: Company's default reporting frequency
+
+**dim_filings**
+- `reporting_frequency`: Per-filing reporting frequency (annual, quarterly, semi-annual)
+
+**dim_concepts**
+- `taxonomy_id`: Links to `dim_taxonomies` for taxonomy metadata
+
+**dim_statement_templates**
+- `framework_id`: Links to `dim_reporting_frameworks` (in addition to format_type)
 
 ## Relationships
 
@@ -327,12 +554,61 @@
 - Fact table has `fact_id SERIAL PRIMARY KEY`
 
 ### Foreign Keys
+
+**Core Star Schema:**
 - `fact_financial_metrics.company_id` → `dim_companies.company_id`
 - `fact_financial_metrics.concept_id` → `dim_concepts.concept_id`
 - `fact_financial_metrics.period_id` → `dim_time_periods.period_id`
 - `fact_financial_metrics.filing_id` → `dim_filings.filing_id`
 - `fact_financial_metrics.dimension_id` → `dim_xbrl_dimensions.dimension_id` (nullable)
+- `fact_financial_metrics.currency_id` → `dim_currencies.currency_id` (nullable)
 - `dim_filings.company_id` → `dim_companies.company_id`
+
+**Framework & Taxonomy:**
+- `dim_companies.framework_id` → `dim_reporting_frameworks.framework_id`
+- `dim_concepts.taxonomy_id` → `dim_taxonomies.taxonomy_id`
+- `dim_taxonomies.reporting_framework_id` → `dim_reporting_frameworks.framework_id`
+- `dim_taxonomies.parent_taxonomy_id` → `dim_taxonomies.taxonomy_id`
+- `dim_statement_templates.framework_id` → `dim_reporting_frameworks.framework_id`
+
+**Concept Mappings:**
+- `rel_concept_mappings.source_concept_id` → `dim_concepts.concept_id`
+- `rel_concept_mappings.target_concept_id` → `dim_concepts.concept_id`
+
+**Fiscal Periods:**
+- `dim_fiscal_periods.company_id` → `dim_companies.company_id`
+
+**Exchange Rates:**
+- `fact_exchange_rates.from_currency_id` → `dim_currencies.currency_id`
+- `fact_exchange_rates.to_currency_id` → `dim_currencies.currency_id`
+- `fact_exchange_rates.period_id` → `dim_time_periods.period_id`
+
+**Ratios:**
+- `fact_ratios.company_id` → `dim_companies.company_id`
+- `fact_ratios.period_id` → `dim_time_periods.period_id`
+- `fact_ratios.numerator_concept_id` → `dim_concepts.concept_id`
+- `fact_ratios.denominator_concept_id` → `dim_concepts.concept_id`
+
+**Segments:**
+- `dim_segments.company_id` → `dim_companies.company_id`
+- `dim_segments.parent_segment_id` → `dim_segments.segment_id`
+
+**Notes:**
+- `fact_financial_notes.filing_id` → `dim_filings.filing_id`
+- `rel_fact_notes.fact_id` → `fact_financial_metrics.fact_id`
+- `rel_fact_notes.note_id` → `fact_financial_notes.note_id`
+
+**GAAP Reconciliation:**
+- `fact_gaap_reconciliation.non_gaap_fact_id` → `fact_financial_metrics.fact_id`
+- `fact_gaap_reconciliation.gaap_fact_id` → `fact_financial_metrics.fact_id`
+
+**Audit & Restatements:**
+- `audit_fact_changes.fact_id` → `fact_financial_metrics.fact_id`
+- `fact_restatements.filing_id` → `dim_filings.filing_id`
+- `fact_restatements.company_id` → `dim_companies.company_id`
+
+**Consolidation:**
+- `dim_consolidation_levels.parent_level_id` → `dim_consolidation_levels.level_id`
 - `data_quality_scores.filing_id` → `dim_filings.filing_id`
 - `rel_calculation_hierarchy.filing_id` → `dim_filings.filing_id`
 - `rel_calculation_hierarchy.parent_concept_id` → `dim_concepts.concept_id`
@@ -421,35 +697,99 @@
 
 ## Data Flow
 
+### Enhanced ELT Architecture (Swiss Army Knife)
+
+**Extract → Load (Staging) → Transform → Query**
+
+1. **Extract**: XBRL/SEC_API extraction
+2. **Load to Staging**: Raw facts → `staging_facts` (preserves provenance)
+3. **Transform**: 
+   - Normalize units, map concepts, create periods
+   - Populate `dim_taxonomies` and `dim_currencies`
+   - Link to `dim_reporting_frameworks`
+   - Set `is_gaap` flag
+4. **Load to Facts**: Normalized facts → `fact_financial_metrics`
+5. **Post-Processing**:
+   - Calculate ratios → `fact_ratios`
+   - Load exchange rates → `fact_exchange_rates`
+   - Populate fiscal periods → `dim_fiscal_periods`
+   - Extract notes → `fact_financial_notes`
+6. **Query**: Template-based views/functions combine templates + facts
+
+### ELT Architecture (Hybrid ETL/ELT)
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  1. EXTRACTION (Arelle XBRL Parser)                             │
+│  1. EXTRACTION (Arelle XBRL Parser / SEC API)                   │
 └─────────────────────────────────────────────────────────────────┘
                             │
                             ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  2. VALIDATION (Accounting Checks)                              │
+│  2. LOAD TO STAGING (ELT Layer)                                 │
+│     └─ Insert raw facts into staging_facts                      │
+│        (minimal transformation, preserves raw data)             │
 └─────────────────────────────────────────────────────────────────┘
                             │
                             ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  3. LOADING (load_financial_data.py)                            │
-│     ├─ Get or create company_id                                 │
-│     ├─ Get or create concept_id                                 │
-│     ├─ Get or create period_id                                  │
-│     ├─ Get or create filing_id                                  │
-│     ├─ Get or create dimension_id (if dimensional)              │
-│     └─ Insert fact (ON CONFLICT DO UPDATE)                      │
+│  3. TRANSFORM (SQL Views / Python ETL)                          │
+│     ├─ Normalize units and currencies                           │
+│     ├─ Map concepts to normalized_label                         │
+│     ├─ Create periods and dimensions                            │
+│     └─ Load into fact_financial_metrics                        │
 └─────────────────────────────────────────────────────────────────┘
                             │
                             ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  4. QUERY (Streamlit / Superset)                                │
-│     ├─ Consolidated: WHERE dimension_id IS NULL                 │
-│     ├─ Dimensional: JOIN dim_xbrl_dimensions                    │
-│     └─ Cross-company: JOIN all dimensions                       │
+│  4. PRESENTATION (Template-Based Views)                         │
+│     ├─ dim_statement_templates (canonical structure)            │
+│     ├─ rel_statement_overrides (custom items)                   │
+│     └─ Views combine templates + facts                           │
+│        (v_income_statement, v_balance_sheet, etc.)             │
+└─────────────────────────────────────────────────────────────────┘
+                            │
+                            ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  5. QUERY (API / UI)                                            │
+│     ├─ Query views: SELECT * FROM v_income_statement            │
+│     ├─ Materialized views for performance                       │
+│     └─ Single source of truth: fact_financial_metrics          │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+### Benefits of ELT Architecture
+
+1. **Debugging**: Query `staging_facts` to see raw extracted data
+2. **Reprocessing**: `UPDATE staging_facts SET is_processed = FALSE` and re-run transformation
+3. **Transparency**: View transformation logic in `v_staging_to_facts`
+4. **No Data Duplication**: Views query from `fact_financial_metrics` (single source of truth)
+5. **Flexibility**: Multiple views for different use cases
+6. **Performance**: Materialized views can be indexed and refreshed
+
+### Benefits of Enhanced ERD (Swiss Army Knife)
+
+1. **Multi-Standard Analysis**: `dim_reporting_frameworks` + `dim_taxonomies` enable IFRS vs US-GAAP comparison
+2. **Cross-Standard Mapping**: `rel_concept_mappings` enables "show me revenue for all companies regardless of standard"
+3. **Period Normalization**: `dim_fiscal_periods` enables cross-company Q1 comparisons (regardless of fiscal year end)
+4. **Multi-Currency Support**: `dim_currencies` + `fact_exchange_rates` enable currency conversion analysis
+5. **Pre-Calculated Ratios**: `fact_ratios` for performance (ROE, ROA, etc.)
+6. **Segment Analysis**: `dim_segments` enables regional/business unit analysis
+7. **Notes Integration**: `fact_financial_notes` + `rel_fact_notes` enable structured disclosure analysis
+8. **Non-GAAP Tracking**: `is_gaap` flag + `fact_gaap_reconciliation` enable GAAP vs non-GAAP analysis
+9. **Audit Trail**: `audit_fact_changes` enables time-travel queries and restatement analysis
+10. **Restatement Tracking**: `fact_restatements` enables identification of companies with frequent restatements
+11. **Taxonomy Versioning**: `dim_taxonomies` tracks XBRL taxonomy versions over time
+12. **Consolidation Levels**: `dim_consolidation_levels` enables consolidated vs standalone analysis
+13. **Reporting Frequency**: `reporting_frequency` enables seasonal pattern analysis
+
+### Template-Based Presentation Layer
+
+**Key Principle**: Headers and spacers go in templates, NOT in fact tables.
+
+- **80-90% Standard Items**: Stored in `dim_statement_templates` (canonical structure)
+- **10-20% Custom Items**: Stored in `rel_statement_overrides` (filing-specific)
+- **Views Combine**: Templates define structure, facts provide data
+- **No Sync Issues**: Views always query latest data from `fact_financial_metrics`
 
 ## Cardinality
 
@@ -508,8 +848,10 @@ NULL dimension_id distinguishes:
 - **Dimensional facts**: Breakdowns (e.g., product A revenue = $60B, product B = $40B)
 
 This prevents double-counting when aggregating and allows queries to choose:
-- Totals only: `WHERE dimension_id IS NULL`
-- All breakdowns: `WHERE dimension_id IS NOT NULL`
+- Totals only: `WHERE dimension_id IS NULL OR (dimension_id IS NOT NULL AND EXISTS (SELECT 1 FROM dim_xbrl_dimensions d WHERE d.dimension_id = f.dimension_id AND d.axis_name = 'ContextAxis'))`
+  - NOTE: Includes synthetic ContextAxis dimensions (created from context_id to preserve multiple consolidated facts)
+- True consolidated only: `WHERE dimension_id IS NULL` (excludes synthetic dimensions)
+- All breakdowns: `WHERE dimension_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM dim_xbrl_dimensions d WHERE d.dimension_id = f.dimension_id AND d.axis_name = 'ContextAxis')`
 - Specific dimension: `JOIN dim_xbrl_dimensions WHERE axis_name = 'ProductAxis'`
 
 ### Why JSONB for dimensions?

@@ -157,6 +157,7 @@ Core financial data points (the heart of the warehouse).
 - Prevents duplicate facts within same filing
 - NULL dimension_id = consolidated (total) value
 - Non-NULL dimension_id = segment/breakdown value
+- **Synthetic ContextAxis dimensions**: When multiple consolidated facts (dimension_id=NULL) exist with the same business key but different context_ids, synthetic dimensions are created to preserve all facts. These are treated as consolidated facts in queries.
 
 ### Metadata Tables
 
@@ -213,7 +214,9 @@ FROM fact_financial_metrics f
 JOIN dim_companies c ON f.company_id = c.company_id
 JOIN dim_concepts co ON f.concept_id = co.concept_id
 JOIN dim_time_periods t ON f.period_id = t.period_id
-WHERE f.dimension_id IS NULL;
+WHERE f.dimension_id IS NULL 
+   OR (f.dimension_id IS NOT NULL AND EXISTS (SELECT 1 FROM dim_xbrl_dimensions d WHERE d.dimension_id = f.dimension_id AND d.axis_name = 'ContextAxis'));
+-- NOTE: Includes synthetic ContextAxis dimensions (created from context_id to preserve multiple consolidated facts)
 ```
 
 **Use Case:** Quick cross-company comparisons without dimensional complexity.

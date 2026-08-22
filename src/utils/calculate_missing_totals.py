@@ -39,7 +39,7 @@ def _calculate_revenue_from_components(engine) -> int:
     Calculate revenue from components (e.g., SNY: RevenueFromSaleOfGoods + OtherRevenue).
     Returns count of calculated totals.
     """
-    logger.info("Calculating revenue from components...")
+    logger.debug("Calculating revenue from components...")
     
     with engine.connect() as conn:
         # Find companies missing revenue but have revenue components
@@ -133,7 +133,7 @@ def _calculate_current_liabilities_from_components(engine) -> int:
     Calculate current_liabilities from components (e.g., SNY IFRS).
     Returns count of calculated totals.
     """
-    logger.info("Calculating current_liabilities from components...")
+    logger.debug("Calculating current_liabilities from components...")
     
     with engine.connect() as conn:
         missing_query = text("""
@@ -229,7 +229,7 @@ def _calculate_bank_current_liabilities(engine) -> int:
     Banks report deposit liabilities as components of current_liabilities.
     Returns count of calculated totals.
     """
-    logger.info("Calculating current_liabilities for banks (from deposit liabilities)...")
+    logger.debug("Calculating current_liabilities for banks (from deposit liabilities)...")
     
     with engine.connect() as conn:
         missing_query = text("""
@@ -321,7 +321,7 @@ def _calculate_noncurrent_liabilities(engine) -> int:
     Calculate noncurrent_liabilities from components OR from total - current.
     Returns count of calculated totals.
     """
-    logger.info("Calculating noncurrent_liabilities...")
+    logger.debug("Calculating noncurrent_liabilities...")
     
     with engine.connect() as conn:
         missing_query = text("""
@@ -601,9 +601,9 @@ def calculate_missing_totals(engine) -> Dict[str, int]:
     - revenue = sum of revenue components (if total not available)
     - current_liabilities = sum of current liability components (if total not available)
     """
-    logger.info("="*100)
-    logger.info("CALCULATING MISSING UNIVERSAL METRIC TOTALS")
-    logger.info("="*100)
+    logger.debug("="*100)
+    logger.debug("CALCULATING MISSING UNIVERSAL METRIC TOTALS")
+    logger.debug("="*100)
     
     results = {}
     
