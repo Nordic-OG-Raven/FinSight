@@ -231,3 +231,31 @@ class TestFullPipelineIntegration:
                     f"This is the exact symptom the item 5 fixes (equity dependency gate, "
                     f"comprehensive-income classification) were meant to prevent."
                 )
+
+    def test_post_load_gap_fill_does_not_create_duplicate_filing_records(self):
+        """
+        Item 6: post_load_gap_filling.py must attach supplementary facts to the ONE
+        primary filing being processed, not create a separate dim_filings row per
+        comparative year it happens to gap-fill data for. Runs regardless of whether the
+        overall pipeline reports success — this specific fix holds independent of the
+        separate, still-open comprehensive_income/equity_statement intermittency (see
+        NVO_GOLDEN_PATH_2026-08.md item 6).
+        """
+        from src.main import run_pipeline
+
+        run_pipeline(ticker='NVO', year=2024, filing_type='20-F')  # ignore success/failure
+
+        engine = create_engine(DATABASE_URI)
+        with engine.connect() as conn:
+            filing_count = conn.execute(text(
+                """SELECT COUNT(*) FROM dim_filings fi
+                   JOIN dim_companies c ON fi.company_id = c.company_id
+                   WHERE c.ticker = 'NVO'"""
+            )).scalar()
+        assert filing_count == 1, (
+            f"Expected exactly 1 dim_filings row for NVO, found {filing_count}. "
+            f"This is the exact symptom of post_load_gap_filling.py creating a separate "
+            f"filing record per comparative year instead of attaching supplementary facts "
+            f"to the primary filing — check that primary_year/filing_type are still being "
+            f"threaded through from src/main.py to fill_missing_from_database()."
+        )

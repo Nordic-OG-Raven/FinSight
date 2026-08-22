@@ -11,18 +11,32 @@ this project has ~15 archived docs that suffered exactly that fate
 (`docs/archive/validation-design-history/`). Mark items done as you do them.
 
 **Session status (2026-08-22, end of session)**: items 1-5 done and independently verified.
-Item 6 found and fixed two real root causes (an invalid-SQL-syntax bug in `schema.sql`
-that likely explains why a table was never deployed at all; a period-deduplication bug
-causing two different date conventions to fragment one real period into two incomplete
-ones) — both confirmed correct in isolation, but a full clean pipeline run is not yet
-reliably reproducible: a second clean run hit a new, distinct, undiagnosed issue (a
-"phantom" income-statement period with values that trace to no known source — see "Known
-open issue" under item 6). Item 7 shipped 9 tests (up from 1 in the whole repo before
-today), including one that correctly fails right now because it's honestly catching that
-reproducibility gap. **Next session should start with the phantom-period issue**, using the
-confirmed lead already documented (spurious extra `dim_filings` rows created by
-`post_load_gap_filling.py`'s per-year loop) rather than starting from scratch. The database
-was left in a clean baseline (NVO: 0 facts, 1 filing record) at end of session.
+Item 6 found and fixed three real root causes, all independently confirmed: an
+invalid-SQL-syntax bug in `schema.sql` (likely why `dim_statement_templates` was never
+deployed), a period-deduplication bug (two date conventions fragmenting one real period
+into two incomplete ones), and — traced from the "phantom period" investigation — a filing
+identity bug in `post_load_gap_filling.py` that created a separate, wrong `dim_filings`
+row per comparative year instead of attaching supplementary facts to the one filing they
+belong to. That third fix is verified: `dim_filings` now stays at exactly 1 row for NVO
+across repeated runs.
+
+**Still open, and now the clearest next foothold**: a full clean pipeline run remains
+non-reproducible, but the remaining cause is narrowed, not mysterious —
+`fact_comprehensive_income`/`fact_equity_statement` intermittently populate empty because
+`rel_statement_items` (what those tables actually join against, not `fact_financial_metrics`
+directly) intermittently gets zero comprehensive_income/equity_statement classifications
+from `populate_statement_items.py`, even though the underlying facts are always correctly
+present. Most plausible common cause: item 3's still-open empty-presentation-hierarchy gap
+(`pres_rels` for NVO's filing) — `populate_statement_items.py`'s classification logic
+hasn't been read in detail yet to confirm this, but it's now a specific, falsifiable
+hypothesis rather than an unexplained phantom.
+
+Item 7 has 9 tests (up from 1 before today), including one that correctly fails right now
+because it's honestly catching the remaining reproducibility gap rather than being hidden
+or weakened. **Next session should start by reading `populate_statement_items.py`'s
+classification logic** and confirming or ruling out the presentation-hierarchy hypothesis
+above — that's a bounded, specific next step, not a fresh investigation. The database was
+left in a clean baseline (NVO: 0 facts, 1 filing record) at end of session.
 
 ---
 
@@ -355,24 +369,39 @@ population query. Start by checking whether this reproduces on a second company 
 suggest a general bug) or is NVO-specific (would suggest something about NVO's particular
 XBRL structure, e.g. a forward-looking or restated-figures section).
 
-**Do not spend more time on this without deliberately re-scoping it** — it surfaced at the
-end of a long session and hasn't been bounded yet. Treat as a fresh investigation, not a
-continuation of item 6.
+**Fixed and verified, 2026-08-22 (later same session)**: the `dim_filings` duplication
+mechanism was real and is now fixed. `fill_missing_from_database()` /
+`run_post_load_gap_filling()` (`src/utils/post_load_gap_filling.py`) built each
+supplementary batch's temp JSON using the loop's comparative-year variable as `'year'` /
+`fiscal_year_end` — but `filing_id` identifies one filed *document*, which legitimately
+contains multiple *periods* (current year + comparatives). Using the data year as if it
+were the filing year meant `get_or_create_filing()` created a separate, wrong filing
+record per comparative year instead of attaching supplementary facts to the one filing
+they belong to. Added `primary_year`/`filing_type` parameters threaded through from
+`src/main.py` (which already knows the actual filing's year) so the temp JSON always
+targets the correct filing regardless of which comparative year's data is being added.
+Verified: `dim_filings` now stays at exactly 1 row for NVO across multiple runs, including
+one that failed for an unrelated reason (see below) — this fix holds independent of that.
 
-**Confirmed lead, not yet traced to a fix**: `dim_filings` had 4 separate rows for NVO
-(fiscal_year_end 2022, 2023, 2024, 2025) instead of the expected 1. Root mechanism
-confirmed: `run_post_load_gap_filling()` (`src/utils/post_load_gap_filling.py:58`) loops
-`for year in years:` and builds each supplementary batch's temp JSON with that loop
-variable as `'year'` (`post_load_gap_filling.py`, near line 260). `get_or_create_filing()`
-matches on `(company_id, filing_type, fiscal_year_end)` — so a gap-fill pass for year=2022
-creates or targets a filing with `fiscal_year_end='2022-12-31'`, a genuinely different
-filing record from the primary NVO 2024 20-F filing (`fiscal_year_end='2024-12-31'`),
-rather than attaching supplementary facts to the one filing they're meant to supplement.
-Plausible connection to the phantom period (not confirmed): if a stray year value (2025?)
-enters `years_to_fill` and creates its own filing record, and something downstream
-aggregates across a ticker's filings without strictly scoping by `filing_id`, that could
-produce data that looks like it belongs to no traceable single source — matching what was
-observed. This needs to be traced end-to-end before trusting it, not assumed correct.
+**Separately confirmed the same session**: the intermittent empty
+`fact_comprehensive_income`/`fact_equity_statement` (the exact symptom item 5 was supposed
+to have fixed) is a *different*, still-open issue, not a regression of this fix or of item
+5 — logically ruled out because it occurs inside the primary load (Step 5), before Step 6
+(where the filing-scoping fix lives) ever executes. Traced one layer further than before:
+`rel_statement_items` — populated by `populate_statement_items.py`, and what
+`populate_comprehensive_income()`/`populate_equity_statement()` actually join against, NOT
+`fact_financial_metrics` directly — had zero `comprehensive_income`/`equity_statement`
+rows on the failing run, despite the underlying facts being correctly present and
+classified in `fact_financial_metrics` (confirmed: 28 comprehensive-income-related
+concepts with real data). So the break is specifically in how
+`populate_statement_items.py` classifies concepts into `rel_statement_items` — and that
+classification most plausibly depends on the still-broken presentation hierarchy (item 3's
+still-open `pres_rels` gap), which would explain why it works sometimes (when some fallback
+path succeeds) and not others. **Not yet fixed** — `populate_statement_items.py`'s
+classification logic hasn't been read in detail. This is now the most concrete next
+foothold: item 3's presentation-hierarchy gap is very likely the common root cause behind
+both this and item 4's original UI-test ordering warnings, not a cosmetic issue as it
+first looked.
 
 ### 7. Build the first real regression test
 **Why last, but non-negotiable**: this is the piece that was missing the whole time. Every

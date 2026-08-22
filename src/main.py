@@ -209,7 +209,9 @@ def run_pipeline(ticker: str, year: int, filing_type: str = '10-K') -> bool:
         filled_post = run_post_load_gap_filling(
             ticker=ticker,
             years=[int(y) for y in years_to_check],
-            taxonomy=taxonomy
+            taxonomy=taxonomy,
+            primary_year=year,
+            filing_type=filing_type
         )
         if filled_post > 0:
             logger.info(f"✅ Post-load gap filling added {filled_post} facts")

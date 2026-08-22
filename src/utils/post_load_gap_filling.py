@@ -25,22 +25,39 @@ def fill_missing_from_database(
     ticker: str,
     years: List[int],
     taxonomy: str = 'ifrs-full',
-    cache_dir: Optional[Path] = None
+    cache_dir: Optional[Path] = None,
+    primary_year: Optional[int] = None,
+    filing_type: Optional[str] = None
 ) -> int:
     """
     Query database for missing concepts/years and fill from SEC API.
-    
+
     This runs AFTER database load, so it can:
     1. Find concepts that are missing for specific years
     2. Detect wrong values by comparing XBRL vs SEC_API
     3. Add SEC_API data even when XBRL exists (loader prefers SEC_API)
-    
+
     Args:
         ticker: Company ticker
-        years: List of years to check
+        years: List of years to check for missing concepts — these are DATA years
+            (comparative periods potentially covered by the one filing being processed),
+            not separate filings.
         taxonomy: Taxonomy to use
         cache_dir: Optional cache directory for SEC API responses
-        
+        primary_year: The fiscal year of the filing actually being loaded (e.g. 2024 for
+            NVO's FY2024 20-F). All gap-filled facts — even ones representing a
+            comparative year like 2022 — belong to THIS ONE filing document, not to a
+            separate filing keyed to their own data year. Without this, each `year` in
+            `years` was used directly as the temp JSON's `fiscal_year_end`, so
+            `get_or_create_filing()` created a brand new, wrong filing record per
+            comparative year instead of attaching supplementary facts to the filing they
+            actually supplement. Confirmed causing spurious `dim_filings` rows and a
+            downstream "phantom period" in fact_income_statement — see
+            docs/NVO_GOLDEN_PATH_2026-08.md. Falls back to the loop's own `year` (old,
+            buggy behavior) only if not provided, for backward compatibility.
+        filing_type: The filing type of the primary filing (e.g. '20-F'). Falls back to
+            taxonomy-based inference if not provided.
+
     Returns:
         Number of facts added
     """
@@ -256,14 +273,21 @@ def fill_missing_from_database(
                 import json
                 from config import DATA_PROCESSED
                 
-                # Create temporary JSON file
+                # Create temporary JSON file. CRITICAL: 'year'/'fiscal_year_end' here must
+                # identify the FILING being supplemented (primary_year), not the data year
+                # these particular facts happen to cover — get_or_create_filing() uses this
+                # to resolve filing_id, and `year` (this loop's comparative year, e.g. 2022)
+                # is not a separate filing, it's a period within the same one filing. See
+                # the primary_year parameter docstring above.
+                target_year = primary_year if primary_year is not None else year
+                target_filing_type = filing_type or ('20-F' if taxonomy == 'ifrs-full' else '10-K')
                 temp_json = DATA_PROCESSED / f"{ticker}_{year}_post_load_gap_fill.json"
                 temp_json.write_text(json.dumps({
                     'company': ticker,
-                    'year': year,
-                    'filing_type': '20-F' if taxonomy == 'ifrs-full' else '10-K',
+                    'year': target_year,
+                    'filing_type': target_filing_type,
                     'facts': facts_to_add,
-                    'metadata': {'fiscal_year_end': f'{year}-12-31'},
+                    'metadata': {'fiscal_year_end': f'{target_year}-12-31'},
                     'relationships': {}  # Loader expects dict, not list
                 }, indent=2, default=str))
                 
@@ -394,12 +418,22 @@ def populate_sec_api_metadata(conn, ticker: str, year: int):
         logger.info(f"✅ Populated presentation hierarchy metadata for {inserted} SEC_API facts")
 
 
-def run_post_load_gap_filling(ticker: str, years: List[int], taxonomy: str = 'ifrs-full'):
+def run_post_load_gap_filling(
+    ticker: str,
+    years: List[int],
+    taxonomy: str = 'ifrs-full',
+    primary_year: Optional[int] = None,
+    filing_type: Optional[str] = None
+):
     """
     Main entry point for post-load gap filling.
-    
+
     This should be called AFTER data is loaded to database.
+
+    primary_year/filing_type: identify the filing actually being processed (e.g. NVO's
+    FY2024 20-F) — see fill_missing_from_database's docstring for why this must be passed
+    through rather than derived from each comparative year in `years`.
     """
     cache_dir = Path(__file__).parent.parent.parent / 'data' / 'raw' / 'sec_api_cache'
-    return fill_missing_from_database(ticker, years, taxonomy, cache_dir)
+    return fill_missing_from_database(ticker, years, taxonomy, cache_dir, primary_year=primary_year, filing_type=filing_type)
 
