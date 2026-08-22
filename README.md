@@ -2,6 +2,13 @@
 
 Comprehensive ETL pipeline for SEC financial filings that extracts, normalizes, and validates 10,000-40,000 financial facts per company.
 
+> **Status (2026-08-22)**: Local-only. The Railway/Azure hosting described further down was
+> shut down (cost, not a technical failure) — the pipeline, database, and API all run
+> entirely on your machine now via Docker. See [`docs/PIPELINE_AND_VALIDATION_MAP.md`](docs/PIPELINE_AND_VALIDATION_MAP.md)
+> for the verified, current pipeline/validator reference — it supersedes some of the detail
+> below where they disagree. The "Live Demo" section describes a deployment that's no
+> longer running; treat it as aspirational/historical, not a working link.
+
 ## 🎯 Project Goals
 
 1. **Automate XBRL extraction** from SEC 10-K/20-F filings
@@ -64,44 +71,36 @@ SEC EDGAR → XBRL Parser → Normalizer → Validator → PostgreSQL → Visual
 
 ## 📦 Installation & Local Testing
 
-See [LOCAL_TESTING.md](./LOCAL_TESTING.md) for full instructions.
-
-Quick start:
+Quick start (verified working 2026-08-22):
 ```bash
-# Start PostgreSQL
-docker-compose up postgres -d
+# Docker Desktop must be running first
 
-# Install Python deps
-cd api && pip install -r requirements.txt
+# Postgres: this project shares the `superset_db` container (used by other local
+# dashboard projects too) rather than running its own — it already has a `finsight`
+# database with the star schema deployed. Check it's up:
+docker ps | grep superset_db
 
-# Pre-load sample data
-python -c "from src.main import run_pipeline; run_pipeline(ticker='NVO', year=2024)"
+# .env should point at it (already the default in .env.template):
+# DATABASE_URL=postgresql://superset:superset@localhost:5432/finsight
 
-# Start API
-python main.py
+# Python deps are in .venv already if you're picking this repo back up;
+# otherwise: python3 -m venv .venv && .venv/bin/pip install -r api/requirements.txt
 
-# Start frontend (in /Users/jonas/Website/portfolio)
-npm run dev
+# Run the full pipeline for one company (extract → load → API → UI test)
+./run_pipeline.sh AAPL 2024 10-K
 ```
 
-Visit: `http://localhost:3000/finsight`
+The frontend (`Website/portfolio/app/finsight`) is a separate Next.js app that expects a
+deployed backend URL — not part of local pipeline testing. Use the Streamlit viewer
+(`./start_viewer.sh`) or query Postgres directly for local data exploration instead.
 
 ## 🎬 Deployment
 
-### Backend (Railway)
-
-1. Create new project on Railway
-2. Add PostgreSQL database
-3. Deploy from GitHub (automatic on push)
-4. Railway auto-provides `RAILWAY_POSTGRES_*` env vars
-
-### Frontend (Vercel)
-
-1. Already deployed as part of portfolio
-2. Add `NEXT_PUBLIC_FINSIGHT_API` env var pointing to Railway API
-3. Deploy with `vercel --prod`
-
-See [DEPLOYMENT.md](./DEPLOYMENT.md) for detailed steps and resource management strategy.
+Not currently deployed anywhere — running locally only (see status note at top). The
+Railway → Azure → Fly.io hosting history is archived in
+[`docs/archive/deployment-history/`](docs/archive/deployment-history/) if picking that back
+up; `config.py`'s `DATABASE_URL` fallback chain still supports a Railway-style env var
+setup without code changes if that path is revisited.
 
 ## 📈 Sample Companies
 
@@ -152,26 +151,10 @@ assert revenue - expenses == net_income
 
 ## 📊 Database Schema
 
-```sql
-CREATE TABLE financial_facts (
-    id SERIAL PRIMARY KEY,
-    company VARCHAR(10) NOT NULL,
-    concept VARCHAR(500) NOT NULL,
-    normalized_label VARCHAR(500),
-    value NUMERIC,
-    unit VARCHAR(50),
-    period_start DATE,
-    period_end DATE,
-    fiscal_year_end DATE,
-    instant_date DATE,
-    context_id VARCHAR(500),
-    decimals INTEGER,
-    taxonomy VARCHAR(100),
-    filing_type VARCHAR(10),
-    filing_date DATE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
+The schema is a 32-table star schema (dimension, fact, and relationship tables) — the flat
+`financial_facts` table this section used to show was an early design that's since been
+superseded. See [`docs/DATABASE.md`](docs/DATABASE.md) and [`docs/ERD.md`](docs/ERD.md) for
+the current schema rather than duplicating it here.
 
 ## 🤝 API Endpoints
 

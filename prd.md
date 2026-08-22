@@ -2,10 +2,21 @@
 ## Project: FinSight - Automated Financial Report Extraction & Analysis Pipeline
 
 **Author:** Jonas  
-**Date:** 2025-10-29  
-**Version:** v2.0  
-**Status:** Active Development  
+**Date:** 2025-10-29 (last aligned to actual code: 2026-08-22)  
+**Version:** v2.1  
+**Status:** Active Development, local-only  
 **Primary Goal:** Create an open-source, low-cost data pipeline that extracts, validates, and standardizes financial metrics from public company filings (XBRL & PDFs) for analysis and YouTube content generation.
+
+> **Alignment note (2026-08-22)**: Sections 6, 7, and 13 below described an earlier flat-table
+> schema and a simplified validation-rules list that no longer match the code. They've been
+> corrected to point at the current, verified sources of truth instead of duplicating (and
+> re-drifting from) that detail:
+> - Schema & data model: [`docs/DATABASE.md`](docs/DATABASE.md), [`docs/ERD.md`](docs/ERD.md)
+> - Pipeline stages & validation: [`docs/PIPELINE_AND_VALIDATION_MAP.md`](docs/PIPELINE_AND_VALIDATION_MAP.md)
+>
+> The project also went through a Railway → Azure hosting detour (§14 principle 2 originally
+> called for local-first/API-optional) before Azure was shut down. It's back to local-only
+> now, which is actually a return to this document's original intent, not a new direction.
 
 ---
 
@@ -308,85 +319,38 @@ This is a **portfolio project** showcasing:
 
 ## 6. 📊 Data Model
 
-### Table: `financial_facts`
+The data model evolved from an early flat `financial_facts` table into a proper star
+schema (ELT staging → `fact_financial_metrics` as single source of truth → statement-specific
+fact tables + template-based presentation views). That evolution is documented in
+[`docs/ARCHITECTURE_MIGRATION.md`](docs/ARCHITECTURE_MIGRATION.md); the current schema
+itself is documented in [`docs/DATABASE.md`](docs/DATABASE.md) and
+[`docs/ERD.md`](docs/ERD.md) — 32 tables (dimension, fact, and relationship tables), not
+reproduced here to avoid a second copy drifting out of sync with the schema again.
 
-This is the core data structure for extracted financial metrics. Each row represents a single financial fact (e.g., "Revenue for Q4 2024").
-
-| Field | Type | Description |
-|--------|------|-------------|
-| `company` | string | Ticker or entity name (e.g., "NVO", "AAPL") |
-| `fiscal_year_end` | date | Fiscal year end date |
-| `concept` | string | XBRL tag (e.g., "us-gaap:Revenues") |
-| `normalized_label` | string | Canonical field name (e.g., "revenue", "net_income") |
-| `value` | decimal | Reported numeric value |
-| `unit` | string | Currency (e.g., "USD", "EUR", "DKK") |
-| `scale` | int | Scale factor (e.g., 1, 1e3 for thousands, 1e6 for millions) |
-| `period_start` | date | Reporting period start date |
-| `period_end` | date | Reporting period end date |
-| `source_url` | string | Filing URL (SEC / ESEF) |
-| `provenance` | JSON | Source concept, page (if PDF), extraction method, lineage |
-| `confidence` | float | Validation/extraction confidence score (0–1) |
-| `validation_status` | string | PASSED / FAILED / MISSING |
-| `filing_type` | string | 10-K / 20-F / ESEF |
-| `filing_date` | date | Official filing date |
-| `extraction_timestamp` | datetime | ETL timestamp |
-
-### Provenance JSON Structure
-
-```json
-{
-  "extraction_method": "xbrl|pdf|llm",
-  "xbrl_concept": "us-gaap:Revenues",
-  "xbrl_context": "FY2024",
-  "pdf_page": null,
-  "pdf_table_id": null,
-  "llm_confidence": null,
-  "validation_rules_applied": ["balance_check", "eps_check"],
-  "source_document_hash": "sha256:abc123..."
-}
-```
-
-### Normalized Labels (Canonical Field Names)
-
-These are the standardized KPI names used across all companies:
-
-- `revenue`
-- `operating_income`
-- `net_income`
-- `eps_basic`
-- `eps_diluted`
-- `cash_and_equivalents`
-- `total_assets`
-- `total_liabilities`
-- `total_equity`
-- `operating_cashflow`
-- `capex`
+Provenance is still a first-class concern: every fact traces back to its filing, concept,
+context, and extraction source (XBRL vs. SEC-API gap-fill) via `dim_filings`,
+`dim_concepts`, and the `source` column on `fact_financial_metrics` — the JSON-blob
+`provenance` field originally sketched below was superseded by this relational approach,
+which is more queryable.
 
 ---
 
 ## 7. ✅ Validation Rules
 
-| Rule | Logic | Tolerance |
-|------|-------|-----------|
-| **Balance Check** | `Total Assets ≈ Total Liabilities + Equity` | Within 1% |
-| **Income Flow Check** | `Net Income ≈ Operating Income - Tax` | Within 2% |
-| **Cash Flow Tie** | `End Cash = Start Cash + Net Cash Flow` | Within 1% |
-| **EPS Check** | `EPS ≈ Net Income / Weighted Avg Shares` | Within 0.5% |
-| **Unit Sanity** | Detect and fix "in millions/thousands" notes | Auto-correct |
-| **Currency Check** | Consistent across all statements | Flag if mixed |
-| **Negative Value Check** | Revenue/Assets should not be negative | Flag for review |
-| **Missing Field Check** | All core KPIs must have values | Flag if missing |
-| **Confidence Threshold** | ≥ 0.8 = trusted, < 0.8 = flagged for review | N/A |
+The validation layer grew well beyond the 9-rule sketch originally in this section — it's
+now ~24 distinct rules across 7 pipeline stages (in-memory pre-load checks, post-load
+concept-mapping checks, cross-period consistency checks, and a final database-wide pass),
+plus a UI-level test that verifies statements render correctly via the live API. Rather
+than maintain a second, simplified description here that will drift out of sync the way
+the old one did, the full accounting logic (balance check, cash flow reconciliation, EPS,
+gross margin reasonableness, unit consistency, etc.), exactly where each check runs, and
+its enforcement level (hard-fail vs. warning) are documented in
+[`docs/PIPELINE_AND_VALIDATION_MAP.md`](docs/PIPELINE_AND_VALIDATION_MAP.md) — verified
+against actual code execution, not just described from memory.
 
-### Validation Output
-
-Each extracted dataset will include a **validation report** with:
-- Pass/fail status for each rule
-- Overall confidence score (0–1)
-- List of flagged issues with severity (WARNING / ERROR)
-- Suggested corrections (e.g., scale factor adjustments)
-
-Validation results are saved alongside extracted data in the `provenance` JSON field.
+That document also tracks known open issues in the validation/loading layer (e.g. the
+hard-fail gate not being fully transactional yet), which this PRD intentionally doesn't
+duplicate — check there for current status rather than assuming everything below is live.
 
 ---
 
@@ -402,7 +366,7 @@ Validation results are saved alongside extracted data in the `provenance` JSON f
 | **Provenance Coverage** | All facts traceable to source | 100% |
 | **Data Quality Score** | Per-filing quality report | ≥ 0.90 |
 | **Processing Speed** | Time per 10-K filing | < 2 minutes |
-| **Database Coverage** | Companies with complete data | 6+ pharma companies |
+| **Database Coverage** | Companies with complete data | Broadened beyond the original pharma-peer focus — README lists 11 pre-loaded companies across sectors (tech, pharma, consumer). Revisit this target if pharma peer comparison is still the intended demo. |
 | **Cost per Company** | Infrastructure + processing | $0 (free tools) |
 | **Usability** | One-command extraction | ✅ CLI working |
 | **Reproducibility** | Same input → same output | 100% |
@@ -411,6 +375,11 @@ Validation results are saved alongside extracted data in the `provenance` JSON f
 ---
 
 ## 9. 🚀 Timeline & Milestones
+
+*(Historical — this was the original Week 1-5 MVP plan from Oct 2025. Actual development
+ran well past this timeline and into deployment/debugging cycles not captured here; see
+`docs/archive/` for that history. Kept below for the original scope breakdown, not as a
+current schedule.)*
 
 | Week | Goal | Deliverables |
 |------|------|---------------|
@@ -545,67 +514,56 @@ Validation results are saved alongside extracted data in the `provenance` JSON f
 
 ---
 
-## 13. 🧩 Repository Layout (Recommended Structure)
+## 13. 🧩 Repository Layout (Actual Structure)
+
+The layout below reflects the real repo, not the originally-sketched one — it grew a
+`database/` layer (the star schema loader) and an `api/` layer (Flask) that weren't in the
+original plan. `src/storage/save_to_parquet.py` and `src/ui/dashboard.py` from the earlier
+version of this section were never built as named; Parquet export lives at
+`src/storage/export_queries.py` and the Streamlit viewer is `src/ui/data_viewer_v2.py`.
 
 ```
-/finsight
+/FinSight
 │
 ├── data/
-│   ├── raw/              # Downloaded XBRL files, PDFs
-│   └── processed/        # Normalized JSON/Parquet outputs
+│   ├── raw/                       # Downloaded XBRL files (cached per company/year)
+│   └── processed/                 # Extracted facts as JSON, pre-load
 │
 ├── src/
-│   ├── ingestion/
-│   │   └── fetch_sec.py           # SEC/ESEF filing downloader
-│   ├── parsing/
-│   │   ├── parse_xbrl.py          # XBRL extraction (Arelle wrapper)
-│   │   └── parse_pdf.py           # PDF fallback (PyMuPDF + Camelot)
-│   ├── validation/
-│   │   └── checks.py              # Accounting and schema validation
-│   ├── storage/
-│   │   └── save_to_parquet.py     # Write to Parquet/JSON/DuckDB
-│   ├── ui/
-│   │   └── dashboard.py           # Streamlit visualization
-│   ├── utils/
-│   │   ├── helpers.py             # Utility functions
-│   │   └── provenance.py          # Provenance tracking
-│   └── main.py                    # CLI entry point
+│   ├── ingestion/fetch_sec.py     # SEC filing downloader
+│   ├── parsing/parse_xbrl.py      # XBRL extraction (Arelle wrapper)
+│   ├── validation/                # 19 files — see docs/PIPELINE_AND_VALIDATION_MAP.md
+│   ├── storage/export_queries.py  # Parquet/CSV export from the warehouse
+│   ├── ui/data_viewer_v2.py       # Streamlit data viewer (local dev only)
+│   ├── np2sql/                    # Optional natural-language-to-SQL (needs OPENAI_API_KEY)
+│   ├── utils/                     # Normalization, taxonomy mapping, gap-filling, etc.
+│   └── main.py                    # Two entrypoints — see map doc §1 for why that matters
+│
+├── database/
+│   ├── schema.sql                 # Star schema DDL
+│   ├── load_financial_data.py     # StarSchemaLoader — actual DB write path
+│   └── migrations/                # Incremental schema changes
+│
+├── api/
+│   └── main.py                    # Flask API — statements endpoints, pipeline trigger, NP2SQL
 │
 ├── config/
-│   ├── companies.yaml             # List of tickers and source URLs
-│   └── validation_rules.yaml      # Configurable validation thresholds
+│   ├── companies.yaml             # Tracked tickers
+│   └── validation_rules.yaml      # Validation thresholds
 │
-├── tests/
-│   ├── test_validation.py         # Unit tests for validation rules
-│   ├── test_xbrl_parsing.py       # Tests for XBRL extraction
-│   └── test_integration.py        # End-to-end pipeline tests
+├── tests/                         # Currently near-empty — see map doc §7 (no working suite)
 │
 ├── docs/
-│   └── architecture.md            # Technical documentation
-│
-├── .github/
-│   └── workflows/
-│       └── weekly_extract.yml     # GitHub Actions automation
+│   ├── README.md                  # Docs index
+│   ├── PIPELINE_AND_VALIDATION_MAP.md   # Canonical: pipeline stages + validator inventory
+│   ├── DATABASE.md, ERD.md        # Schema reference
+│   └── archive/                   # Historical design/debugging docs, not current truth
 │
 ├── requirements.txt
-├── setup.py                       # Package setup (optional)
+├── run_pipeline.sh                # Shell orchestration (extract → load → API → UI test)
 ├── README.md
 └── prd.md
 ```
-
-### Key Files & Descriptions
-
-| File/Directory | Purpose |
-|----------------|---------|
-| `src/main.py` | CLI entry point: `python src/main.py --ticker NVO --year 2024` |
-| `src/ingestion/fetch_sec.py` | Downloads SEC filings via sec-api or direct URLs |
-| `src/parsing/parse_xbrl.py` | Extracts financial facts from XBRL using Arelle |
-| `src/validation/checks.py` | Implements all validation rules (balance check, EPS, etc.) |
-| `src/storage/save_to_parquet.py` | Writes to Parquet + JSON provenance |
-| `src/ui/dashboard.py` | Streamlit app for visualization |
-| `config/companies.yaml` | Configuration: tickers, filing URLs, custom mappings |
-| `tests/` | Unit and integration tests |
-| `.github/workflows/` | GitHub Actions for automation |
 
 ---
 
@@ -616,6 +574,12 @@ Validation results are saved alongside extracted data in the `provenance` JSON f
 
 2. **Local-first, API-optional**  
    Everything runs offline with open-source tools. APIs (sec-api, LLMs) are optional enhancements, not dependencies.
+   *(This drifted for a while — a separately-hosted Next.js frontend and Railway→Azure
+   paid hosting got added without ever being written into this PRD, then Azure was shut
+   down. The project is local-only again as of 2026-08-22, which is a return to this
+   principle, not a new decision. The only feature that needs a paid API is NP2SQL
+   (`OPENAI_API_KEY`) — everything else, including the core extraction/validation/warehouse
+   pipeline, runs with zero external cost.)*
 
 3. **Provenance for Trust**  
    Every value must trace back to an identifiable source (XBRL concept, PDF page, LLM extraction). No "magic numbers."
@@ -701,14 +665,15 @@ python src/parsing/parse_xbrl.py --input data/raw/NVO_2024_10K.zip
 ### Step 3: Validate & Load to PostgreSQL
 
 ```bash
-# Validate data and load to PostgreSQL data warehouse
-python src/storage/load_to_db.py --input NVO_2024.json
+# Validate data and load to the star schema warehouse
+python database/load_financial_data.py data/processed/NVO_2024_20F_facts.json
 ```
 
 **Output**: 
-- Data loaded to PostgreSQL (`finsight` database, `financial_facts` table)
-- Data quality report: `data/reports/NVO_2024_quality_report.json`
-- Completeness score, validation results
+- Data loaded to PostgreSQL (`finsight` database, `fact_financial_metrics` +
+  statement-specific fact tables — see `docs/DATABASE.md`)
+- Validation runs automatically as part of this step (hard-fails on critical issues —
+  see `docs/PIPELINE_AND_VALIDATION_MAP.md` §3-4 for current caveats)
 
 ### Step 4: Explore Data (Optional)
 
@@ -734,11 +699,15 @@ python src/main.py --ticker NVO --year 2024
 ### Query Data from PostgreSQL
 
 ```bash
-# Check extraction results
+# Check extraction results (local Postgres runs inside the existing superset_db
+# container — see docs/PIPELINE_AND_VALIDATION_MAP.md for why that's the target
+# rather than a dedicated container)
 docker exec superset_db psql -U superset -d finsight -c \
-  "SELECT company, COUNT(*) as fact_count, 
-   MAX(extraction_timestamp) as last_updated 
-   FROM financial_facts GROUP BY company;"
+  "SELECT c.ticker, COUNT(*) as fact_count
+   FROM fact_financial_metrics f
+   JOIN dim_filings fi ON f.filing_id = fi.filing_id
+   JOIN dim_companies c ON fi.company_id = c.company_id
+   GROUP BY c.ticker;"
 ```
 
 ---

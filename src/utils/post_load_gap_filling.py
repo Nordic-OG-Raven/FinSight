@@ -268,8 +268,14 @@ def fill_missing_from_database(
                 }, indent=2, default=str))
                 
                 # Load using star schema loader
+                # is_incremental=True: this JSON is a small supplementary batch on top of
+                # an already-loaded filing, not a complete filing's facts — the default
+                # (False) clears the filing's existing data first and demands full
+                # statement coverage, both wrong for a handful of gap-filled facts. See
+                # database/load_financial_data.py's load_json_file docstring and
+                # docs/NVO_GOLDEN_PATH_2026-08.md item 5.
                 loader = StarSchemaLoader()
-                loader.load_json_file(temp_json)
+                loader.load_json_file(temp_json, is_incremental=True)
                 loader.close()
                 
                 temp_json.unlink()

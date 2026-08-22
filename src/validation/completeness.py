@@ -380,7 +380,111 @@ class CompletenessTracker:
             logger.debug(truncate_log_message(f"ℹ️  No missing concepts found in SEC API for year {year}"))
         
         return facts
-    
+
+    def fill_missing_instant_facts_from_comparative_filing(
+        self,
+        facts: List[Dict[str, Any]],
+        company: str,
+        missing_year: int,
+        filing_type: str = '20-F',
+        cache_dir: Optional[Path] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Fill missing balance-sheet (instant-type) facts for a comparative year by pulling
+        them from that year's own filing, rather than SEC-API — which is unreliable for
+        foreign private issuers filing 20-F (SEC's companyfacts endpoint 404s for NVO's
+        CIK; see docs/NVO_GOLDEN_PATH_2026-08.md item 4 for the full investigation).
+
+        Confirmed pattern (2026-08-22, verified against real NVO filings): a filing only
+        carries 2 comparative years of top-line balance-sheet aggregates (Assets,
+        Liabilities), so a filing 2 years out from `missing_year` won't have it — but the
+        filing for `missing_year + 1` will, since `missing_year` is *its* prior-year
+        comparative column. Example: NVO's FY2024 20-F has no Assets fact for Dec-2022;
+        NVO's FY2023 20-F does (241,257,000,000, matching SEC-API's own reported value).
+
+        Args:
+            facts: existing facts list
+            company: ticker
+            missing_year: fiscal year whose instant facts are missing (e.g. 2022)
+            filing_type: filing type to fetch for missing_year + 1 (e.g. '20-F')
+            cache_dir: unused currently, accepted for interface symmetry with the
+                SEC-API gap-fill method
+
+        Returns:
+            Updated facts list with any newly-found instant facts appended, tagged
+            source='COMPARATIVE_FILING'
+        """
+        # A fact's instant_date may be stored as either Dec-31 of the fiscal year or
+        # Jan-1 of the following year, depending on how the source context was tagged —
+        # both conventions appear in practice. Match either explicitly rather than
+        # relying on a single global year-extraction convention.
+        target_dates = {f'{missing_year}-12-31', f'{missing_year + 1}-01-01'}
+
+        existing_instant_keys = set()
+        for fact in facts:
+            instant_date = str(fact.get('instant_date') or '')
+            if instant_date in target_dates:
+                concept = (fact.get('concept') or '').lower()
+                if concept:
+                    existing_instant_keys.add(concept)
+
+        try:
+            from src.ingestion.fetch_sec import SECFilingDownloader
+            from src.parsing.parse_xbrl import ComprehensiveXBRLParser
+            from config import DATA_RAW
+        except ImportError as e:
+            logger.warning(f"Could not import ingestion/parsing modules for comparative-filing fill: {e}")
+            return facts
+
+        adjacent_year = missing_year + 1
+        try:
+            downloader = SECFilingDownloader(output_dir=DATA_RAW)
+            filing_path = downloader.download_filing(company, adjacent_year, filing_type)
+            if not filing_path:
+                logger.debug(f"No {filing_type} filing found for {company} {adjacent_year}, skipping comparative-filing fill for {missing_year}")
+                return facts
+
+            parser = ComprehensiveXBRLParser()
+            result = parser.parse_filing(filing_path)
+            if not result:
+                logger.debug(f"Could not parse {company} {adjacent_year} filing for comparative-filing fill")
+                return facts
+
+            adjacent_facts = result['facts']
+        except Exception as e:
+            logger.warning(f"Comparative-filing fill failed for {company} {missing_year}: {e}")
+            return facts
+
+        filled_count = 0
+        filled_concepts = []
+        for fact in adjacent_facts:
+            if fact.get('period_type') != 'instant':
+                continue
+            instant_date = str(fact.get('instant_date') or '')
+            if instant_date not in target_dates:
+                continue
+            concept = (fact.get('concept') or '').lower()
+            if not concept or concept in existing_instant_keys:
+                continue
+
+            new_fact = dict(fact)
+            new_fact['source'] = 'COMPARATIVE_FILING'
+            new_fact['is_gap_filled'] = True
+            facts.append(new_fact)
+            existing_instant_keys.add(concept)
+            filled_count += 1
+            filled_concepts.append(fact.get('concept'))
+
+        if filled_count > 0:
+            logger.info(f"✅ Filled {filled_count} instant facts for {company} {missing_year} from its {adjacent_year} {filing_type} comparative column")
+            critical = [c for c in filled_concepts if c and c.lower() in ('assets', 'liabilities', 'equity')]
+            if critical:
+                logger.info(f"   Includes: {', '.join(critical)}")
+        else:
+            logger.debug(f"No new instant facts found for {company} {missing_year} in its {adjacent_year} {filing_type}")
+
+        return facts
+
     def _calculate_overall_completeness(self, facts: List[Dict[str, Any]]) -> float:
         """
         Calculate overall completeness score

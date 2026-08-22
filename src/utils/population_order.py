@@ -10,7 +10,8 @@ Dependency Graph:
 3. fact_income_statement - depends on fact_financial_metrics only
 4. fact_comprehensive_income - depends on fact_financial_metrics only
 5. fact_cash_flow - depends on fact_balance_sheet + fact_income_statement
-6. fact_equity_statement - depends on fact_balance_sheet + fact_income_statement + fact_comprehensive_income
+6. fact_equity_statement - depends on fact_balance_sheet + fact_income_statement
+   (comprehensive_income is LEFT JOINed optionally, not a hard dependency - see below)
 """
 
 import sys
@@ -57,9 +58,15 @@ POPULATION_ORDER = [
     },
     {
         'table': 'fact_equity_statement',
-        'dependencies': ['fact_balance_sheet', 'fact_income_statement', 'fact_comprehensive_income'],
+        'dependencies': ['fact_balance_sheet', 'fact_income_statement'],
         'populate_func': 'equity_statement',
-        'description': 'Equity statement facts (depends on balance sheet, income statement, and comprehensive income)'
+        # NOT dependent on fact_comprehensive_income: populate_equity_statement()'s SQL
+        # already LEFT JOINs against it for OCI-related rows, so it degrades gracefully
+        # when comprehensive_income is empty (e.g. filers like Apple who report it
+        # combined with the income statement — see docs/NVO_GOLDEN_PATH_2026-08.md item 5).
+        # Treating it as a hard dependency was silently dropping all equity data whenever
+        # comprehensive_income didn't populate, not just the OCI-specific rows.
+        'description': 'Equity statement facts (depends on balance sheet and income statement; comprehensive income is joined optionally)'
     }
 ]
 

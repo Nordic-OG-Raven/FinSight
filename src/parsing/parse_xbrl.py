@@ -206,7 +206,7 @@ class ComprehensiveXBRLParser:
                 pres_arcrole = XbrlConst.parentChild if hasattr(XbrlConst, 'parentChild') else 'http://www.xbrl.org/2003/arcrole/parent-child'
                 pres_rels = model_xbrl.relationshipSet(pres_arcrole)
                 
-                if not pres_rels or len(list(pres_rels.modelConcepts)) == 0:
+                if not pres_rels or len(pres_rels.fromModelObjects()) == 0:
                     # Linkbases weren't automatically loaded - manually process linkbaseRef elements
                     logger.info("LinkbaseRef elements not automatically processed - manually loading linkbases...")
                     
@@ -1397,16 +1397,35 @@ class ComprehensiveXBRLParser:
                 # Default instant periods to balance sheet
                 return 'balance_sheet'
         
+        # Comprehensive Income indicators — must be checked BEFORE the general income
+        # statement branch below, since terms like "OtherComprehensiveIncome" contain
+        # "income" and would otherwise be misclassified as income_statement, leaving
+        # fact_comprehensive_income permanently empty for filers whose OCI items rely on
+        # this fallback (see docs/NVO_GOLDEN_PATH_2026-08.md item 5). Terms drawn from
+        # NVO's actual OCI line items (docs/archive/validation-design-history/STATEMENT_STRUCTURE_ANALYSIS.md):
+        # remeasurements of retirement benefits, cash flow hedges, exchange rate
+        # translation adjustments, and items that will/won't be reclassified.
+        # Exclude "accumulated" variants (e.g. AccumulatedOtherComprehensiveIncomeLossNetOfTax)
+        # — those are the cumulative balance-sheet equity reserve, not the current-period
+        # flow reported in the comprehensive income statement.
+        if 'accumulated' not in concept_lower and any(term in concept_lower for term in [
+            'comprehensiveincome', 'othercomprehensive', 'reclassif',
+            'remeasurement', 'actuarial', 'cashflowhedg', 'hedgingreserve',
+            'exchangedifferencesontranslat', 'foreigncurrencytranslat',
+            'revaluationsurplus', 'availableforsalefinancialassetsreserve'
+        ]):
+            return 'comprehensive_income'
+
         # Balance Sheet indicators (expanded list)
         if any(term in concept_lower for term in [
-            'asset', 'liability', 'equity', 'receivable', 'payable', 
+            'asset', 'liability', 'equity', 'receivable', 'payable',
             'inventory', 'inventories', 'property', 'goodwill', 'intangible', 'debt',
             'stockholder', 'sharehold', 'capital', 'cash', 'bank', 'borrowing',
             'provision', 'provisions', 'derivative', 'financialasset', 'financialliability',
             'investment', 'reserve', 'reserves', 'prepayment', 'prepayments'
         ]):
             return 'balance_sheet'
-        
+
         # Income Statement indicators
         elif any(term in concept_lower for term in [
             'revenue', 'sales', 'income', 'expense', 'cost', 'profit',
@@ -1741,7 +1760,7 @@ class ComprehensiveXBRLParser:
                 return relationships
             
             # Iterate through all calculation relationships
-            for from_concept in calc_rels.modelConcepts:
+            for from_concept in calc_rels.fromModelObjects():
                 for to_concept, rel in calc_rels.fromModelObject(from_concept):
                     parent_qname = from_concept.qname if from_concept else None
                     child_qname = to_concept.qname if to_concept else None
@@ -1919,7 +1938,7 @@ class ComprehensiveXBRLParser:
                     pass
             
             # Iterate through all presentation relationships
-            for from_concept in pres_rels.modelConcepts:
+            for from_concept in pres_rels.fromModelObjects():
                 for to_concept, rel in pres_rels.fromModelObject(from_concept):
                     parent_qname = from_concept.qname if from_concept else None
                     child_qname = to_concept.qname if to_concept else None

@@ -129,7 +129,21 @@ def run_pipeline(ticker: str, year: int, filing_type: str = '10-K') -> bool:
                 taxonomy=taxonomy,
                 cache_dir=cache_dir  # Cache responses to avoid repeated API calls
             )
-        
+
+        # Balance-sheet instant facts (Assets, Liabilities) for comparative years 2+ years
+        # back are often genuinely absent from the primary filing (only 2 comparative
+        # columns are carried) and unreachable via SEC-API for foreign private issuers.
+        # Pull them from that year's own filing instead — see
+        # docs/NVO_GOLDEN_PATH_2026-08.md item 4.
+        for fill_year in sorted(years_to_fill):
+            if int(fill_year) < year:
+                facts = tracker.fill_missing_instant_facts_from_comparative_filing(
+                    facts,
+                    company=ticker,
+                    missing_year=int(fill_year),
+                    filing_type=filing_type
+                )
+
         logger.info(f"Gap filling complete. Total facts: {len(facts)}")
         
         # Re-run completeness check after gap filling
@@ -451,7 +465,25 @@ Examples:
         total_filled += filled_this_year
         if filled_this_year > 0:
             print(f"   Year {fill_year}: +{filled_this_year} concepts")
-    
+
+    # Balance-sheet instant facts (Assets, Liabilities) for comparative years 2+ years
+    # back are often genuinely absent from the primary filing and unreachable via
+    # SEC-API for foreign private issuers — pull from that year's own filing instead.
+    # See docs/NVO_GOLDEN_PATH_2026-08.md item 4.
+    for fill_year in sorted(years_to_fill):
+        if int(fill_year) < args.year:
+            facts_before = len(facts)
+            facts = tracker.fill_missing_instant_facts_from_comparative_filing(
+                facts,
+                company=args.ticker,
+                missing_year=int(fill_year),
+                filing_type=args.filing_type
+            )
+            filled_this_year = len(facts) - facts_before
+            total_filled += filled_this_year
+            if filled_this_year > 0:
+                print(f"   Year {fill_year} (from comparative filing): +{filled_this_year} concepts")
+
     print(f"   ✅ Gap filling complete: +{total_filled} total concepts added")
     
     # Re-run completeness check after gap filling (THIS IS THE FINAL SCORE)

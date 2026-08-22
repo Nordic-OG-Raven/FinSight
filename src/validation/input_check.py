@@ -473,11 +473,13 @@ class InputValidator:
                 continue
             
             # Get period key
+            # instant_date/period_end may be a date/datetime object (in-memory pipeline)
+            # or an ISO string (after JSON round-trip) — normalize to string first.
             period_key = None
             if fact.get('instant_date'):
-                period_key = fact.get('instant_date')[:7]  # YYYY-MM
+                period_key = str(fact.get('instant_date'))[:7]  # YYYY-MM
             elif fact.get('period_end'):
-                period_key = fact.get('period_end')[:7]
+                period_key = str(fact.get('period_end'))[:7]
             
             if period_key:
                 has_dims = bool(fact.get('dimensions'))

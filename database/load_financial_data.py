@@ -278,19 +278,19 @@ class StarSchemaLoader:
         instant_date: Optional[str]
     ) -> int:
         """Get or create period_id"""
-        # Check if exists
+        # Check if exists (exact date match)
         self.cur.execute("""
-            SELECT period_id FROM dim_time_periods 
-            WHERE period_type = %s 
+            SELECT period_id FROM dim_time_periods
+            WHERE period_type = %s
               AND (start_date = %s OR (start_date IS NULL AND %s IS NULL))
               AND (end_date = %s OR (end_date IS NULL AND %s IS NULL))
               AND (instant_date = %s OR (instant_date IS NULL AND %s IS NULL))
         """, (period_type, start_date, start_date, end_date, end_date, instant_date, instant_date))
-        
+
         result = self.cur.fetchone()
         if result:
             return result[0]
-        
+
         # Determine fiscal year
         fiscal_year = None
         if end_date:
@@ -307,13 +307,33 @@ class StarSchemaLoader:
             # For instant dates (balance sheet), early-year dates are END of previous fiscal year
             from datetime import datetime
             instant_dt = datetime.strptime(instant_date, '%Y-%m-%d')
-            
+
             # If instant date is in Jan-Mar, it's likely end of PREVIOUS fiscal year
             if instant_dt.month <= 3:
                 fiscal_year = instant_dt.year - 1
             else:
                 fiscal_year = instant_dt.year
-        
+
+        # Fallback: same period_type + same fiscal_year, different exact dates.
+        # XBRL and SEC-API report the same fiscal year with different date conventions —
+        # e.g. XBRL gives a duration period as start=2023-01-01/end=2024-01-01 while
+        # SEC-API's gap-fill reports the same fiscal year as end=2023-12-31 with no start
+        # date. Without this fallback, these become two DIFFERENT period_ids for the same
+        # real-world period, each holding a partial subset of that period's facts (e.g.
+        # income_before_tax and net_income on one, income_tax_expense only on the other) —
+        # confirmed causing false income_statement_math violations for NVO, since a
+        # per-period math check naturally fails when it can only see one half of the
+        # period's facts. See docs/NVO_GOLDEN_PATH_2026-08.md item 6.
+        if fiscal_year is not None:
+            self.cur.execute("""
+                SELECT period_id FROM dim_time_periods
+                WHERE period_type = %s AND fiscal_year = %s
+                LIMIT 1
+            """, (period_type, fiscal_year))
+            result = self.cur.fetchone()
+            if result:
+                return result[0]
+
         # Create new
         self.cur.execute("""
             INSERT INTO dim_time_periods (
@@ -321,7 +341,7 @@ class StarSchemaLoader:
             ) VALUES (%s, %s, %s, %s, %s)
             RETURNING period_id
         """, (period_type, start_date, end_date, instant_date, fiscal_year))
-        
+
         period_id = self.cur.fetchone()[0]
         self.conn.commit()
         return period_id
@@ -699,41 +719,11 @@ class StarSchemaLoader:
                 if currency_result:
                     currency_id = currency_result[0]
             
-            # PHASE 1: Apply unit scaling BEFORE storing (store in base currency units)
-            # XBRL decimals attribute: decimals="-6" means value is in millions (scale factor = 10^6)
-            # Industry best practice: Store values in base currency units, not scaled
-            # CRITICAL: Only apply scaling to XBRL values - SEC_API values are already in base currency
+            # XBRL's `decimals` attribute denotes rounding precision (how many trailing
+            # digits are significant), not a scale factor. The value already extracted
+            # from the instance document is the full-precision reported number and must
+            # not be multiplied by 10^abs(decimals).
             value_numeric = fact.get('value_numeric')
-            decimals = fact.get('decimals')
-            scale_int = fact.get('scale_int')
-            
-            # Only apply scaling to XBRL values (SEC_API values are already in base currency)
-            if source == 'XBRL' and value_numeric is not None:
-                # Apply scaling if decimals is negative (e.g., "-6" means millions)
-                if decimals is not None:
-                    try:
-                        # Handle both string and int decimals
-                        if isinstance(decimals, str):
-                            decimal_val = int(decimals)
-                        else:
-                            decimal_val = decimals
-                        
-                        if decimal_val < 0:
-                            # Negative decimals means value is scaled (e.g., -6 = millions)
-                            scale_factor = 10 ** abs(decimal_val)
-                            value_numeric = float(value_numeric) * scale_factor
-                    except (ValueError, TypeError):
-                        pass  # If decimals can't be parsed, skip scaling
-                
-                # Also check scale_int if decimals wasn't available
-                if scale_int is not None and decimals is None:
-                    try:
-                        if isinstance(scale_int, (int, float)) and scale_int > 0:
-                            # scale_int=6 means millions (10^6)
-                            scale_factor = 10 ** int(scale_int)
-                            value_numeric = float(value_numeric) * scale_factor
-                    except (ValueError, TypeError):
-                        pass
             
             # UNIVERSAL FIX: Create synthetic dimension from context_id for consolidated facts
             # This preserves all facts when multiple consolidated facts (dimension_id=NULL) exist
@@ -841,7 +831,7 @@ class StarSchemaLoader:
                 normalized_label,
                 fiscal_year,
                 period_type,
-                value_numeric,  # Use scaled value
+                value_numeric,
                 fact.get('value_text'),
                 unit_measure,
                 currency_id,
@@ -1042,14 +1032,37 @@ class StarSchemaLoader:
         
         self.conn.commit()
         return updated
-    
-    def load_json_file(self, json_path: Path, show_completeness_check: bool = True):
+
+    def _clear_filing_data(self, filing_id: int):
+        """Delete all rows for a filing across every fact/staging table.
+
+        Used both before loading (so reloads don't mask fixes with old data) and after a
+        hard validation failure (so a failed load doesn't leave partial data committed —
+        see docs/PIPELINE_AND_VALIDATION_MAP.md §3).
+        """
+        for table in ['fact_income_statement', 'fact_balance_sheet', 'fact_cash_flow',
+                     'fact_comprehensive_income', 'fact_equity_statement', 'rel_statement_items']:
+            self.cur.execute(f"DELETE FROM {table} WHERE filing_id = %s", (filing_id,))
+        self.cur.execute("DELETE FROM fact_financial_metrics WHERE filing_id = %s", (filing_id,))
+        self.cur.execute("DELETE FROM staging_facts WHERE filing_id = %s", (filing_id,))
+
+    def load_json_file(self, json_path: Path, show_completeness_check: bool = True, is_incremental: bool = False):
         """Load a single JSON file
-        
+
         Args:
             json_path: Path to JSON file to load
             show_completeness_check: Whether to display completeness check results (default: True)
                                     Set to False when loading multiple files to avoid redundancy
+            is_incremental: True when this JSON is a small supplementary batch being added
+                on top of an already-loaded filing (e.g. post-load gap-filling), not a
+                complete filing's facts. When True: skips clearing the filing's existing
+                data first (the normal clear-before-load would wipe out the primary load),
+                and skips the full-statement-coverage hard-fail gate (a handful of
+                gap-filled facts will never look like a complete balance sheet/income
+                statement/etc, and shouldn't be judged as if it should be one). Confirmed
+                2026-08-22 that calling this with the default False from
+                post_load_gap_filling.py was silently destroying primary-load data — see
+                docs/NVO_GOLDEN_PATH_2026-08.md item 5.
         """
         print(f"\n📄 Loading: {json_path.name}")
         
@@ -1088,24 +1101,19 @@ class StarSchemaLoader:
         
         # CRITICAL: Clear existing data for this filing before reloading
         # This ensures fixes actually work - old data won't mask new fixes
-        print(f"   🗑️  Clearing existing data for filing_id {filing_id}...")
-        try:
-            # Delete from all statement tables
-            for table in ['fact_income_statement', 'fact_balance_sheet', 'fact_cash_flow', 
-                         'fact_comprehensive_income', 'fact_equity_statement', 'rel_statement_items']:
-                self.cur.execute(f"DELETE FROM {table} WHERE filing_id = %s", (filing_id,))
-            
-            # Delete from fact_financial_metrics (base table)
-            self.cur.execute("DELETE FROM fact_financial_metrics WHERE filing_id = %s", (filing_id,))
-            
-            # Delete from staging
-            self.cur.execute("DELETE FROM staging_facts WHERE filing_id = %s", (filing_id,))
-            
-            self.conn.commit()
-            print(f"   ✅ Cleared existing data for filing_id {filing_id}")
-        except Exception as e:
-            print(f"   ⚠️  Warning: Could not clear existing data: {e}")
-            self.conn.rollback()
+        # (Skipped for incremental loads — clearing would wipe out the primary load
+        # this supplementary batch is meant to add to.)
+        if is_incremental:
+            print(f"   ℹ️  Incremental load for filing_id {filing_id} — not clearing existing data")
+        else:
+            print(f"   🗑️  Clearing existing data for filing_id {filing_id}...")
+            try:
+                self._clear_filing_data(filing_id)
+                self.conn.commit()
+                print(f"   ✅ Cleared existing data for filing_id {filing_id}")
+            except Exception as e:
+                print(f"   ⚠️  Warning: Could not clear existing data: {e}")
+                self.conn.rollback()
         
         # ELT STAGING LAYER: First load all raw facts to staging_facts
         print(f"   → Loading {len(facts)} facts to staging layer...")
@@ -1483,6 +1491,20 @@ class StarSchemaLoader:
         
         # CRITICAL VALIDATION - Validate AFTER equity fix and re-population
         # This ensures no partial loads on validation failure
+        # Skipped for incremental loads: the full aggregator gate expects complete
+        # statement coverage (fact_equity_statement/fact_cash_flow/etc all populated),
+        # which a handful of supplementary gap-filled facts will never look like. The
+        # primary (complete) load already went through this gate; a successful INSERT
+        # here is sufficient signal for a small additive batch.
+        if is_incremental:
+            print(f"   ℹ️  Incremental load — skipping full-coverage validation gate")
+            self.conn.commit()
+            print(f"   ✅ Loaded {facts_loaded} facts ({facts_with_dims} with dimensions)")
+            return {
+                **completeness_result,
+                'statement_warnings': statement_warnings
+            }
+
         print(f"   🔍 Running validation (hard fail on errors)...")
         validation_passed = False
         try:
@@ -1527,16 +1549,34 @@ class StarSchemaLoader:
             print(f"   ✅ Validation passed")
             
         except ValueError as e:
-            # HARD FAIL - rollback all changes
+            # HARD FAIL. rollback() only undoes whatever hadn't committed yet in this
+            # transaction — staging/statement-table writes earlier in this method already
+            # committed independently, so they'd otherwise survive a failed validation.
+            # Explicitly purge this filing's data so a failed load doesn't leave partial,
+            # unvalidated data sitting in the warehouse (see PIPELINE_AND_VALIDATION_MAP.md §3).
             self.conn.rollback()
+            try:
+                self._clear_filing_data(filing_id)
+                self.conn.commit()
+                print(f"   🗑️  Purged partial data for filing_id {filing_id} after validation failure")
+            except Exception as cleanup_error:
+                self.conn.rollback()
+                print(f"   ⚠️  Could not purge partial data for filing_id {filing_id}: {cleanup_error}")
             print(f"\n{str(e)}")
             raise  # Re-raise to stop pipeline
         except Exception as e:
-            # Any other error - rollback
+            # Any other error - same purge-on-failure treatment
             self.conn.rollback()
+            try:
+                self._clear_filing_data(filing_id)
+                self.conn.commit()
+                print(f"   🗑️  Purged partial data for filing_id {filing_id} after error")
+            except Exception as cleanup_error:
+                self.conn.rollback()
+                print(f"   ⚠️  Could not purge partial data for filing_id {filing_id}: {cleanup_error}")
             print(f"   ❌ Validation error: {e}")
             raise
-        
+
         # Only commit if validation passed
         if validation_passed:
             self.conn.commit()

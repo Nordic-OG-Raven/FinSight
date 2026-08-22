@@ -146,7 +146,7 @@ class ValidationAggregator:
         )
         
         # Collect issues from DatabaseValidator
-        result.issues.extend(self._collect_database_validation_issues(filing_id))
+        result.issues.extend(self._collect_database_validation_issues(filing_id, ticker=filing_info['ticker']))
         
         # Check for loading errors (Priority 1)
         result.issues.extend(self._check_loading_errors(filing_id))
@@ -187,21 +187,61 @@ class ValidationAggregator:
             unchanged_issues=unchanged_issues
         )
     
-    def _collect_database_validation_issues(self, filing_id: int) -> List[ValidationIssue]:
-        """Collect issues from DatabaseValidator"""
+    def _collect_database_validation_issues(self, filing_id: int, ticker: Optional[str] = None) -> List[ValidationIssue]:
+        """Collect issues from DatabaseValidator, scoped to this filing's company.
+
+        DatabaseValidator.validate_all() checks the WHOLE DATABASE, not just this filing —
+        confirmed 2026-08-22 to be systemic, not a one-off: company_has_data_<ticker> fires
+        per-company by design, and every check inside AccountingIdentitiesValidator /
+        DisplayedMathValidator / DataQualityValidator returns a single ValidationResult
+        whose `details['violations']` is a list spanning ALL companies (each entry carrying
+        its own 'company' key). Without scoping, loading NVO failed because of PFE's stale
+        pre-decimals-fix data (cash_flow_reconciliation, unit_consistency) — nothing to do
+        with NVO at all. See docs/NVO_GOLDEN_PATH_2026-08.md item 5.
+
+        Fix: for any result with a violations list, filter it down to entries matching this
+        filing's ticker before deciding whether it's a real issue for this load. If nothing
+        remains after filtering, the check is irrelevant to this filing and is dropped
+        entirely — not just downgraded. Results without a company-keyed violations list
+        (company_has_data_<ticker> — ticker is in the rule name, not a violations list) are
+        matched by rule-name suffix instead.
+        """
         issues = []
-        
+
         try:
             from src.validation.validator import DatabaseValidator
-            
+
             validator = DatabaseValidator()
             report = validator.validate_all()
-            
+
             for result in report.results:
                 if not result.passed:
+                    rule_lower = result.rule_name.lower()
+
+                    # Case 1: ticker embedded in the rule name itself (company_has_data_X).
+                    if rule_lower.startswith('company_has_data_'):
+                        rule_ticker = result.rule_name[len('company_has_data_'):]
+                        if ticker and rule_ticker.upper() != ticker.upper():
+                            continue
+
+                    # Case 2: result carries a violations list spanning multiple companies —
+                    # filter to just this filing's ticker. If filtering empties it, this
+                    # result isn't about this filing at all; skip it.
+                    violations = result.details.get('violations') if result.details else None
+                    if isinstance(violations, list) and violations and ticker:
+                        own_violations = [v for v in violations if isinstance(v, dict) and str(v.get('company', '')).upper() == ticker.upper()]
+                        if not own_violations:
+                            continue  # every violation belongs to some other company
+
+                    # Case 3: inherently aggregate, no per-company violations list to filter
+                    # (they measure "does EVERY company have complete data" — there's no
+                    # single filing's slice of that to isolate). Real signal, but shouldn't
+                    # block one filing's load.
+                    if rule_lower in ('missing_data_matrix', 'universal_metrics_completeness'):
+                        continue
+
                     # Extract statement type from rule name if possible
                     statement_type = None
-                    rule_lower = result.rule_name.lower()
                     if 'income' in rule_lower or 'comprehensive' in rule_lower:
                         statement_type = 'income_statement'
                     elif 'balance' in rule_lower:
@@ -210,7 +250,7 @@ class ValidationAggregator:
                         statement_type = 'cash_flow'
                     elif 'equity' in rule_lower:
                         statement_type = 'equity_statement'
-                    
+
                     issues.append(ValidationIssue(
                         category='database_validation',
                         statement_type=statement_type,
@@ -227,7 +267,7 @@ class ValidationAggregator:
                 issue=f"Failed to run database validation: {str(e)}",
                 details={'error': str(e)}
             ))
-        
+
         return issues
     
     def _collect_ui_test_issues(self, filing_id: int, ticker: str, year: int) -> List[ValidationIssue]:

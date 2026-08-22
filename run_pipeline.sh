@@ -185,14 +185,20 @@ cd "$PROJECT_ROOT"
 echo ""
 
 # Step 4: Run UI tests
+# Uses src/validation/ui_test.py (UniversalUITest) — the generic, per-company-correct
+# successor to the old root UITest.py, which hardcoded its expected line items to Novo
+# Nordisk specifically and was reporting false "missing item" failures for every other
+# company. Same CLI interface, drop-in replacement. See
+# docs/PIPELINE_AND_VALIDATION_MAP.md §5 and docs/NVO_GOLDEN_PATH_2026-08.md item 2.
 echo -e "${BLUE}Step 4/4: Running UI tests...${NC}"
 echo "------------------------------------------------------------------------"
 
-"$VENV_PATH/bin/python" -u UITest.py \
+"$VENV_PATH/bin/python" -u -m src.validation.ui_test \
     --ticker "$TICKER" \
     --year "$YEAR" \
     --test all \
-    --api-base "http://localhost:$FLASK_PORT"
+    --api-base "http://localhost:$FLASK_PORT" \
+    --keep-api
 
 UI_TEST_EXIT_CODE=$?
 

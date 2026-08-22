@@ -664,10 +664,17 @@ CREATE TABLE dim_statement_templates (
     
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    
-    UNIQUE(statement_type, format_type, item_order),
-    UNIQUE(statement_type, framework_id, item_order) WHERE framework_id IS NOT NULL
+
+    UNIQUE(statement_type, format_type, item_order)
 );
+
+-- Partial uniqueness (framework_id IS NOT NULL) can't be expressed as an inline UNIQUE(...)
+-- constraint in PostgreSQL — that requires a separate partial unique index instead. This
+-- was previously written as an inline constraint, which is invalid syntax; it caused this
+-- table's CREATE TABLE statement to fail silently whenever schema.sql was applied, which is
+-- very likely why the table was never actually deployed (see docs/NVO_GOLDEN_PATH_2026-08.md
+-- item 6).
+CREATE UNIQUE INDEX idx_templates_statement_framework_order ON dim_statement_templates(statement_type, framework_id, item_order) WHERE framework_id IS NOT NULL;
 
 -- Filing-specific statement overrides (Custom Items)
 -- These allow for custom items or overrides to the canonical templates
