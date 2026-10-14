@@ -130,8 +130,12 @@ class DisplayedMathValidator:
                     {
                         'company': row[0],
                         'period_year': row[1],
-                        'gross_profit_diff': float(row[6]),
-                        'net_income_diff': float(row[12])
+                        # A row can qualify via the net-income check alone (or the
+                        # gross-profit check alone), leaving the other diff NULL — guard
+                        # both so a single missing component doesn't crash the whole
+                        # validation run.
+                        'gross_profit_diff': float(row[6]) if row[6] is not None else None,
+                        'net_income_diff': float(row[12]) if row[12] is not None else None
                     }
                     for row in violations
                 ]

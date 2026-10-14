@@ -1074,10 +1074,79 @@ class ComprehensiveXBRLParser:
             logger.debug(traceback.format_exc())
             return []
     
+    def _filter_to_annual_periods(self, facts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Drop interim/historical facts that aren't part of an annual report's primary
+        statements, keeping:
+          - duration facts spanning ~a full fiscal year (330-380 days), plus trivial
+            (<=1 day) durations which are effectively point-in-time and harmless
+          - instant facts dated on a fiscal-year boundary (an annual duration's start or
+            end, within 5 days) — i.e. real balance-sheet dates and the beginning-of-year
+            instant used for equity/cash roll-forwards
+          - facts with no usable period (DEI/metadata)
+
+        Dropped: interim durations (quarters/halves/nine-months) and off-boundary instants
+        (stray quarter-ends and years-old snapshots tagged inside note disclosures).
+
+        Safety: if no full-year duration is found we can't identify the annual periods, so
+        the facts are returned unchanged rather than risk stripping everything.
+        """
+        from datetime import date as _date
+
+        def _pd(s):
+            if not s:
+                return None
+            if hasattr(s, 'year'):
+                return s
+            try:
+                y, m, d = map(int, str(s)[:10].split('-'))
+                return _date(y, m, d)
+            except Exception:
+                return None
+
+        boundaries = set()
+        for f in facts:
+            if f.get('period_type') == 'duration':
+                ps, pe = _pd(f.get('period_start')), _pd(f.get('period_end'))
+                if ps and pe and 330 <= (pe - ps).days <= 380:
+                    boundaries.add(ps)
+                    boundaries.add(pe)
+        if not boundaries:
+            return facts
+
+        def _near(d):
+            return any(abs((d - b).days) <= 5 for b in boundaries)
+
+        kept, dropped = [], 0
+        for f in facts:
+            pt = f.get('period_type')
+            if pt == 'duration':
+                ps, pe = _pd(f.get('period_start')), _pd(f.get('period_end'))
+                if ps and pe:
+                    n = (pe - ps).days
+                    if 330 <= n <= 380 or n <= 1:
+                        kept.append(f)
+                    else:
+                        dropped += 1
+                else:
+                    kept.append(f)
+            elif pt == 'instant' or f.get('instant_date'):
+                d = _pd(f.get('instant_date') or f.get('period_end'))
+                if d is None or _near(d):
+                    kept.append(f)
+                else:
+                    dropped += 1
+            else:
+                kept.append(f)
+
+        if dropped:
+            logger.info(f"Filtered out {dropped} interim/historical facts (kept {len(kept)} annual)")
+        return kept
+
     def extract_all_facts(self, model_xbrl: ModelXbrl.ModelXbrl) -> List[Dict[str, Any]]:
         """
         Extract ALL facts from XBRL document with deduplication
-        
+
         CRITICAL: This method must extract ALL facts for ALL periods (years) in the filing.
         Financial statements always include comparative data for multiple years, and every
         concept should have data for all years presented in the filing.
@@ -1167,7 +1236,14 @@ class ComprehensiveXBRLParser:
                 continue
         
         facts = list(fact_registry.values())
-        
+
+        # Keep only annual-report primary-statement periods. Inline-XBRL 10-Ks embed stray
+        # interim/historical contexts (quarter-ends, years-old snapshots) from note
+        # disclosures; those pollute per-year statement validation (an incomplete quarter-end
+        # "balance sheet" won't balance; interim income/cash-flow durations break statement
+        # math) and inflate dim_concepts. Safe: no-op when annual periods can't be identified.
+        facts = self._filter_to_annual_periods(facts)
+
         # Validation: Check if we have facts for multiple periods
         periods_by_year = {}
         for fact in facts:
@@ -1416,6 +1492,24 @@ class ComprehensiveXBRLParser:
         ]):
             return 'comprehensive_income'
 
+        # Cash Flow indicators — MUST be checked BEFORE the balance-sheet block below.
+        # Statement-of-cash-flows line items routinely contain balance-sheet substrings
+        # ("cash", "investment", "debt", "property") that the balance-sheet matcher would
+        # otherwise capture first (e.g. NetCashProvidedByUsedInOperatingActivities hits
+        # "cash"), leaving fact_cash_flow empty for every filer that relies on this
+        # name-based fallback — i.e. any inline-XBRL 10-K whose presentation linkbase
+        # (the authoritative role_uri source) doesn't load. The verb/activity prefixes
+        # below are unambiguous cash-flow markers in both US-GAAP and IFRS; cash-flow
+        # items are always duration-period, so this never steals a balance-sheet instant.
+        if any(term in concept_lower for term in [
+            'cashflow', 'operatingactivit', 'investingactivit', 'financingactivit',
+            'cashprovided', 'cashused', 'netcashprovided', 'netcashused',
+            'proceedsfrom', 'repaymentsof', 'repaymentof',
+            'paymentsto', 'paymentsfor', 'paymentsof',
+            'periodincreasedecrease',
+        ]):
+            return 'cash_flow'
+
         # Balance Sheet indicators (expanded list)
         if any(term in concept_lower for term in [
             'asset', 'liability', 'equity', 'receivable', 'payable',
@@ -1432,14 +1526,7 @@ class ComprehensiveXBRLParser:
             'margin', 'earnings', 'ebit', 'tax', 'interest'
         ]):
             return 'income_statement'
-        
-        # Cash Flow indicators
-        elif any(term in concept_lower for term in [
-            'cashflow', 'operatingactivit', 'investingactivit', 
-            'financingactivit', 'cashprovided', 'cashused'
-        ]):
-            return 'cash_flow'
-        
+
         else:
             return 'other'
     
@@ -1628,6 +1715,10 @@ class ComprehensiveXBRLParser:
             
             facts = list(facts_dict.values())
             logger.info(f"Merged extraction: {len(facts_lxml)} lxml + {added_count} ModelXbrl = {len(facts)} total facts")
+
+            # Drop stray interim/historical contexts (see _filter_to_annual_periods). This is
+            # the inline-XBRL path and does NOT go through extract_all_facts, so filter here too.
+            facts = self._filter_to_annual_periods(facts)
             
             # CRITICAL: Extract relationships from linkbase XML files directly
             # The linkbase XML files (*_pre.xml) are the AUTHORITATIVE SOURCE for presentation relationships.

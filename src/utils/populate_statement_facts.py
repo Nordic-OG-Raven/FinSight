@@ -361,7 +361,12 @@ def populate_balance_sheet(conn, filing_id: int, show_warnings: bool = True) -> 
         JOIN dim_concepts co_eq ON eq.concept_id = co_eq.concept_id
         JOIN dim_concepts co_liab ON liab.concept_id = co_liab.concept_id
         WHERE eq.filing_id = :filing_id
-          AND co_eq.normalized_label IN ('equity_total', 'total_equity')
+          -- Total equity for the balance-sheet identity must INCLUDE noncontrolling interest.
+          -- Many US-GAAP filers (e.g. AVGO) report it as
+          -- StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest rather than
+          -- an 'equity_total'/'total_equity' line, which otherwise left this calculated total
+          -- (and the balance sheet's "Total liabilities and equity" row) empty.
+          AND co_eq.normalized_label IN ('equity_total', 'total_equity', 'stockholders_equity_including_noncontrolling_interest')
           AND co_liab.normalized_label = 'total_liabilities'
           AND NOT EXISTS (
               SELECT 1 FROM fact_balance_sheet fbs
@@ -439,6 +444,25 @@ def populate_cash_flow(conn, filing_id: int, show_warnings: bool = True) -> int:
                             ORDER BY tp_prev.end_date DESC NULLS LAST, f_prev.fiscal_year_end DESC
                             LIMIT 1
                         ),
+                        -- Strategy 3: same filing, the most recent balance-sheet cash instant
+                        -- STRICTLY BEFORE this filing's fiscal year-end = the prior year-end =
+                        -- beginning of the current year. Works for ANY fiscal-year-end month
+                        -- (Strategy 2 below wrongly assumes a January start) and for the common
+                        -- case where a single 10-K carries two years of balance sheets so no
+                        -- separate prior filing exists (Strategy 1). Also accepts the
+                        -- cash+restricted-cash line filers use for the cash-flow reconciliation.
+                        (
+                            SELECT fbs.value_numeric
+                            FROM fact_balance_sheet fbs
+                            JOIN dim_concepts co_cash ON fbs.concept_id = co_cash.concept_id
+                            JOIN dim_time_periods tp ON fbs.period_id = tp.period_id
+                            WHERE fbs.filing_id = si.filing_id
+                              AND co_cash.normalized_label IN ('cash_and_equivalents', 'cash_and_cash_equivalents', 'balances_with_banks', 'cash_restricted')
+                              AND tp.period_type = 'instant'
+                              AND tp.instant_date < (SELECT fiscal_year_end FROM dim_filings WHERE filing_id = si.filing_id)
+                            ORDER BY tp.instant_date DESC
+                            LIMIT 1
+                        ),
                         -- Strategy 2: Get beginning-of-year balance from current filing's balance sheet (if it has multiple periods)
                         (
                             SELECT fbs.value_numeric
@@ -446,7 +470,7 @@ def populate_cash_flow(conn, filing_id: int, show_warnings: bool = True) -> int:
                             JOIN dim_concepts co_cash ON fbs.concept_id = co_cash.concept_id
                             JOIN dim_time_periods tp ON fbs.period_id = tp.period_id
                             WHERE fbs.filing_id = si.filing_id
-                              AND (co_cash.normalized_label = 'cash_and_equivalents' 
+                              AND (co_cash.normalized_label = 'cash_and_equivalents'
                                    OR co_cash.normalized_label = 'balances_with_banks'
                                    OR co_cash.normalized_label = 'cash_and_cash_equivalents')
                               AND tp.period_type = 'instant'

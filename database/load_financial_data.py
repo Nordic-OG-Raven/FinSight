@@ -898,6 +898,24 @@ class StarSchemaLoader:
               AND f.dimension_id IS NULL
               AND dt.period_type = 'instant'
               AND f.value_numeric IS NOT NULL
+              -- Pin every component to ONE instant: the fiscal year-end snapshot.
+              -- A latest 10-K sprinkles stray interim/comparative instant facts (quarter-end
+              -- balances from notes, prior-year equity roll-forwards) into the same fiscal_year
+              -- bucket. Without this, MAX() would combine, say, total assets from a quarter-end
+              -- with equity from a different date and report a spurious imbalance. We anchor on
+              -- the latest instant in the year that actually carries a balance-sheet total.
+              AND dt.instant_date = (
+                  SELECT MAX(dt2.instant_date)
+                  FROM fact_financial_metrics f2
+                  JOIN dim_concepts dc2 ON f2.concept_id = dc2.concept_id
+                  JOIN dim_time_periods dt2 ON f2.period_id = dt2.period_id
+                  WHERE f2.company_id = c.company_id
+                    AND dt2.fiscal_year = dt.fiscal_year
+                    AND dt2.period_type = 'instant'
+                    AND f2.dimension_id IS NULL
+                    AND f2.value_numeric IS NOT NULL
+                    AND dc2.normalized_label IN ('total_assets','total_assets_equation','liabilities_and_stockholders_equity')
+              )
         )
         SELECT 
             COALESCE(total_assets, total_assets_equation) as assets,
@@ -912,7 +930,13 @@ class StarSchemaLoader:
                      THEN liabilities_and_stockholders_equity
                      ELSE NULL
                 END,
-                total_liabilities + equity,
+                -- Validate against the REPORTED "Total liabilities and (stockholders') equity"
+                -- bottom line — that is the balance-sheet identity as the filer states it.
+                -- Deliberately NOT falling back to (total_liabilities + equity): a reconstructed
+                -- sum produces false imbalances for incomplete comparative/interim snapshots
+                -- (e.g. a note's quarter-end where equity is absent or carried from another date).
+                -- If the reported total isn't present for a year, we can't verify it, so liab_equity
+                -- stays NULL and the hard check is skipped for that year rather than firing spuriously.
                 equity_and_liabilities,
                 liabilities_and_stockholders_equity
             ) as liab_equity

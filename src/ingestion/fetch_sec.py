@@ -5,6 +5,7 @@ SEC Filing Ingestion Module
 Downloads XBRL filings (10-K, 20-F) from SEC EDGAR.
 Supports both automated search by ticker/year and direct URL downloads.
 """
+import os
 import re
 import time
 import logging
@@ -25,9 +26,11 @@ logger = logging.getLogger(__name__)
 class SECFilingDownloader:
     """Download XBRL filings from SEC EDGAR"""
     
-    # SEC requires User-Agent header
+    # SEC EDGAR fair-access policy requires a real User-Agent with a contact.
+    # Placeholder/example addresses get throttled or 403'd, so use a real one
+    # (override via SEC_USER_AGENT env var).
     HEADERS = {
-        'User-Agent': 'FinSight Financial Analysis Pipeline contact@example.com',
+        'User-Agent': os.getenv('SEC_USER_AGENT', 'FinSight (Jonas Haahr) itsxidey@gmail.com'),
         'Accept-Encoding': 'gzip, deflate',
         'Host': 'www.sec.gov'
     }

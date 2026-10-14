@@ -507,10 +507,22 @@ Examples:
     
     print()
     
+    # Final safety net: drop any stray interim/historical facts re-introduced after the
+    # primary parse (gap-filling queries the SEC companyfacts API, which returns a concept's
+    # FULL history — e.g. 2016 quarter-ends — not just this annual report's periods). Keeping
+    # them pollutes per-year statement validation and inflates dim_concepts on load.
+    try:
+        before = len(facts)
+        facts = parser_obj._filter_to_annual_periods(facts)
+        if len(facts) != before:
+            print(f"🔧 Annual-period filter: {before} → {len(facts)} facts (dropped {before - len(facts)} interim/historical)")
+    except Exception as e:
+        logger.warning(f"Annual-period filter skipped: {e}")
+
     # Step 6: Save results
     print("💾 Step 6/6: Saving results...")
     print("-" * 70)
-    
+
     # Ensure output directory exists
     args.output.mkdir(parents=True, exist_ok=True)
     
