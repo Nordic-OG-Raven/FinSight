@@ -1,220 +1,131 @@
-# FinSight - Financial Data Pipeline
+# FinSight — SEC XBRL Financial Data Pipeline
 
-Comprehensive ETL pipeline for SEC financial filings that extracts, normalizes, and validates 10,000-40,000 financial facts per company.
+An ETL pipeline that ingests SEC 10-K filings, extracts and normalizes their XBRL
+financial facts, validates them, and loads them into a PostgreSQL star schema for
+analysis. A REST API serves the result.
 
-> **Status (2026-08-22)**: Local-only. The Railway/Azure hosting described further down was
-> shut down (cost, not a technical failure) — the pipeline, database, and API all run
-> entirely on your machine now via Docker. See [`docs/PIPELINE_AND_VALIDATION_MAP.md`](docs/PIPELINE_AND_VALIDATION_MAP.md)
-> for the verified, current pipeline/validator reference — it supersedes some of the detail
-> below where they disagree. The "Live Demo" section describes a deployment that's no
-> longer running; treat it as aspirational/historical, not a working link.
+> **What this is (and isn't).** v1.0 does one thing well: it turns a **US-GAAP 10-K** into
+> a clean, queryable, validated set of annual financials. The broader ambition — IFRS/20-F
+> parity, a large curated dataset, rigorous (non-heuristic) accounting validation, and a
+> hosted demo — is real but not done; it lives in [`ROADMAP.md`](ROADMAP.md). This README
+> describes **what actually works today**, verified end-to-end. Built primarily with
+> AI-assisted development; the architecture, limitations, and trade-offs below are ones I can
+> walk through.
 
-## 🎯 Project Goals
+---
 
-1. **Automate XBRL extraction** from SEC 10-K/20-F filings
-2. **Normalize heterogeneous taxonomies** (US-GAAP, IFRS, company extensions)
-3. **Validate accounting identities** across balance sheet, income statement, cash flow
-4. **Build a data warehouse** for financial analysis and visualization
-5. **Demonstrate production ETL** with quality assurance and observability
+## ✅ What works today (v1.0)
+
+- **Ingest any US-GAAP 10-K on demand** from SEC EDGAR by ticker/year.
+- **Extract annual XBRL facts** via Arelle (inline-XBRL supported), filtered to the filing's
+  real reporting periods (~1,300–6,500 facts per 10-K after dropping interim/historical
+  note-disclosure contexts).
+- **Normalize** ~thousands of raw concepts → a shared label vocabulary, classify each fact to
+  a statement (income / balance sheet / cash flow / comprehensive income), and load into a
+  PostgreSQL **star schema** with provenance.
+- **Validate on load** with hard integrity gates — the reported balance-sheet identity
+  (Total assets = Total liabilities & equity, pinned to the fiscal-year-end) and unit-scaling
+  sanity — plus softer reconciliation checks surfaced as warnings (see *Known limitations*).
+- **Serve it** over a Flask REST API, and reconstruct the three primary statements for a UI.
+- **One-command run:** `./run_pipeline.sh AVGO 2024 10-K` → extract → load → API → statement
+  checks, ending in a clean pass.
+
+### Reference dataset (loaded & verified)
+
+Six US-GAAP companies load cleanly with correct latest-fiscal-year headline figures:
+**AVGO, NVDA, AAPL, MSFT, GOOGL, AMZN**. Any other US-GAAP 10-K can be ingested on demand
+with the same command.
 
 ## 🏗️ Architecture
 
 ```
-SEC EDGAR → XBRL Parser → Normalizer → Validator → PostgreSQL → Visualization
-   (Arelle)     (Custom)     (Custom)   (SQLAlchemy)   (Superset)
+SEC EDGAR → XBRL Parser → Normalizer → Validator → PostgreSQL star schema → REST API
+  (Arelle)    (custom)      (custom)    (custom)      (SQLAlchemy)          (Flask)
 ```
 
-### Pipeline Stages
+**Pipeline stages**
 
-1. **Ingestion**: Download filings from SEC EDGAR API
-2. **Parsing**: Extract ALL XBRL facts using Arelle library
-3. **Normalization**: 
-   - Standardize units (millions, billions, shares)
-   - Convert currencies to USD
-   - Map concepts to normalized labels
-   - Handle negative values and sign conventions
-4. **Validation**:
-   - Verify accounting identities (Assets = Liabilities + Equity)
-   - Cross-statement consistency checks
-   - Detect outliers and anomalies
-5. **Storage**: Load into PostgreSQL with full provenance
-6. **Query & Viz**: Apache Superset dashboards
+1. **Ingestion** — download the filing's inline-XBRL instance + schema from SEC EDGAR.
+2. **Parsing** — extract facts via Arelle; keep only real annual-report periods.
+3. **Normalization** — map concepts to a shared label vocabulary; classify statement type;
+   standardize units.
+4. **Validation** — hard balance-sheet-identity + unit-scaling gates at load; reconciliation
+   heuristics as warnings.
+5. **Storage** — load into a 30+ table star schema (dimensions, facts, relationships) with
+   provenance.
+6. **Serving** — Flask REST API; statement-view reconstruction for a frontend.
 
-## 📊 Data Scale
+## 🛠️ Tech stack
 
-- **10,000-40,000** financial facts per company per year
-- **~30 MB** per company in database
-- **50+ companies** pre-loaded in dataset
-- **Multiple taxonomies**: US-GAAP, IFRS, ESEF, company-specific extensions
+Python 3.11 · [Arelle](https://arelle.org/) (XBRL) · PostgreSQL · SQLAlchemy · Flask ·
+Docker. A Next.js frontend exists (`Website/portfolio/app/finsight`) but expects a deployed
+backend and isn't part of local testing.
 
-## 🚀 Live Demo
+## 📦 Run it locally
 
-- **Pre-loaded companies**: Instant analysis (<1s)
-- **Custom analysis**: Full ETL pipeline (5-10 minutes)
-- **Quota system**: 10 custom requests/month (free tier resources)
-- **Visualization**: Interactive charts with Recharts
-- **Superset**: Full BI dashboard for Novo Nordisk analysis
-
-[**Try it live →**](https://jonashaahr.com/finsight)
-
-## 🛠️ Tech Stack
-
-- **Python 3.11**: Core pipeline
-- **Arelle**: Industry-standard XBRL parser
-- **PostgreSQL**: Data warehouse
-- **Flask**: REST API
-- **Next.js + Recharts**: Frontend visualization
-- **Docker**: Local development
-- **Railway**: Backend deployment (free tier)
-- **Vercel**: Frontend deployment
-- **Apache Superset**: BI dashboards
-
-## 📦 Installation & Local Testing
-
-Quick start (verified working 2026-08-22):
 ```bash
-# Docker Desktop must be running first
-
-# Postgres: this project shares the `superset_db` container (used by other local
-# dashboard projects too) rather than running its own — it already has a `finsight`
-# database with the star schema deployed. Check it's up:
+# 1. Docker Desktop running, with a Postgres container named `superset_db`
+#    (DB `finsight`, user/pass superset/superset — see .env / .env.template).
 docker ps | grep superset_db
 
-# .env should point at it (already the default in .env.template):
-# DATABASE_URL=postgresql://superset:superset@localhost:5432/finsight
+# 2. Python env (if not already present)
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
-# Python deps are in .venv already if you're picking this repo back up;
-# otherwise: python3 -m venv .venv && .venv/bin/pip install -r api/requirements.txt
-
-# Run the full pipeline for one company (extract → load → API → UI test)
+# 3. Run the pipeline for one company (extract → load → API → statement checks)
 ./run_pipeline.sh AAPL 2024 10-K
 ```
 
-The frontend (`Website/portfolio/app/finsight`) is a separate Next.js app that expects a
-deployed backend URL — not part of local pipeline testing. Use the Streamlit viewer
-(`./start_viewer.sh`) or query Postgres directly for local data exploration instead.
+Notes:
+- The first run for a new US-GAAP taxonomy year downloads that taxonomy (~5–10 min, then
+  cached). Subsequent runs are fast.
+- The `--year` argument selects the latest 10-K at or before that year; filenames use the
+  argument, while the data inside reflects the filing's actual fiscal years.
+- For local data exploration, query Postgres directly or use `./start_viewer.sh` (Streamlit).
 
-## 🎬 Deployment
+## 🤝 API endpoints
 
-Not currently deployed anywhere — running locally only (see status note at top). The
-Railway → Azure → Fly.io hosting history is archived in
-[`docs/archive/deployment-history/`](docs/archive/deployment-history/) if picking that back
-up; `config.py`'s `DATABASE_URL` fallback chain still supports a Railway-style env var
-setup without code changes if that path is revisited.
-
-## 📈 Sample Companies
-
-Pre-loaded companies (instant analysis):
-- Novo Nordisk (NVO)
-- NVIDIA (NVDA)
-- Apple (AAPL)
-- Alphabet (GOOGL)
-- Microsoft (MSFT)
-- Johnson & Johnson (JNJ)
-- Pfizer (PFE)
-- Eli Lilly (LLY)
-- Moderna (MRNA)
-- Sanofi (SNY)
-- Coca-Cola (KO)
-
-## 🔬 Key Features
-
-### XBRL Extraction
-- Parses Instance Documents (`.xml`)
-- Handles Calculation and Presentation Linkbases
-- Extracts ALL contexts (instant, duration, segments)
-- Full provenance tracking (filing date, CIK, accession number)
-
-### Normalization
-- Maps 40,000+ unique concepts → ~200 normalized labels
-- Handles unit conversions: shares, USD, percentages
-- Resolves sign conventions (debits/credits)
-- Taxonomy-agnostic: works with US-GAAP, IFRS, ESEF
-
-### Validation
-```python
-# Balance Sheet Identity
-assert total_assets == total_liabilities + total_equity
-
-# Cash Flow Check
-assert operating_cf + investing_cf + financing_cf == net_change_in_cash
-
-# Income Statement
-assert revenue - expenses == net_income
+```
+GET  /health
+GET  /api/companies                 # loaded companies
+GET  /api/analyze/{ticker}/{year}   # normalized facts for a loaded filing
+GET  /api/statements/{ticker}/{year}# reconstructed income / balance / cash-flow statements
 ```
 
-### Quality Assurance
-- Automated validation on every load
-- Logging with traceability
-- Error handling and retry logic
-- Database integrity constraints
+## ⚠️ Known limitations (honest list)
 
-## 📊 Database Schema
+- **US-GAAP only in practice.** IFRS / 20-F filers (e.g. Novo Nordisk, Sanofi) are not
+  verified to load cleanly and are excluded from the reference dataset. See roadmap.
+- **Validation is partly heuristic.** The balance-sheet identity (reported totals) and
+  unit-scaling checks are rigorous and hard-fail. The income-statement-math,
+  cash-flow-reconciliation, and cross-company normalization-conflict checks key on specific
+  normalized labels and produce false positives across filers, so they are **surfaced as
+  warnings, not errors**. "Validated" today means "integrity-gated," not "fully audited."
+- **Normalized-label vocabulary has inconsistencies** (e.g. the "Total liabilities & equity"
+  line appears under more than one label across filers). Being consolidated on the roadmap.
+- **Period assignment has a known bug.** Current-year headline figures are reliable, but some
+  comparative-year / cross-filer facts can be linked to an incorrect fiscal period (a shared
+  `period_id` across filers with different fiscal calendars). Multi-year/comparative queries
+  may therefore show misassigned values. Prioritized on the roadmap.
+- **Statement reconstruction depends on the presentation linkbase**, which inline-XBRL
+  filings often omit; missing totals (e.g. beginning-of-year cash, total L&E) are derived
+  with targeted calculations rather than read directly.
+- **Not hosted.** Runs locally via Docker only; there is no live demo URL at this time.
 
-The schema is a 32-table star schema (dimension, fact, and relationship tables) — the flat
-`financial_facts` table this section used to show was an early design that's since been
-superseded. See [`docs/DATABASE.md`](docs/DATABASE.md) and [`docs/ERD.md`](docs/ERD.md) for
-the current schema rather than duplicating it here.
+## 📊 Database schema
 
-## 🤝 API Endpoints
-
-```bash
-# Health check
-GET /health
-
-# List companies and quota status
-GET /api/companies
-
-# Get pre-loaded data (instant)
-GET /api/analyze/{ticker}/{year}
-
-# Custom analysis (5-10 min)
-POST /api/analyze/custom
-Body: {"ticker": "TSLA", "year": 2024}
-
-# Natural language query (NP2SQL)
-POST /api/query
-Body: {"query": "Show me Apple's revenue in 2024"}
-
-# Check quota
-GET /api/quota
-```
-
-## 🎓 Learning Outcomes
-
-This project demonstrates:
-- End-to-end data engineering
-- ETL pipeline design
-- Data normalization across heterogeneous sources
-- Quality assurance and validation
-- REST API design
-- Resource management (quota system)
-- Full-stack deployment (Railway + Vercel)
-- Documentation and testing
-
-## 📝 Future Enhancements
-
-- [ ] Multi-year comparative analysis
-- [ ] Ratio calculations (P/E, ROE, debt-to-equity)
-- [ ] Peer comparison module
-- [ ] Excel export
-- [ ] GraphQL API
-- [ ] Real-time streaming (WebSockets)
-- [ ] ML models for anomaly detection
+A 30+ table star schema (dimension, fact, and relationship tables). See
+[`docs/DATABASE.md`](docs/DATABASE.md) and [`docs/ERD.md`](docs/ERD.md).
 
 ## 🙏 Credits
 
-- **Arelle**: David vun Kannon and contributors
-- **US-GAAP Taxonomy**: FASB
-- **IFRS Taxonomy**: IFRS Foundation
-- **SEC EDGAR**: U.S. Securities and Exchange Commission
+Arelle (David vun Kannon & contributors) · US-GAAP Taxonomy (FASB) · IFRS Taxonomy (IFRS
+Foundation) · SEC EDGAR (U.S. SEC).
 
 ## 📧 Contact
 
-**Jonas Haahr**  
-[jonas.haahr@aol.com](mailto:jonas.haahr@aol.com)  
-[Portfolio](https://jonashaahr.com)
+**Jonas Haahr** · [Portfolio](https://jonashaahr.com)
 
 ---
 
-*This project is part of my data engineering portfolio showcasing real-world ETL pipelines with quality assurance.*
+*Part of my data-engineering portfolio. See [`ROADMAP.md`](ROADMAP.md) for where this is
+headed.*
