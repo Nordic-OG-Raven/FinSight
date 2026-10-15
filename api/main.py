@@ -1771,6 +1771,76 @@ def admin_load_companies():
     
     return jsonify({"results": results})
 
+
+@app.route('/api/financials/<ticker>', methods=['GET'])
+def get_financials_v2(ticker):
+    """Phase-2 endpoint over the edgartools-backed warehouse: multi-year income / balance /
+    cash-flow statements plus revenue-by-segment, read directly from fact_financial_metrics
+    (the retired statement sub-tables and reconstruction layer are gone). Dashboard-ready."""
+    ticker = ticker.upper()
+    years_n = int(request.args.get('years', 3))
+    try:
+        from sqlalchemy import create_engine, text
+        engine = create_engine(DATABASE_URL)
+        with engine.connect() as conn:
+            meta = conn.execute(text(
+                "SELECT c.company_name, MAX(f.fiscal_year_end) FROM dim_companies c "
+                "JOIN dim_filings f ON f.company_id=c.company_id WHERE c.ticker=:t GROUP BY c.company_name"
+            ), {"t": ticker}).fetchone()
+            if not meta:
+                return jsonify({"error": "not_found", "message": f"No data for {ticker}"}), 404
+
+            rows = conn.execute(text("""
+                SELECT dc.statement_type, dc.normalized_label,
+                       COALESCE(dc.preferred_label, dc.concept_name) AS label,
+                       f.fiscal_year, f.value_numeric, f.unit_measure
+                FROM fact_financial_metrics f
+                JOIN dim_companies c ON c.company_id=f.company_id
+                JOIN dim_concepts dc ON dc.concept_id=f.concept_id
+                JOIN dim_time_periods dt ON dt.period_id=f.period_id
+                WHERE c.ticker=:t AND f.dimension_id IS NULL AND f.value_numeric IS NOT NULL
+                  AND dc.statement_type IN ('income_statement','balance_sheet','cash_flow')
+                  AND (dt.period_type='instant' OR (dt.end_date-dt.start_date) BETWEEN 330 AND 380)
+            """), {"t": ticker}).fetchall()
+
+            all_years = sorted({r[3] for r in rows if r[3]}, reverse=True)[:years_n]
+            yset, cur = set(all_years), None
+            stmts = {"income_statement": {}, "balance_sheet": {}, "cash_flow": {}}
+            for st, nl, label, fy, val, unit in rows:
+                if fy not in yset:
+                    continue
+                if cur is None and unit and len(unit) == 3 and unit.isupper():
+                    cur = unit  # a real currency code (USD/DKK/…), not 'shares'/'pure'
+                stmts[st].setdefault(nl, {"label": label, "values": {}})["values"][fy] = float(val)
+            statements = {st: sorted(items.values(), key=lambda x: x["label"]) for st, items in stmts.items()}
+
+            seg_rows = conn.execute(text("""
+                SELECT f.fiscal_year, d.dimension_json->>'srt_ProductOrServiceAxis' AS member, f.value_numeric
+                FROM fact_financial_metrics f
+                JOIN dim_companies c ON c.company_id=f.company_id
+                JOIN dim_concepts dc ON dc.concept_id=f.concept_id
+                JOIN dim_xbrl_dimensions d ON d.dimension_id=f.dimension_id
+                JOIN dim_time_periods dt ON dt.period_id=f.period_id
+                WHERE c.ticker=:t AND dc.normalized_label='revenue_from_contracts'
+                  AND d.dimension_json ? 'srt_ProductOrServiceAxis'
+                  AND (SELECT count(*) FROM jsonb_object_keys(d.dimension_json))=1
+                  AND (dt.end_date-dt.start_date) BETWEEN 330 AND 380
+            """), {"t": ticker}).fetchall()
+            segments = {}
+            for fy, member, val in seg_rows:
+                if fy in yset and member:
+                    segments.setdefault(fy, {})[member.split(':')[-1].replace('Member', '')] = float(val)
+
+            return jsonify({
+                "ticker": ticker, "company": meta[0], "currency": cur,
+                "fiscal_year_end": str(meta[1]) if meta[1] else None,
+                "years": all_years, "statements": statements,
+                "revenue_by_segment": segments, "source": "edgartools",
+            })
+    except Exception as e:
+        return jsonify({"error": "server_error", "message": str(e)}), 500
+
+
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5001))
     app.run(host='0.0.0.0', port=port, debug=os.getenv('ENVIRONMENT') != 'production')
