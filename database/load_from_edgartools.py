@@ -28,6 +28,7 @@ from psycopg2.extras import execute_values
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import DATABASE_URL  # noqa: E402
 from src.extraction.edgartools_adapter import EdgarToolsExtractor, ExtractionResult  # noqa: E402
+from src.validation.quality import QualityReport, validate, write_report  # noqa: E402
 
 try:
     from src.utils.taxonomy_mappings import get_normalized_label
@@ -146,7 +147,21 @@ class StarSchemaLoader:
         return self.cur.fetchone()[0]
 
     def _filing_id(self, company_id: int, r: ExtractionResult):
+        # Idempotent on the (company_id, filing_type, fiscal_year_end) unique key: reloading the
+        # same filing reuses its row (and refreshes accession/date) instead of aborting the load.
         f = r.filing
+        self.cur.execute(
+            "SELECT filing_id FROM dim_filings WHERE company_id=%s AND filing_type=%s "
+            "AND fiscal_year_end IS NOT DISTINCT FROM %s",
+            (company_id, f.form, f.period_end),
+        )
+        row = self.cur.fetchone()
+        if row:
+            self.cur.execute(
+                "UPDATE dim_filings SET accession_number=%s, filing_date=%s WHERE filing_id=%s",
+                (f.accession or None, f.filing_date, row[0]),
+            )
+            return row[0]
         self.cur.execute(
             "INSERT INTO dim_filings (company_id, filing_type, fiscal_year_end, accession_number, filing_date) "
             "VALUES (%s,%s,%s,%s,%s) RETURNING filing_id",
@@ -154,8 +169,17 @@ class StarSchemaLoader:
         )
         return self.cur.fetchone()[0]
 
-    # ---- load one result (batched) -----------------------------------------
-    def load(self, r: ExtractionResult) -> int:
+    # ---- load one result (batched, integrity-gated) ------------------------
+    def load(self, r: ExtractionResult) -> tuple[int, QualityReport]:
+        # Validate BEFORE persisting: the facts we're about to load ARE the load (edgartools is
+        # the single source, no lossy transform between here and the DB), so validating them is
+        # validating the load. Hard-gate failures short-circuit — nothing is written — which is
+        # how "validation runs automatically on load and hard-fails on critical issues" (PRD
+        # §2.4) stays an actual integrity gate rather than an after-the-fact report.
+        report = validate(r)
+        if not report.passed:
+            return 0, report
+
         cid = self._company_id(r)
         fid = self._filing_id(cid, r)
         facts = [f for f in r.facts if f.fiscal_year is not None and f.period_type is not None]
@@ -214,7 +238,7 @@ class StarSchemaLoader:
             rows, page_size=1000,
         )
         self.conn.commit()
-        return len(rows)
+        return len(rows), report
 
     def close(self):
         self.cur.close()
@@ -223,15 +247,30 @@ class StarSchemaLoader:
 
 if __name__ == "__main__":
     tickers = sys.argv[1:] or ["AAPL", "AVGO", "JPM", "NVO", "GOOGL", "MSFT", "AMZN", "NVDA"]
+    report_dir = Path(__file__).resolve().parent.parent / "data" / "quality_reports"
     ex = EdgarToolsExtractor()
     loader = StarSchemaLoader(DATABASE_URL)
-    print(f"{'TICKER':6} {'FACTS':>8}  DETAIL")
+    print(f"{'TICKER':6} {'FACTS':>8} {'GATE':5} {'QUAL':>5}  DETAIL")
+    failures = 0
     for tk in tickers:
         try:
             r = ex.extract(tk)
-            n = loader.load(r)
-            print(f"{tk:6} {n:>8}  ({r.company.currency}, {r.filing.form}, FI={r.company.is_financial_institution})")
+            n, rep = loader.load(r)
+            write_report(rep, report_dir)
+            gate = "PASS" if rep.passed else "FAIL"
+            if not rep.passed:
+                failures += 1
+            detail = (f"({r.company.currency}, {r.filing.form}, FI={r.company.is_financial_institution})"
+                      if rep.passed
+                      else "NOT LOADED — " + "; ".join(w for w in rep.warnings if "HARD-GATE" in w))
+            print(f"{tk:6} {n:>8} {gate:5} {rep.scores.get('overall', 0):>5.2f}  {detail}")
+            for w in rep.warnings:
+                if "HARD-GATE" not in w:
+                    print(f"{'':6} {'':8} {'':5} {'':5}  · {w}")
         except Exception as e:
             loader.conn.rollback()  # isolate failures so one company can't poison the rest
+            failures += 1
             print(f"{tk:6}    ERROR: {type(e).__name__}: {str(e)[:80]}")
     loader.close()
+    print(f"\nquality reports → {report_dir}")
+    sys.exit(1 if failures else 0)

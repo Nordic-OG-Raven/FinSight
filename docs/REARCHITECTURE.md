@@ -104,13 +104,32 @@ ROADMAP item #1 (period bug) becomes "resolved by architecture."
 |---|---|---|
 | 0 — de-risk spike | ✅ done — evidence above | — |
 | 1 — adapter + slim loader | `EdgarToolsExtractor → ExtractionResult`; slim upsert into existing star schema; load the 6 + JPM + NVO | 4–6 h |
-| 2 — wire API + dashboard | point Flask at new data; confirm dashboard renders | 2–3 h |
-| 3 — validation | port the two sound checks; heuristics → warnings | 2–3 h |
+| 2 — wire API + dashboard | point Flask at new data; confirm dashboard renders | ✅ done |
+| 3 — validation | ✅ done — `src/validation/quality.py`: balance-sheet identity + unit/scale as hard gates, income-math/EPS as warnings, per-filing quality report (`data/quality_reports/`), run automatically on load | ✅ done |
 | 4 — dimensional detail | via edgartools filing-XBRL query layer (not custom Arelle) | incremental |
 | 5 — bulk backbone (later) | SEC Financial Statement Data Sets for batch/commercial scale | — |
 
 **"Works for every filer + dimensions + dashboard" ≈ 8–12 hrs** — bounded, vs the
 unbounded per-company whack-a-mole of the status quo.
+
+### Phase-3 result & two correctness fixes it surfaced
+
+All 8 reference filers pass the hard gates; 7 score a perfect 1.00, AMZN 0.95 (it genuinely
+doesn't tag a standalone `us-gaap:Liabilities` subtotal — correctly surfaced as a warning,
+not a failure). The balance-sheet identity verifies across taxonomies, e.g. NVO (IFRS):
+`Assets = EquityAndLiabilities = 542,902M DKK`.
+
+Building the validator surfaced two real extraction bugs, now fixed:
+- **Instant dates were dropped.** edgartools carries instant-fact dates in `period_instant`
+  (not `period_end`, which is NaN for instants); the adapter read the wrong column, so every
+  instant fact landed on a single NULL-dated period. That collapsed all balance-sheet years
+  onto one `period_id`, silently deduping prior-year comparatives away. Fixed → fact counts
+  rose (AVGO 1357→1707) as comparatives returned, and the balance gate can pin the year-end.
+- **Fiscal-year-end came from forward-looking disclosures.** Deriving it from `max(period_end)`
+  picked up lease-maturity / revenue-remaining-performance-obligation dates past the year-end.
+  Now taken from `dei:DocumentPeriodEndDate` (edgartools `period_of_report`).
+- **Loader made idempotent** on the `dim_filings` unique key, so reloads reuse the filing row
+  instead of aborting.
 
 ## Honest caveats
 

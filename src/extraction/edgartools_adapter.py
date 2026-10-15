@@ -136,6 +136,9 @@ class EdgarToolsExtractor:
             except Exception:
                 nv = None
             pt = row.get("period_type")
+            # Instants carry their date in `period_instant` (period_start/period_end are NaN);
+            # durations carry period_start/period_end. Read the right column per period type.
+            instant = _as_date(row.get("period_instant")) if pt == "instant" else None
             facts.append(Fact(
                 concept=row.get("concept"),
                 label=row.get("label") or row.get("original_label"),
@@ -144,7 +147,7 @@ class EdgarToolsExtractor:
                 unit=row.get("currency") or row.get("unit_ref"),
                 period_start=_as_date(row.get("period_start")),
                 period_end=_as_date(row.get("period_end")),
-                instant_date=_as_date(row.get("period_end")) if pt == "instant" else None,
+                instant_date=instant,
                 period_type=pt,
                 fiscal_year=int(row["fiscal_year"]) if row.get("fiscal_year") not in (None, "", "nan") else None,
                 fiscal_period=row.get("fiscal_period"),
@@ -164,7 +167,12 @@ class EdgarToolsExtractor:
             accession=getattr(filing, "accession_no", ""),
             form=getattr(filing, "form", filing_type),
             filing_date=_as_date(getattr(filing, "filing_date", None)),
-            period_end=max((f.period_end for f in facts if f.period_end), default=None),
+            # Authoritative fiscal-year-end = dei:DocumentPeriodEndDate (edgartools'
+            # period_of_report). Do NOT derive it from max(period_end) — forward-looking
+            # disclosures (lease maturities, revenue-remaining-performance-obligation timing)
+            # carry dates past the year-end and would overstate it.
+            period_end=(_as_date(getattr(filing, "period_of_report", None))
+                        or max((f.period_end for f in facts if f.period_end), default=None)),
         )
         # derive reporting currency from the modal currency unit of numeric facts
         cur = {}
