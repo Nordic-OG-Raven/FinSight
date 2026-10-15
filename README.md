@@ -1,65 +1,72 @@
 # FinSight — SEC XBRL Financial Data Pipeline
 
-An ETL pipeline that ingests SEC 10-K filings, extracts and normalizes their XBRL
-financial facts, validates them, and loads them into a PostgreSQL star schema for
-analysis. A REST API serves the result.
+An ETL pipeline that ingests SEC annual filings, extracts and normalizes their XBRL
+financial facts, validates them, and loads them into a PostgreSQL star schema for analysis.
+A REST API serves the result.
 
-> **What this is (and isn't).** v1.0 does one thing well: it turns a **US-GAAP 10-K** into
-> a clean, queryable, validated set of annual financials. The broader ambition — IFRS/20-F
-> parity, a large curated dataset, rigorous (non-heuristic) accounting validation, and a
-> hosted demo — is real but not done; it lives in [`ROADMAP.md`](ROADMAP.md). This README
-> describes **what actually works today**, verified end-to-end. Built primarily with
-> AI-assisted development; the architecture, limitations, and trade-offs below are ones I can
-> walk through.
+> **What this is (and isn't).** The quantitative core does one thing well: it turns a public
+> company's annual filing (domestic **10-K** or foreign **20-F/40-F**) into a clean, queryable,
+> validated set of annual financials — for **every SEC filer**, including banks and IFRS
+> filers. The broader ambition — a consolidated cross-company label vocabulary, audit-grade
+> (non-heuristic) validation, LLM-based ESG/qualitative extraction, analytics, and a hosted
+> demo — is real but not done; it lives in [`ROADMAP.md`](ROADMAP.md). This README describes
+> **what actually works today**, verified end-to-end. Built primarily with AI-assisted
+> development; the architecture, limitations, and trade-offs below are ones I can walk through.
 
 ---
 
-## ✅ What works today (v1.0)
+## ✅ What works today
 
-- **Ingest any US-GAAP 10-K on demand** from SEC EDGAR by ticker/year.
-- **Extract annual XBRL facts** via Arelle (inline-XBRL supported), filtered to the filing's
-  real reporting periods (~1,300–6,500 facts per 10-K after dropping interim/historical
-  note-disclosure contexts).
-- **Normalize** ~thousands of raw concepts → a shared label vocabulary, classify each fact to
-  a statement (income / balance sheet / cash flow / comprehensive income), and load into a
-  PostgreSQL **star schema** with provenance.
-- **Validate on load** with hard integrity gates — the reported balance-sheet identity
-  (Total assets = Total liabilities & equity, pinned to the fiscal-year-end) and unit-scaling
-  sanity — plus softer reconciliation checks surfaced as warnings (see *Known limitations*).
-- **Serve it** over a Flask REST API, and reconstruct the three primary statements for a UI.
-- **One-command run:** `./run_pipeline.sh AVGO 2024 10-K` → extract → load → API → statement
-  checks, ending in a clean pass.
+- **Ingest any SEC annual filing on demand** by ticker — domestic 10-K and foreign-filer
+  20-F/40-F — straight from SEC EDGAR (no API key, no paid service).
+- **Extract the full filing XBRL** — ~1,000–8,000 facts per filing, with **dimensions**
+  (business/geographic segments, product lines) and correct period attribution.
+- **Works for every filer, including the hard cases.** US-GAAP, **IFRS** (Novo Nordisk, in
+  DKK), and **banks** (JPMorgan) all load cleanly — the cases that defeated the earlier custom
+  pipeline.
+- **Correct, collision-free periods.** Periods are keyed by exact dates, so filers with
+  different fiscal calendars can't collide and prior-year comparatives are retained.
+- **Validate on load** ([`src/validation/quality.py`](src/validation/quality.py)): the reported
+  balance-sheet identity (`Assets = Liabilities + Equity`, pinned to the fiscal-year-end) and
+  unit/scale sanity are **hard gates** that block a bad load; income-statement math and diluted
+  EPS are **warnings**. Each filing gets a **data-quality report** (completeness / accuracy /
+  consistency / provenance → weighted score) in `data/quality_reports/`.
+- **Serve it** over a Flask REST API, warehouse-direct.
 
 ### Reference dataset (loaded & verified)
 
-Six US-GAAP companies load cleanly with correct latest-fiscal-year headline figures:
-**AVGO, NVDA, AAPL, MSFT, GOOGL, AMZN**. Any other US-GAAP 10-K can be ingested on demand
-with the same command.
+Eight filers across sectors and taxonomies load cleanly and pass the validation gates:
+**AAPL, AVGO, AMZN, GOOGL, MSFT, NVDA** (US-GAAP tech/consumer), **JPM** (US-GAAP bank), and
+**NVO** (IFRS, 20-F, DKK). Any other SEC filer can be ingested on demand with the same command.
 
 ## 🏗️ Architecture
 
 ```
-SEC EDGAR → XBRL Parser → Normalizer → Validator → PostgreSQL star schema → REST API
-  (Arelle)    (custom)      (custom)    (custom)      (SQLAlchemy)          (Flask)
+SEC EDGAR → edgartools → FactExtractor adapter → slim loader → PostgreSQL star schema → REST API
+            (extraction)   (our seam)             (+ validation gate)        (SQLAlchemy)   (Flask)
 ```
+
+Extraction runs on [edgartools](https://github.com/dgunning/edgartools) (pinned) behind our own
+`FactExtractor` adapter, so the warehouse never depends on the library's internals and the
+extraction layer stays swappable. Rationale and the decision record are in
+[`docs/REARCHITECTURE.md`](docs/REARCHITECTURE.md).
 
 **Pipeline stages**
 
-1. **Ingestion** — download the filing's inline-XBRL instance + schema from SEC EDGAR.
-2. **Parsing** — extract facts via Arelle; keep only real annual-report periods.
-3. **Normalization** — map concepts to a shared label vocabulary; classify statement type;
-   standardize units.
-4. **Validation** — hard balance-sheet-identity + unit-scaling gates at load; reconciliation
-   heuristics as warnings.
-5. **Storage** — load into a 30+ table star schema (dimensions, facts, relationships) with
-   provenance.
-6. **Serving** — Flask REST API; statement-view reconstruction for a frontend.
+1. **Extraction** — `EdgarToolsExtractor` reads the latest annual filing's XBRL into a uniform
+   `ExtractionResult` (facts with raw concepts, periods, units, dimensions).
+2. **Validation** — hard integrity gates + soft warnings; produces the per-filing quality report.
+3. **Load** — slim upsert into the star schema (idempotent; no gap-fill or statement
+   reconstruction — edgartools hands over clean, correctly-periodized facts).
+4. **Serving** — Flask REST API over the warehouse.
 
 ## 🛠️ Tech stack
 
-Python 3.11 · [Arelle](https://arelle.org/) (XBRL) · PostgreSQL · SQLAlchemy · Flask ·
-Docker. A Next.js frontend exists (`Website/portfolio/app/finsight`) but expects a deployed
-backend and isn't part of local testing.
+Python 3.11 · [edgartools](https://github.com/dgunning/edgartools) (SEC XBRL extraction) ·
+PostgreSQL · SQLAlchemy · Flask · Docker. A Next.js frontend exists
+(`Website/portfolio/app/finsight`) but expects a deployed backend and isn't part of local
+testing. *(The earlier Arelle-based custom parser was retired in the 2026-10 re-architecture;
+see `docs/REARCHITECTURE.md`.)*
 
 ## 📦 Run it locally
 
@@ -71,45 +78,51 @@ docker ps | grep superset_db
 # 2. Python env (if not already present)
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
-# 3. Run the pipeline for one company (extract → load → API → statement checks)
-./run_pipeline.sh AAPL 2024 10-K
+# 3. Extract + validate + load one or more filers into the warehouse
+.venv/bin/python database/load_from_edgartools.py AVGO            # one filer
+.venv/bin/python database/load_from_edgartools.py                 # the full reference set
 ```
 
-Notes:
-- The first run for a new US-GAAP taxonomy year downloads that taxonomy (~5–10 min, then
-  cached). Subsequent runs are fast.
-- The `--year` argument selects the latest 10-K at or before that year; filenames use the
-  argument, while the data inside reflects the filing's actual fiscal years.
-- For local data exploration, query Postgres directly or use `./start_viewer.sh` (Streamlit).
+Each filer prints a `GATE`/`QUAL` line and writes a quality report to `data/quality_reports/`.
+The loader is idempotent — re-running reuses existing filing rows rather than duplicating.
+
+> **Note on the legacy entrypoints.** `run_pipeline.sh` and `src/main.py` still drive the
+> retired Arelle path and are mid-migration to the edgartools loader above — use
+> `load_from_edgartools.py` as the current path. See [`ROADMAP.md`](ROADMAP.md).
 
 ## 🤝 API endpoints
 
 ```
 GET  /health
-GET  /api/companies                 # loaded companies
-GET  /api/analyze/{ticker}/{year}   # normalized facts for a loaded filing
-GET  /api/statements/{ticker}/{year}# reconstructed income / balance / cash-flow statements
+GET  /api/companies                  # loaded companies
+GET  /api/financials/{ticker}        # multi-year statements + segment revenue, warehouse-direct
 ```
+
+Additional endpoints exist (`/api/analyze/{ticker}/{year}`, `/api/statements/{ticker}/{year}`,
+and the NP2SQL `/api/query`); `/api/financials/{ticker}` is the one wired directly to the
+re-architected warehouse and the one the dashboard consumes.
 
 ## ⚠️ Known limitations (honest list)
 
-- **US-GAAP only in practice.** IFRS / 20-F filers (e.g. Novo Nordisk, Sanofi) are not
-  verified to load cleanly and are excluded from the reference dataset. See roadmap.
-- **Validation is partly heuristic.** The balance-sheet identity (reported totals) and
-  unit-scaling checks are rigorous and hard-fail. The income-statement-math,
-  cash-flow-reconciliation, and cross-company normalization-conflict checks key on specific
-  normalized labels and produce false positives across filers, so they are **surfaced as
-  warnings, not errors**. "Validated" today means "integrity-gated," not "fully audited."
-- **Normalized-label vocabulary has inconsistencies** (e.g. the "Total liabilities & equity"
-  line appears under more than one label across filers). Being consolidated on the roadmap.
-- **Period assignment has a known bug.** Current-year headline figures are reliable, but some
-  comparative-year / cross-filer facts can be linked to an incorrect fiscal period (a shared
-  `period_id` across filers with different fiscal calendars). Multi-year/comparative queries
-  may therefore show misassigned values. Prioritized on the roadmap.
-- **Statement reconstruction depends on the presentation linkbase**, which inline-XBRL
-  filings often omit; missing totals (e.g. beginning-of-year cash, total L&E) are derived
-  with targeted calculations rather than read directly.
-- **Not hosted.** Runs locally via Docker only; there is no live demo URL at this time.
+- **Normalized-label vocabulary isn't consolidated yet.** Labels are currently ≈1:1 with raw
+  XBRL concepts (snake-case fallback), so cross-company lines don't fully reconcile (e.g.
+  "Total liabilities & equity" appears under several labels). A tested canonical mapping is the
+  top roadmap item — until then, per-company figures are reliable but cross-company
+  line-by-line comparison needs care.
+- **Validation is integrity-gated, not fully audited.** The balance-sheet identity and
+  unit/scale checks hard-fail; income-math and EPS are warnings. Explicit duplicate detection,
+  cross-statement reconciliation, and outlier/anomaly flagging are on the roadmap. "Validated"
+  means integrity-gated + quality-scored, not audited.
+- **Currency is detected, not converted.** Facts keep their native currency (USD/DKK/EUR);
+  normalization to a single reporting currency isn't done.
+- **Legacy orchestration not yet flipped.** `run_pipeline.sh`/`src/main.py` still reference the
+  retired Arelle path (see note above).
+- **Not hosted.** Runs locally via Docker only; no live demo URL at this time.
+- **Pure-ESMA EU filers are out of scope** (no SEC filing); EU companies on US exchanges work
+  via their 20-F.
+- **Qualitative/ESG and analytics are future phases** — LLM-based ESG/narrative extraction
+  (Phase 2) and visualization templates / ML analytics (Phase 3) are not built; see
+  [`ROADMAP.md`](ROADMAP.md).
 
 ## 📊 Database schema
 
@@ -118,8 +131,8 @@ A 30+ table star schema (dimension, fact, and relationship tables). See
 
 ## 🙏 Credits
 
-Arelle (David vun Kannon & contributors) · US-GAAP Taxonomy (FASB) · IFRS Taxonomy (IFRS
-Foundation) · SEC EDGAR (U.S. SEC).
+[edgartools](https://github.com/dgunning/edgartools) (Dwight Gunning & contributors) · US-GAAP
+Taxonomy (FASB) · IFRS Taxonomy (IFRS Foundation) · SEC EDGAR (U.S. SEC).
 
 ## 📧 Contact
 
