@@ -23,6 +23,8 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
+from src.extraction.canonical_labels import CANONICAL
+
 # ---- concept vocabularies (raw tags, US-GAAP + IFRS) -------------------------
 ASSETS = {"us-gaap:Assets", "ifrs-full:Assets"}
 # right-hand side of the balance sheet identity (total L&E)
@@ -79,6 +81,7 @@ class QualityReport:
     hard_gates: list = field(default_factory=list)      # list[Check]
     soft_checks: list = field(default_factory=list)      # list[Check]
     critical_present: dict = field(default_factory=dict)  # name -> bool
+    anomalies: list = field(default_factory=list)          # conflicting-value + outlier findings
     scores: dict = field(default_factory=dict)
     warnings: list = field(default_factory=list)
     passed: bool = False             # hard-gate verdict — gates persistence
@@ -199,6 +202,77 @@ def _check_eps(facts) -> Check:
                  expected=expected, actual=eps.value_numeric, rel_error=err)
 
 
+# ---- duplicate / conflict + anomaly detection (soft, PRD §2.4) --------------
+def _by_year(facts, concepts, instant: bool) -> dict:
+    """{year: value} for a concept set — instant facts by their year, or ~annual durations by
+    period-end year. First value seen per year (good enough for a scale-jump heuristic)."""
+    by: dict = {}
+    for f in _undimensioned(facts):
+        if f.concept not in concepts or f.value_numeric is None:
+            continue
+        if instant and f.period_type == "instant" and f.instant_date:
+            by.setdefault(f.instant_date.year, f.value_numeric)
+        elif (not instant) and f.period_type == "duration" and f.period_start and f.period_end \
+                and 330 <= (f.period_end - f.period_start).days <= 380:
+            by.setdefault(f.period_end.year, f.value_numeric)
+    return by
+
+
+def _detect_conflicts(facts) -> list[str]:
+    """Flag canonical lines where co-occurring synonym concepts report DIFFERENT values for the
+    same period — a genuine data conflict for manual review (PRD §2.4). Equal-valued synonyms
+    (e.g. JPM's Revenues == RevenuesNetOfInterestExpense) are not conflicts."""
+    out = []
+    undim = _undimensioned(facts)
+    for label, concepts in CANONICAL.items():
+        cset = set(concepts)
+        groups: dict = {}
+        for f in undim:
+            if f.concept in cset:
+                sig = (f.period_type, f.period_start, f.period_end, f.instant_date)
+                groups.setdefault(sig, {})[f.concept] = f.value_numeric
+        for by_concept in groups.values():
+            vals = [v for v in by_concept.values() if v is not None]
+            if len(by_concept) > 1 and len(vals) > 1 and _rel_error(min(vals), max(vals)) > 0.01:
+                pretty = ", ".join(f"{c.split(':')[-1]}={v:,.0f}" for c, v in by_concept.items())
+                out.append(f"conflicting values for {label}: {pretty}")
+    return out
+
+
+def _detect_anomalies(facts) -> list[str]:
+    """Sign / ratio / scale outliers worth a look — all flagged, never fatal."""
+    out = []
+    rev = _latest_annual(facts, REVENUE)
+    ni = _latest_annual(facts, NET_INCOME)
+    gp = _latest_annual(facts, GROSS_PROFIT)
+    assets = _latest_instant(facts, ASSETS)
+    equity = _latest_instant(facts, EQUITY)
+
+    if rev and rev.value_numeric is not None and rev.value_numeric < 0:
+        out.append(f"revenue is negative ({rev.value_numeric:,.0f})")
+    if assets and assets.value_numeric is not None and assets.value_numeric <= 0:
+        out.append(f"total assets non-positive ({assets.value_numeric:,.0f})")
+    if equity and equity.value_numeric is not None and equity.value_numeric < 0:
+        out.append(f"total equity is negative ({equity.value_numeric:,.0f}) — verify (buybacks can cause this)")
+    if rev and ni and rev.value_numeric:
+        m = ni.value_numeric / rev.value_numeric
+        if abs(m) > 1.0:
+            out.append(f"net margin outside ±100% ({m:.0%}) — possible mis-tag")
+    if gp and rev and rev.value_numeric and gp.value_numeric is not None \
+            and gp.value_numeric > rev.value_numeric * 1.01:
+        out.append(f"gross profit ({gp.value_numeric:,.0f}) exceeds revenue ({rev.value_numeric:,.0f})")
+
+    # year-over-year scale jumps (a 5x+ swing usually means a unit/scale mis-tag)
+    for name, concepts, instant in (("revenue", REVENUE, False), ("total assets", ASSETS, True)):
+        by = _by_year(facts, concepts, instant)
+        yrs = sorted(by)
+        if len(yrs) >= 2:
+            prior, latest = by[yrs[-2]], by[yrs[-1]]
+            if prior and latest and (latest / prior > 5 or latest / prior < 0.2):
+                out.append(f"{name} YoY change {prior:,.0f} -> {latest:,.0f} looks like a scale error")
+    return out
+
+
 # ---- public entrypoint -------------------------------------------------------
 def validate(result) -> QualityReport:
     """Validate one ExtractionResult; produce a per-filing data-quality report.
@@ -227,8 +301,18 @@ def validate(result) -> QualityReport:
         elif c.status == "skip":
             rep.warnings.append(f"gate not verified — {c.name}: {c.detail}")
 
-    # soft checks
-    rep.soft_checks = [_check_income_math(facts), _check_eps(facts)]
+    # soft checks (reconciliation heuristics + duplicate/conflict + anomaly detection)
+    conflicts = _detect_conflicts(facts)
+    anomalies = _detect_anomalies(facts)
+    rep.anomalies = conflicts + anomalies
+    rep.soft_checks = [
+        _check_income_math(facts),
+        _check_eps(facts),
+        Check("value_conflicts", "fail" if conflicts else "pass",
+              "; ".join(conflicts) or "no conflicting synonym values"),
+        Check("anomalies", "fail" if anomalies else "pass",
+              "; ".join(anomalies) or "no sign/ratio/scale outliers"),
+    ]
     for c in rep.soft_checks:
         if c.status == "fail":
             rep.warnings.append(f"soft check failed — {c.name}: {c.detail}")
