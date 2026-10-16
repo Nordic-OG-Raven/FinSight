@@ -28,6 +28,7 @@ from psycopg2.extras import execute_values
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from config import DATABASE_URL  # noqa: E402
 from src.extraction.edgartools_adapter import EdgarToolsExtractor, ExtractionResult  # noqa: E402
+from src.extraction.canonical_labels import canonical, canonical_label  # noqa: E402
 from src.validation.quality import QualityReport, validate, write_report  # noqa: E402
 
 try:
@@ -184,38 +185,61 @@ class StarSchemaLoader:
         fid = self._filing_id(cid, r)
         facts = [f for f in r.facts if f.fiscal_year is not None and f.period_type is not None]
 
-        # Precompute parts once per fact.
+        # Precompute parts once per fact. A fact's per-concept label is its canonical label
+        # (cross-taxonomy, context-free) when it's a core line, else the snake-case fallback.
         parsed = []
         concept_specs: dict[tuple, tuple] = {}
         dim_specs: dict[str, str] = {}
+        # winner of each canonical line within this filing, keyed by (canon_label, fy, pt, dim):
+        # the lowest priority index present. A fact earns the canonical label only if it is that
+        # winner; co-occurring synonyms (e.g. a bank's Revenues vs RevenuesNetOfInterestExpense)
+        # fall back to their own label instead of colliding and being dropped.
+        winner: dict[tuple, int] = {}
         for f in facts:
             tax, local = _concept_parts(f.concept)
-            nl = _norm_label(local)
+            concept_label = canonical_label(f.concept) or _norm_label(local)
             prev = concept_specs.get((tax, local))
             prev_st = prev[2] if prev else None
             # keep the first meaningful statement_type seen for a concept
             best_st = prev_st if (prev_st and prev_st != "other") else f.statement_type
-            concept_specs[(tax, local)] = (nl, f.label or local, best_st)
+            concept_specs[(tax, local)] = (concept_label, f.label or local, best_st)
             dh = None
             if f.dimensions:
                 dh, js = _dim_hash(f.dimensions)
                 dim_specs[dh] = js
-            parsed.append((f, tax, local, nl, dh))
+            pend = f.period_end or f.instant_date
+            fy = pend.year if pend else f.fiscal_year
+            canon = canonical(f.concept)
+            if canon:
+                key = (canon[0], fy, f.period_type, dh)
+                if key not in winner or canon[1] < winner[key]:
+                    winner[key] = canon[1]
+            parsed.append((f, tax, local, dh, fy, canon))
 
         self._ensure_concepts(concept_specs)
         self._ensure_dims(dim_specs)
 
         rows, seen = [], set()
-        for f, tax, local, nl, dh in parsed:
+        for f, tax, local, dh, fy, canon in parsed:
             concept_id = self._concept_cache[(tax, local)]
             # Derive fiscal_year from the period's OWN end/instant date, not edgartools'
             # fiscal_year field (which tagged, e.g., Apple's FY2023 revenue as 2024). A
             # fiscal year is named for the calendar year it ends in across every calendar
             # here (Sep/Nov/Dec/Jun/Jan year-ends).
-            pend = f.period_end or f.instant_date
-            fy = pend.year if pend else f.fiscal_year
             period_id = self._period_id(f.period_type, f.period_start, f.period_end, f.instant_date, fy)
             dim_id = self._dim_cache[dh] if dh else None
+            # Label resolution:
+            #  - canonical winner of its line in this filing  -> the canonical label
+            #  - canonical LOSER (a synonym the winner outranks) -> its own snake-cased concept
+            #    name, NOT _norm_label: the legacy mapping would re-map the synonym to the same
+            #    canonical label, re-colliding and letting ON CONFLICT drop the winner.
+            #  - non-core concept -> legacy/snake as before
+            if canon and winner.get((canon[0], fy, f.period_type, dh)) == canon[1]:
+                nl = canon[0]
+            elif canon:
+                nl = _snake(local)
+            else:
+                nl = _norm_label(local)
             dedup = (concept_id, period_id, dim_id)
             if dedup in seen:
                 continue
