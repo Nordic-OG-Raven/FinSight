@@ -41,8 +41,13 @@ marked below so this file reflects what is actually true today.
 - ◐ **Validation that audits, not just gates (PRD §2.4).** The sound checks exist; still to add:
   explicit duplicate-fact detection, cross-statement reconciliation against the statement as
   filed, and outlier/anomaly flagging. Goal: "validated" means audited.
-- ☐ **Verify / rebuild the Streamlit viewer + CSV/Parquet export (PRD §2.8)** against the
-  rebuilt warehouse (built for the old schema; unconfirmed).
+- ✅ **Streamlit viewer + exports verified against the new warehouse (PRD §2.8).** Loader now
+  populates `axis_name`/`member_name` on `dim_xbrl_dimensions`; the viewer's missing
+  `v_facts_hierarchical` convenience view was created
+  (`database/migrations/create_v_facts_hierarchical.sql`); all viewer queries (stats,
+  consolidated, dimensional, view-backed) run and CSV/JSON export works. `src/storage/
+  export_queries.py` was rewritten off the dead flat table onto the star schema (canonical
+  labels) and all seven queries verified.
 - ☐ **Currency normalization to a common reporting currency (PRD §2.3).** Currency is detected
   (USD/DKK/EUR); conversion to a common currency needs an FX source.
 - ☐ **Decide keep-or-kill: `staging_facts` ELT layer and the `dim_statement_templates` /

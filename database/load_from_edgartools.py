@@ -101,10 +101,18 @@ class StarSchemaLoader:
                 self._dim_cache[h] = did
             missing = [h for h in need if h not in self._dim_cache]
             if missing:
-                rows = [(specs[h], h) for h in missing]
+                # Also populate axis_name / member_name (human-readable, used by the data
+                # viewer) from the dimension JSON: the axis keys and member values, comma-joined
+                # for multi-axis dimensions.
+                rows = []
+                for h in missing:
+                    d = json.loads(specs[h])
+                    axis = ", ".join(d.keys())
+                    member = ", ".join(str(v) for v in d.values())
+                    rows.append((specs[h], h, axis, member))
                 for h, did in execute_values(
                     self.cur,
-                    "INSERT INTO dim_xbrl_dimensions (dimension_json, dimension_hash) "
+                    "INSERT INTO dim_xbrl_dimensions (dimension_json, dimension_hash, axis_name, member_name) "
                     "VALUES %s RETURNING dimension_hash, dimension_id",
                     rows, fetch=True,
                 ):
