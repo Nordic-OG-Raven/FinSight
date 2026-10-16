@@ -1,246 +1,129 @@
 #!/bin/bash
 #
-# FinSight Data Pipeline
-# 
-# Complete pipeline for extracting financial data from XBRL filings
-# and loading into PostgreSQL data warehouse.
+# FinSight Data Pipeline (edgartools path)
+#
+# Extract → validate → load one filing into the PostgreSQL star schema, start the API, and
+# smoke-test it. Extraction/validation/loading all run in src/main.py (which reuses the
+# StarSchemaLoader); the retired Arelle pipeline is gone — see docs/REARCHITECTURE.md.
 #
 # Usage:
-#   ./run_pipeline.sh                    # Extract NVO (Novo Nordisk)
-#   ./run_pipeline.sh AAPL 2023 10-K    # Extract Apple 2023 10-K
+#   ./run_pipeline.sh                 # AVGO (the dashboard demo company)
+#   ./run_pipeline.sh NVO 20-F        # a specific ticker + filing form
+#   ./run_pipeline.sh AAPL            # form auto-detected
 #
+# (A second argument that looks like a year is accepted and ignored — the edgartools path
+#  always loads the latest annual filing.)
 
-# Don't use set -e because we want to continue even if UI tests fail
-# set -e  # Exit on error
+TICKER="${1:-AVGO}"
+ARG2="${2:-}"
+# Back-compat: old callers passed YEAR as $2 and FILING_TYPE as $3. If $2 is a 4-digit year,
+# treat $3 as the filing type; otherwise $2 itself is the filing type.
+if [[ "$ARG2" =~ ^[0-9]{4}$ ]]; then
+    FILING_TYPE="${3:-}"
+else
+    FILING_TYPE="$ARG2"
+fi
 
-# Configuration
-TICKER="${1:-NVO}"
-YEAR="${2:-2024}"
-FILING_TYPE="${3:-20-F}"
 VENV_PATH="/Users/jonas/FinSight/.venv"
 PROJECT_ROOT="/Users/jonas/FinSight"
-
-# Colors for output
-GREEN='\033[0;32m'
-BLUE='\033[0;34m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-NC='\033[0m' # No Color
-
-echo "========================================================================"
-echo " FinSight Data Pipeline"
-echo "========================================================================"
-echo "Company: $TICKER"
-echo "Year: $YEAR"
-echo "Filing Type: $FILING_TYPE"
-echo "========================================================================"
-echo ""
-
-# Check virtual environment
-if [ ! -d "$VENV_PATH" ]; then
-    echo "❌ Virtual environment not found at $VENV_PATH"
-    echo "   Please run: python -m venv $VENV_PATH"
-    exit 1
-fi
-
-# Check Docker
-if ! docker ps > /dev/null 2>&1; then
-    echo "❌ Docker is not running. Please start Docker Desktop."
-    exit 1
-fi
-
-# Check PostgreSQL container
-if ! docker ps | grep -q "superset_db"; then
-    echo "❌ Container 'superset_db' not running. Start Superset first."
-    exit 1
-fi
-
-cd "$PROJECT_ROOT"
-
-# Enable unbuffered Python output for real-time progress bars
-export PYTHONUNBUFFERED=1
-
-# Step 1: Extract data using Python pipeline
-echo -e "${BLUE}Step 1/3: Extracting XBRL data...${NC}"
-echo "------------------------------------------------------------------------"
-
-"$VENV_PATH/bin/python" -u src/main.py \
-    --ticker "$TICKER" \
-    --year "$YEAR" \
-    --filing-type "$FILING_TYPE" \
-    --skip-download  # Use existing files if available
-
-EXTRACTION_EXIT_CODE=$?
-
-if [ $EXTRACTION_EXIT_CODE -ne 0 ]; then
-    echo ""
-    echo -e "${YELLOW}Note: If extraction failed due to parsing errors,${NC}"
-    echo -e "${YELLOW}the data may already be extracted. Continuing...${NC}"
-fi
-
-echo ""
-
-# Step 2: Load to PostgreSQL using proper ETL loader (star schema)
-echo -e "${BLUE}Step 2/3: Loading to PostgreSQL (star schema)...${NC}"
-echo "------------------------------------------------------------------------"
-
-JSON_FILE="data/processed/${TICKER}_${YEAR}_${FILING_TYPE//-/}_facts.json"
-
-if [ ! -f "$JSON_FILE" ]; then
-    echo "❌ Extracted data not found: $JSON_FILE"
-    exit 1
-fi
-
-echo "  → Loading JSON data to PostgreSQL using StarSchemaLoader..."
-echo "  → File: $JSON_FILE"
-echo "  → This applies normalization, validation, and loads into star schema"
-
-# Use the proper ETL loader (database/load_financial_data.py)
-# This loads into fact_financial_metrics (star schema), not financial_facts (old flat schema)
-# Load only the specific file we just extracted
-"$VENV_PATH/bin/python" -u database/load_financial_data.py "$JSON_FILE"
-
-LOAD_EXIT_CODE=$?
-
-if [ $LOAD_EXIT_CODE -ne 0 ]; then
-    echo ""
-    echo -e "${YELLOW}⚠️  Data loading failed. Check output above for details.${NC}"
-    echo ""
-fi
-
-echo ""
-
-# Step 3: Start API (if not already running)
-echo -e "${BLUE}Step 3/4: Starting API...${NC}"
-echo "------------------------------------------------------------------------"
-
-FINSIGHT_API="/Users/jonas/FinSight/api"
 FLASK_PORT=5001
 API_LOG="/Users/jonas/FinSight/api.log"
 
-# Function to check if API is running
-check_api_status() {
-    curl -s "http://localhost:$FLASK_PORT/health" > /dev/null 2>&1
-}
+GREEN='\033[0;32m'; BLUE='\033[0;34m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 
-# Function to kill process on port
-kill_port() {
-    local port=$1
-    local pids=$(lsof -ti:$port 2>/dev/null || true)
-    if [ -n "$pids" ]; then
-        echo -e "${YELLOW}Killing existing processes on port $port...${NC}"
-        echo "$pids" | xargs kill -9 2>/dev/null || true
-        sleep 1
-    fi
-}
+echo "========================================================================"
+echo " FinSight Data Pipeline (edgartools path)"
+echo "========================================================================"
+echo "Company: $TICKER${FILING_TYPE:+   Filing: $FILING_TYPE}"
+echo "========================================================================"
+echo ""
 
-# Check if API is already running
+# --- preflight ----------------------------------------------------------------
+if [ ! -d "$VENV_PATH" ]; then
+    echo -e "${RED}❌ Virtual environment not found at $VENV_PATH${NC}"
+    echo "   Please run: python3 -m venv $VENV_PATH && $VENV_PATH/bin/pip install -r requirements.txt"
+    exit 1
+fi
+if ! docker ps > /dev/null 2>&1; then
+    echo -e "${RED}❌ Docker is not running. Please start Docker Desktop.${NC}"; exit 1
+fi
+if ! docker ps | grep -q "superset_db"; then
+    echo -e "${RED}❌ Container 'superset_db' not running. Start Superset first.${NC}"; exit 1
+fi
+
+cd "$PROJECT_ROOT"
+export PYTHONUNBUFFERED=1
+
+# --- Step 1: extract + validate + load ---------------------------------------
+echo -e "${BLUE}Step 1/3: Extract + validate + load...${NC}"
+echo "------------------------------------------------------------------------"
+"$VENV_PATH/bin/python" -u src/main.py --ticker "$TICKER" ${FILING_TYPE:+--filing-type "$FILING_TYPE"}
+LOAD_EXIT_CODE=$?
+if [ $LOAD_EXIT_CODE -ne 0 ]; then
+    echo -e "${RED}❌ Load failed the validation gate — data not persisted. See above.${NC}"
+    exit 1
+fi
+echo -e "${GREEN}✅ Loaded; quality report in data/quality_reports/${NC}"
+echo ""
+
+# --- Step 2: start API (if not already up) -----------------------------------
+echo -e "${BLUE}Step 2/3: Starting API...${NC}"
+echo "------------------------------------------------------------------------"
+check_api_status() { curl -s "http://localhost:$FLASK_PORT/health" > /dev/null 2>&1; }
+
 if check_api_status; then
-    echo -e "${GREEN}✅ API is already running on http://localhost:$FLASK_PORT${NC}"
+    echo -e "${GREEN}✅ API already running on http://localhost:$FLASK_PORT${NC}"
 else
-    echo -e "${YELLOW}⚠️  API is not running at http://localhost:$FLASK_PORT${NC}"
     echo "   Starting API on port $FLASK_PORT..."
-    
-    # Kill any existing processes on the port
-    kill_port $FLASK_PORT
-    
-    # Start Flask API
-    cd "$FINSIGHT_API"
+    pids=$(lsof -ti:$FLASK_PORT 2>/dev/null || true)
+    [ -n "$pids" ] && echo "$pids" | xargs kill -9 2>/dev/null || true
+    cd "$PROJECT_ROOT/api"
     source "$VENV_PATH/bin/activate"
     nohup python main.py > "$API_LOG" 2>&1 &
     FLASK_PID=$!
     echo $FLASK_PID > /tmp/flask_finsight.pid
-    sleep 3
-    
-    # Verify Flask started
-    if ! kill -0 $FLASK_PID 2>/dev/null; then
-        echo -e "${RED}❌ Flask failed to start. Check $API_LOG${NC}"
-        tail -20 "$API_LOG"
-        exit 1
-    fi
-    
-    # Wait for Flask to be ready
+    cd "$PROJECT_ROOT"
     API_READY=false
     for i in {1..30}; do
         if check_api_status; then
-            echo -e "${GREEN}✅ Flask API running on http://localhost:$FLASK_PORT${NC}"
-            API_READY=true
-            break
-        fi
-        if [ $i -eq 30 ]; then
-            echo -e "${RED}❌ Flask API not responding after 30s${NC}"
-            tail -20 "$API_LOG"
-            exit 1
+            echo -e "${GREEN}✅ API running on http://localhost:$FLASK_PORT${NC}"; API_READY=true; break
         fi
         sleep 1
     done
-    
     if [ "$API_READY" = false ]; then
-        echo -e "${RED}❌ Failed to start API. Exiting.${NC}"
-        exit 1
+        echo -e "${RED}❌ API not responding after 30s. Check $API_LOG${NC}"; tail -20 "$API_LOG"; exit 1
     fi
 fi
-
-cd "$PROJECT_ROOT"
 echo ""
 
-# Step 4: Run UI tests
-# Uses src/validation/ui_test.py (UniversalUITest) — the generic, per-company-correct
-# successor to the old root UITest.py, which hardcoded its expected line items to Novo
-# Nordisk specifically and was reporting false "missing item" failures for every other
-# company. Same CLI interface, drop-in replacement. See
-# docs/PIPELINE_AND_VALIDATION_MAP.md §5 and docs/NVO_GOLDEN_PATH_2026-08.md item 2.
-echo -e "${BLUE}Step 4/4: Running UI tests...${NC}"
+# --- Step 3: smoke-test the warehouse-direct endpoint ------------------------
+echo -e "${BLUE}Step 3/3: Smoke-testing /api/financials/$TICKER...${NC}"
 echo "------------------------------------------------------------------------"
-
-"$VENV_PATH/bin/python" -u -m src.validation.ui_test \
-    --ticker "$TICKER" \
-    --year "$YEAR" \
-    --test all \
-    --api-base "http://localhost:$FLASK_PORT" \
-    --keep-api
-
-UI_TEST_EXIT_CODE=$?
-
-if [ $UI_TEST_EXIT_CODE -ne 0 ]; then
-    echo ""
-    echo -e "${YELLOW}⚠️  UI tests failed. Check output above for details.${NC}"
-    echo ""
-fi
+"$VENV_PATH/bin/python" - "$TICKER" "$FLASK_PORT" <<'PY'
+import sys, json, urllib.request
+ticker, port = sys.argv[1], sys.argv[2]
+try:
+    with urllib.request.urlopen(f"http://localhost:{port}/api/financials/{ticker}", timeout=10) as r:
+        d = json.load(r)
+    years, cur, fye = d.get("years"), d.get("currency"), d.get("fiscal_year_end")
+    if not years:
+        print(f"❌ no years returned for {ticker}"); sys.exit(1)
+    print(f"✅ {ticker}: {cur}, FYE {fye}, years {years}")
+except Exception as e:
+    print(f"❌ smoke test failed: {type(e).__name__}: {e}"); sys.exit(1)
+PY
+SMOKE=$?
 
 echo ""
 echo "========================================================================"
-if [ $UI_TEST_EXIT_CODE -eq 0 ]; then
-    echo -e "${GREEN}✅ Pipeline Complete!${NC}"
+if [ $SMOKE -eq 0 ]; then
+    echo -e "${GREEN}✅ Pipeline Complete — $TICKER extracted, validated, loaded, and served.${NC}"
 else
-    echo -e "${YELLOW}⚠️  Pipeline Complete with Warnings${NC}"
+    echo -e "${YELLOW}⚠️  Loaded, but the API smoke test did not pass. Check above.${NC}"
 fi
 echo "========================================================================"
-echo ""
-echo "📊 Database: finsight"
-echo "📊 Tables: fact_financial_metrics (star schema)"
-echo ""
-echo "🌐 API: http://localhost:$FLASK_PORT/api/finsight"
-echo "   Log file: $API_LOG"
-if [ -f /tmp/flask_finsight.pid ]; then
-    FLASK_PID=$(cat /tmp/flask_finsight.pid)
-    echo "   Process ID: $FLASK_PID"
-    echo "   To stop: kill $FLASK_PID"
-fi
-echo ""
-echo "Next steps:"
-echo "  1. Query data:"
-echo "     docker exec superset_db psql -U superset -d finsight -c \"SELECT COUNT(*) FROM fact_financial_metrics;\""
-echo ""
-echo "  2. Connect Superset:"
-echo "     Host: superset_db"
-echo "     Port: 5432"
-echo "     Database: finsight"
-echo "     Username: superset"
-echo "     Password: superset"
-echo ""
-echo "  3. Test API:"
-echo "     curl http://localhost:$FLASK_PORT/health"
-echo ""
+echo "📊 Database: finsight · fact_financial_metrics (star schema)"
+echo "🌐 API: http://localhost:$FLASK_PORT   (health: /health, data: /api/financials/$TICKER)"
+echo "📝 Quality report: data/quality_reports/"
 echo "========================================================================"
-
+exit $SMOKE

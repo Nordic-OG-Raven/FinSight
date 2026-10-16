@@ -34,10 +34,10 @@ marked below so this file reflects what is actually true today.
   single label across the 8-filer set; tested in `tests/test_canonical_labels.py`. *The long
   tail of note-disclosure concepts intentionally keeps its snake-case label — consolidating it
   isn't needed for reconciliation.*
-- ◐ **Point the documented CLI/orchestration at the new path (PRD §2.7).** `run_pipeline.sh`
-  and `src/main.py` still drive the retired Arelle pipeline; the working path is
-  `database/load_from_edgartools.py`. Make the documented entrypoint *be* the edgartools
-  pipeline.
+- ✅ **Documented CLI/orchestration now runs the edgartools path (PRD §2.7).** `src/main.py`
+  (`--ticker`) and `run_pipeline.sh` extract → validate → load via the edgartools loader; the
+  old Arelle `run_pipeline()` was replaced (signature kept, so the Flask API still works) and
+  `run_pipeline.sh` ends with an `/api/financials` smoke test instead of the legacy UI test.
 - ◐ **Validation that audits, not just gates (PRD §2.4).** The sound checks exist; still to add:
   explicit duplicate-fact detection, cross-statement reconciliation against the statement as
   filed, and outlier/anomaly flagging. Goal: "validated" means audited.

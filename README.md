@@ -78,17 +78,16 @@ docker ps | grep superset_db
 # 2. Python env (if not already present)
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
-# 3. Extract + validate + load one or more filers into the warehouse
-.venv/bin/python database/load_from_edgartools.py AVGO            # one filer
-.venv/bin/python database/load_from_edgartools.py                 # the full reference set
+# 3. Extract + validate + load — pick any entrypoint (all run the edgartools path)
+./run_pipeline.sh AVGO                                 # one filer, then start API + smoke-test
+.venv/bin/python src/main.py --ticker NVO --filing-type 20-F   # single filer, CLI
+.venv/bin/python database/load_from_edgartools.py              # the full reference set (batch)
 ```
 
 Each filer prints a `GATE`/`QUAL` line and writes a quality report to `data/quality_reports/`.
 The loader is idempotent — re-running reuses existing filing rows rather than duplicating.
-
-> **Note on the legacy entrypoints.** `run_pipeline.sh` and `src/main.py` still drive the
-> retired Arelle path and are mid-migration to the edgartools loader above — use
-> `load_from_edgartools.py` as the current path. See [`ROADMAP.md`](ROADMAP.md).
+`--year` is accepted for backward compatibility but ignored; the edgartools path always loads
+the latest annual filing.
 
 ## 🤝 API endpoints
 
@@ -115,8 +114,6 @@ re-architected warehouse and the one the dashboard consumes.
   means integrity-gated + quality-scored, not audited.
 - **Currency is detected, not converted.** Facts keep their native currency (USD/DKK/EUR);
   normalization to a single reporting currency isn't done.
-- **Legacy orchestration not yet flipped.** `run_pipeline.sh`/`src/main.py` still reference the
-  retired Arelle path (see note above).
 - **Not hosted.** Runs locally via Docker only; no live demo URL at this time.
 - **Pure-ESMA EU filers are out of scope** (no SEC filing); EU companies on US exchanges work
   via their 20-F.
