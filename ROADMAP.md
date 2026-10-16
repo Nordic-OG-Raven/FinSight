@@ -27,10 +27,13 @@ marked below so this file reflects what is actually true today.
   provenance → weighted score) in `data/quality_reports/`.
 
 ### Still open to truly close the MVP
-- ◐ **Consolidate the normalized-label vocabulary (PRD §2.3).** Today normalization is ≈1:1
-  with raw concepts (snake-case fallback), so cross-company lines don't reconcile — e.g.
-  "Total liabilities & equity" lands under many labels. Needs a tested concept→canonical-label
-  map per taxonomy. *Biggest real gap; blocks trustworthy peer comparison.*
+- ✅ **Consolidated canonical labels for the core lines (PRD §2.3).**
+  `src/extraction/canonical_labels.py` maps one canonical label per core income-statement /
+  balance-sheet / cash-flow line across us-gaap + ifrs-full (priority-ordered, so co-occurring
+  synonyms resolve deterministically and nothing is dropped). All core lines now reconcile to a
+  single label across the 8-filer set; tested in `tests/test_canonical_labels.py`. *The long
+  tail of note-disclosure concepts intentionally keeps its snake-case label — consolidating it
+  isn't needed for reconciliation.*
 - ◐ **Point the documented CLI/orchestration at the new path (PRD §2.7).** `run_pipeline.sh`
   and `src/main.py` still drive the retired Arelle pipeline; the working path is
   `database/load_from_edgartools.py`. Make the documented entrypoint *be* the edgartools
