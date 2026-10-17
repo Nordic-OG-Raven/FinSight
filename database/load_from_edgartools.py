@@ -76,6 +76,20 @@ class StarSchemaLoader:
             )
             for tax, name, cid in self.cur.fetchall():
                 self._concept_cache[(tax, name)] = cid
+            # Refresh normalized_label / statement_type on concepts that already exist, so a
+            # reload reflects the current (e.g. canonical) labels instead of whatever an earlier
+            # load wrote. Without this, dim_concepts.normalized_label drifts from the fact-level
+            # labels after the canonical-label change.
+            existing = [k for k in need if k in self._concept_cache]
+            if existing:
+                upd = [(specs[k][0], specs[k][2], self._concept_cache[k]) for k in existing]
+                execute_values(
+                    self.cur,
+                    "UPDATE dim_concepts AS d SET normalized_label = v.nl, "
+                    "statement_type = COALESCE(v.st, d.statement_type) "
+                    "FROM (VALUES %s) AS v(nl, st, cid) WHERE d.concept_id = v.cid::int",
+                    upd,
+                )
             missing = [k for k in need if k not in self._concept_cache]
             if missing:
                 rows = [(local, tax, specs[(tax, local)][0], specs[(tax, local)][1], specs[(tax, local)][2])

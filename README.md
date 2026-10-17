@@ -97,9 +97,11 @@ GET  /api/companies                  # loaded companies
 GET  /api/financials/{ticker}        # multi-year statements + segment revenue, warehouse-direct
 ```
 
-Additional endpoints exist (`/api/analyze/{ticker}/{year}`, `/api/statements/{ticker}/{year}`,
-and the NP2SQL `/api/query`); `/api/financials/{ticker}` is the one wired directly to the
-re-architected warehouse and the one the dashboard consumes.
+`/api/financials/{ticker}` is the canonical, warehouse-direct endpoint (the dashboard consumes
+it). `/api/analyze/{ticker}/{year}` and the NP2SQL `/api/query` also exist. The old
+`/api/statements/{ticker}/{year}` and `/api/populate-statements` are **retired** (HTTP 410 →
+`/api/financials`): they depended on statement-reconstruction sub-tables that the
+re-architecture removed.
 
 ## ⚠️ Known limitations (honest list)
 

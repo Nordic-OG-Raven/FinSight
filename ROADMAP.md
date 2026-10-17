@@ -53,9 +53,16 @@ marked below so this file reflects what is actually true today.
   labels) and all seven queries verified.
 - ☐ **Currency normalization to a common reporting currency (PRD §2.3).** Currency is detected
   (USD/DKK/EUR); conversion to a common currency needs an FX source.
-- ☐ **Decide keep-or-kill: `staging_facts` ELT layer and the `dim_statement_templates` /
-  `get_income_statement()` presentation machinery (PRD §2.5).** Largely redundant after the
-  re-architecture and unused by the new path — decide, then delete or wire.
+- ✅ **Killed the `staging_facts` ELT layer + statement-template/reconstruction machinery
+  (PRD §2.5).** Dropped the eight empty tables (`staging_facts`, `dim_statement_templates`,
+  `rel_statement_overrides`, `fact_income_statement` / `_balance_sheet` / `_cash_flow` /
+  `_comprehensive_income` / `_equity_statement`) and their dependent presentation views
+  (`database/migrations/drop_retired_statement_machinery.sql`); deprecated the two endpoints
+  that read them (`/api/statements`, `/api/populate-statements`) to HTTP 410 → `/api/financials`.
+  Also fixed `dim_concepts.normalized_label` drifting from the canonical labels on reload.
+  *Remaining: the retired Arelle-path Python modules (`load_financial_data.py`, `parse_xbrl.py`,
+  `fetch_sec.py`, `populate_statement_facts.py`, the old heuristic validators) are now dead code
+  and can be removed in a dedicated sweep — ~15 interdependent files + their tests.*
 
 ### NP2SQL (PRD §15 — marked delivered)
 - ◐ **Natural-language-to-SQL — built, needs re-verification.** The `/natural_language_query`
