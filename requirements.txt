@@ -1,5 +1,8 @@
-# XBRL Parsing (Primary)
-arelle-release>=2.20.0
+# XBRL extraction (primary — edgartools behind the FactExtractor adapter)
+edgartools>=5.62.0
+
+# Legacy Arelle parse path (retired in the re-architecture; kept for archival only)
+# arelle-release>=2.20.0
 
 # Data Manipulation & Analysis
 pandas>=2.0.0
