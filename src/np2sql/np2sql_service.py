@@ -55,12 +55,8 @@ for ticker, name in COMPANY_NAMES.items():
 
 # Allowed tables (whitelist)
 ALLOWED_TABLES = {
+    # core fact table + dimensions (the statement sub-tables were retired)
     "fact_financial_metrics",
-    "fact_income_statement",
-    "fact_balance_sheet",
-    "fact_cash_flow",
-    "fact_comprehensive_income",
-    "fact_equity_statement",
     "dim_companies",
     "dim_concepts",
     "dim_time_periods",
@@ -72,7 +68,10 @@ ALLOWED_TABLES = {
     "dim_segments",
     "dim_consolidation_levels",
     "dim_fiscal_periods",
+    # query-friendly views
     "v_facts_consolidated",
+    "v_facts_hierarchical",
+    "v_facts_deduplicated",
     "v_facts_with_dimensions",
     "v_data_quality_summary",
 }
@@ -147,7 +146,7 @@ OUTPUT FORMAT:
     
     try:
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model=os.getenv("NP2SQL_MODEL", "gpt-4o-mini"),
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},

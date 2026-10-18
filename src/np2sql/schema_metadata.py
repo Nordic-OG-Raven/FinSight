@@ -11,7 +11,7 @@ from pathlib import Path
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from src.utils.taxonomy_mappings import CONCEPT_MAPPINGS
+from src.extraction.canonical_labels import CANONICAL
 
 
 def get_schema_metadata() -> dict:
@@ -36,9 +36,10 @@ def get_schema_metadata() -> dict:
             "normalized_label": {"type": "VARCHAR(200)", "description": "Standardized label for cross-company queries (e.g., 'revenue', 'net_income', 'total_assets'). Use this for filtering by metric type."},
             "fiscal_year": {"type": "INTEGER", "description": "Fiscal year (denormalized for performance)"},
             "period_type": {"type": "VARCHAR(20)", "description": "Period type: 'instant' (point in time) or 'duration' (period of time)"},
-            "value_numeric": {"type": "DOUBLE PRECISION", "description": "Numeric value of the financial metric"},
+            "value_numeric": {"type": "DOUBLE PRECISION", "description": "Numeric value in the filing's NATIVE currency/unit"},
+            "value_usd": {"type": "NUMERIC", "description": "Value converted to USD (same as value_numeric for USD filers). Use this for cross-company comparison of foreign filers like NVO (DKK)."},
             "value_text": {"type": "TEXT", "description": "Text value for non-numeric facts"},
-            "unit_measure": {"type": "VARCHAR(50)", "description": "Unit of measure (e.g., 'USD', 'shares', 'pure')"},
+            "unit_measure": {"type": "VARCHAR(50)", "description": "Native unit of measure (e.g., 'USD', 'DKK', 'shares', 'pure')"},
             "currency_id": {"type": "INTEGER FK", "description": "References dim_currencies"},
             "scale_int": {"type": "INTEGER", "description": "Scale factor (e.g., 6 for millions, 3 for thousands)"},
             "is_gaap": {"type": "BOOLEAN", "description": "Whether this is GAAP or non-GAAP metric"},
@@ -59,53 +60,10 @@ def get_schema_metadata() -> dict:
         ],
     }
     
-    # Denormalized fact tables (easier for specific statement queries)
-    fact_income_statement = {
-        "name": "fact_income_statement",
-        "description": "Pre-filtered income statement items with display order. Use for income statement-specific queries.",
-        "columns": {
-            "income_statement_id": {"type": "SERIAL PRIMARY KEY", "description": "Unique identifier"},
-            "filing_id": {"type": "INTEGER FK", "description": "References dim_filings"},
-            "concept_id": {"type": "INTEGER FK", "description": "References dim_concepts"},
-            "period_id": {"type": "INTEGER FK", "description": "References dim_time_periods"},
-            "value_numeric": {"type": "NUMERIC(20,2)", "description": "Numeric value"},
-            "unit_measure": {"type": "VARCHAR(20)", "description": "Unit of measure"},
-            "display_order": {"type": "INTEGER", "description": "Order in which item appears in statement"},
-            "is_header": {"type": "BOOLEAN", "description": "Whether this is a section header"},
-            "hierarchy_level": {"type": "INTEGER", "description": "Hierarchy level (1=detail, 2=subtotal, etc.)"},
-        },
-    }
-    
-    fact_balance_sheet = {
-        "name": "fact_balance_sheet",
-        "description": "Pre-filtered balance sheet items with display order and side (assets vs liabilities_equity).",
-        "columns": {
-            "balance_sheet_id": {"type": "SERIAL PRIMARY KEY", "description": "Unique identifier"},
-            "filing_id": {"type": "INTEGER FK", "description": "References dim_filings"},
-            "concept_id": {"type": "INTEGER FK", "description": "References dim_concepts"},
-            "period_id": {"type": "INTEGER FK", "description": "References dim_time_periods"},
-            "value_numeric": {"type": "NUMERIC(20,2)", "description": "Numeric value"},
-            "unit_measure": {"type": "VARCHAR(20)", "description": "Unit of measure"},
-            "display_order": {"type": "INTEGER", "description": "Order in which item appears"},
-            "side": {"type": "VARCHAR(20)", "description": "'assets' or 'liabilities_equity'"},
-            "is_header": {"type": "BOOLEAN", "description": "Whether this is a section header"},
-        },
-    }
-    
-    fact_cash_flow = {
-        "name": "fact_cash_flow",
-        "description": "Pre-filtered cash flow statement items with display order.",
-        "columns": {
-            "cash_flow_id": {"type": "SERIAL PRIMARY KEY", "description": "Unique identifier"},
-            "filing_id": {"type": "INTEGER FK", "description": "References dim_filings"},
-            "concept_id": {"type": "INTEGER FK", "description": "References dim_concepts"},
-            "period_id": {"type": "INTEGER FK", "description": "References dim_time_periods"},
-            "value_numeric": {"type": "NUMERIC(20,2)", "description": "Numeric value"},
-            "unit_measure": {"type": "VARCHAR(20)", "description": "Unit of measure"},
-            "display_order": {"type": "INTEGER", "description": "Order in which item appears"},
-        },
-    }
-    
+    # (The pre-reconstructed per-statement fact tables were retired in the re-architecture;
+    # query statements from fact_financial_metrics / v_facts_consolidated with
+    # dim_concepts.statement_type instead.)
+
     # Dimension tables
     dim_companies = {
         "name": "dim_companies",
@@ -173,18 +131,21 @@ def get_schema_metadata() -> dict:
             "normalized_label": {"type": "VARCHAR(200)", "description": "Normalized label"},
             "fiscal_year": {"type": "INTEGER", "description": "Fiscal year"},
             "period_type": {"type": "VARCHAR(20)", "description": "Period type"},
-            "value_numeric": {"type": "DOUBLE PRECISION", "description": "Numeric value"},
+            "value_numeric": {"type": "DOUBLE PRECISION", "description": "Numeric value (native currency)"},
+            "value_usd": {"type": "NUMERIC", "description": "Value in USD — use for cross-company comparison across currencies"},
             "unit_measure": {"type": "VARCHAR(50)", "description": "Unit of measure"},
+            "consolidation_type": {"type": "TEXT", "description": "'true_consolidated' / 'synthetic_consolidated' / 'dimensional'"},
         },
     }
-    
-    # Normalized label mappings (for LLM to understand metric names)
+
+    # Canonical normalized labels (the cross-company metric names the warehouse actually uses).
+    # These are the values to filter normalized_label on for comparable cross-company queries.
     normalized_labels = {}
-    for normalized_label, concept_names in CONCEPT_MAPPINGS.items():
-        normalized_labels[normalized_label] = {
-            "description": f"Standardized label for {normalized_label}",
-            "concept_examples": concept_names[:3],  # First 3 examples
-            "usage": f"Use normalized_label = '{normalized_label}' to query this metric across all companies",
+    for label, concept_names in CANONICAL.items():
+        normalized_labels[label] = {
+            "description": f"Canonical cross-company label '{label}'",
+            "concept_examples": concept_names[:3],
+            "usage": f"Use normalized_label = '{label}' to query this metric across all companies",
         }
     
     # Sample queries
@@ -206,8 +167,12 @@ def get_schema_metadata() -> dict:
             "sql": "SELECT fiscal_year, value_numeric FROM v_facts_consolidated WHERE ticker = 'NVDA' AND normalized_label = 'revenue' AND period_type = 'duration' AND fiscal_year >= 2022 ORDER BY fiscal_year",
         },
         {
-            "question": "Which company has the highest revenue in 2024?",
-            "sql": "SELECT ticker, value_numeric FROM v_facts_consolidated WHERE normalized_label = 'revenue' AND fiscal_year = 2024 AND period_type = 'duration' ORDER BY value_numeric DESC LIMIT 1",
+            "question": "Which company has the highest revenue in 2025?",
+            "sql": "SELECT ticker, value_numeric FROM v_facts_consolidated WHERE normalized_label = 'revenue' AND fiscal_year = 2025 AND period_type = 'duration' ORDER BY value_numeric DESC LIMIT 1",
+        },
+        {
+            "question": "Compare Novo Nordisk and Apple revenue in USD (NVO reports in DKK)",
+            "sql": "SELECT ticker, value_usd FROM v_facts_consolidated WHERE ticker IN ('NVO','AAPL') AND normalized_label = 'revenue' AND fiscal_year = 2025 AND period_type = 'duration' ORDER BY value_usd DESC",
         },
     ]
     
@@ -235,9 +200,6 @@ def get_schema_metadata() -> dict:
     return {
         "tables": {
             "fact_financial_metrics": fact_financial_metrics,
-            "fact_income_statement": fact_income_statement,
-            "fact_balance_sheet": fact_balance_sheet,
-            "fact_cash_flow": fact_cash_flow,
             "dim_companies": dim_companies,
             "dim_concepts": dim_concepts,
             "dim_time_periods": dim_time_periods,

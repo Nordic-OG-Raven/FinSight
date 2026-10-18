@@ -72,11 +72,14 @@ marked below so this file reflects what is actually true today.
   end-to-end load all verified after removal.
 
 ### NP2SQL (PRD §15 — marked delivered)
-- ◐ **Natural-language-to-SQL — built, needs re-verification.** The `/natural_language_query`
-  endpoint and `src/np2sql/` exist and are wired. But its schema context still describes the
-  now-empty `fact_income_statement` / `fact_balance_sheet` / `fact_cash_flow` tables, and it
-  runs on `gpt-3.5-turbo`. Repoint the schema metadata at the live tables
-  (`fact_financial_metrics` + dims), update the model, and test end-to-end.
+- ✅ **Natural-language-to-SQL — re-verified on the new warehouse.** Schema context repointed
+  off the dropped statement sub-tables onto `fact_financial_metrics` + dims + the live views,
+  now advertising the canonical labels and `value_usd` (added to `v_facts_consolidated`);
+  `ALLOWED_TABLES` pruned to real objects; model bumped to `gpt-4o-mini` (override via
+  `NP2SQL_MODEL`). `tests/test_np2sql.py` verifies the schema context names only live objects,
+  every sample query executes read-only, a USD cross-currency comparison returns NVO + AAPL,
+  and the SQL safety layer holds. *The live LLM call still needs `OPENAI_API_KEY`; without it
+  the endpoint degrades gracefully to a clear error.*
 
 ---
 
