@@ -96,8 +96,13 @@ marked below so this file reflects what is actually true today.
 ---
 
 ## Phase 3 & beyond — visualization, analysis, serving, ML (PRD §10 / §15 Phase 3)
-- ☐ **Multi-year comparative analysis + common ratios** (P/E, ROE, debt-to-equity) and a
-  peer-comparison module.
+- ✅ **Common ratios + peer-comparison module.** `src/analysis/ratios.py` derives margins
+  (gross/operating/net), ROE/ROA, debt-to-equity, current ratio, asset turnover, effective tax
+  rate, free cash flow, and revenue growth from the canonical labels in USD, so companies
+  compare across currencies (NVO shows $48.6B, not 309B DKK). Served at `/api/ratios/<ticker>`
+  (multi-year) and `/api/peers` (latest-year, revenue-sorted); tested in `tests/test_ratios.py`.
+  *Valuation ratios (P/E, P/B) are deferred — they need market price / cap, which SEC filings
+  don't carry (a future market-data integration).*
 - ☐ **Standardized visualization / dashboard templates** (Superset) and automated insight
   generation (YoY growth, peer comparison).
 - ☐ **ML on the normalized facts** — anomaly/outlier detection, time-series forecasting

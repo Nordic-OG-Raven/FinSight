@@ -35,6 +35,10 @@ A REST API serves the result.
   converted to USD at each fact's period date using ECB reference rates, stored in `value_usd`
   alongside the untouched native `value_numeric`. Rates are cached in `database/fx_rates.json`
   (reproducible, offline after first fetch, no API key).
+- **Ratios & peer comparison.** Margins, ROE/ROA, leverage, current ratio, asset turnover,
+  effective tax rate, free cash flow, and revenue growth, derived from the canonical labels in
+  USD — so companies compare across currencies. Served per-company and as a revenue-sorted
+  peer table.
 - **Serve it** over a Flask REST API, warehouse-direct.
 
 ### Reference dataset (loaded & verified)
@@ -99,6 +103,8 @@ the latest annual filing.
 GET  /health
 GET  /api/companies                  # loaded companies
 GET  /api/financials/{ticker}        # multi-year statements + segment revenue, warehouse-direct
+GET  /api/ratios/{ticker}            # multi-year ratios (margins, ROE/ROA, leverage, FCF, growth), USD
+GET  /api/peers                      # latest-year cross-company comparison, revenue-sorted, USD
 ```
 
 `/api/financials/{ticker}` is the canonical, warehouse-direct endpoint (the dashboard consumes

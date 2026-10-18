@@ -1150,6 +1150,33 @@ def get_financials_v2(ticker):
         return jsonify({"error": "server_error", "message": str(e)}), 500
 
 
+@app.route('/api/ratios/<ticker>', methods=['GET'])
+def get_ratios(ticker):
+    """Multi-year financial ratios (margins, ROE/ROA, leverage, FCF, growth) for one company,
+    computed from the warehouse in USD. See src/analysis/ratios.py."""
+    try:
+        from src.analysis.ratios import company_ratios
+        years = int(request.args.get('years', 3))
+        data = company_ratios(DATABASE_URL, ticker, years=years)
+        if not data["years"]:
+            return jsonify({"error": "not_found", "message": f"No data for {ticker.upper()}"}), 404
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": "server_error", "message": str(e)}), 500
+
+
+@app.route('/api/peers', methods=['GET'])
+def get_peers():
+    """Latest-year peer comparison across all loaded companies: headline USD figures + key
+    ratios, revenue-sorted. Currency-normalized so foreign filers (e.g. NVO) line up."""
+    try:
+        from src.analysis.ratios import peer_comparison
+        return jsonify({"as_of": "latest_filed", "currency": "USD",
+                        "companies": peer_comparison(DATABASE_URL)})
+    except Exception as e:
+        return jsonify({"error": "server_error", "message": str(e)}), 500
+
+
 if __name__ == '__main__':
     port = int(os.getenv('PORT', 5001))
     app.run(host='0.0.0.0', port=port, debug=os.getenv('ENVIRONMENT') != 'production')
