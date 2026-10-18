@@ -1,0 +1,31 @@
+# Keep the Docker build context small and the image lean. The image only needs
+# api/, src/, database/*.py + fx_rates.json, and config.py (see Dockerfile).
+
+# Python envs / caches
+.venv/
+venv/
+**/__pycache__/
+*.pyc
+
+# Local data, DB dumps, and backups — never needed at runtime
+data/
+*.sql
+*.bak
+finsight_export.sql
+
+# Secrets / env (must never be in the image)
+.env
+.env.*
+
+# VCS, tooling, docs, tests, scratch
+.git/
+.github/
+.claude/
+skills-lock.json
+docs/
+tests/
+scratchpad/
+
+# The Next.js frontend is deployed separately, not in the API image
+Website/
+node_modules/
