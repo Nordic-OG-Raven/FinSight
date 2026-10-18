@@ -11,6 +11,8 @@ retired in the edgartools re-architecture — see docs/REARCHITECTURE.md.
 import os
 import sys
 import json
+import re
+import math
 from datetime import datetime
 from pathlib import Path
 from flask import Flask, jsonify, request
@@ -925,18 +927,121 @@ def get_data():
             "error": str(e)
         }), 500
 
+_STATEMENTS_CACHE = {}
+_LIAB_EQUITY_HEADER = re.compile(
+    r"(LiabilitiesAndStockholdersEquityAbstract|LiabilitiesAndEquityAbstract|EquityAndLiabilitiesAbstract|EquityAndLiabilities$)")
+
+
+def _stmt_num(v):
+    try:
+        f = float(v)
+        return None if math.isnan(f) else f
+    except (TypeError, ValueError):
+        return None
+
+
+def _stmt_unit(concept, label, currency):
+    c, l = (concept or "").lower(), (label or "").lower()
+    if "pershare" in c or "per share" in l:
+        return f"{currency}/share"
+    if "sharesoutstanding" in c or "in shares" in l or c.endswith("shares"):
+        return "shares"
+    return currency
+
+
+def _stmt_items(df, period_type, currency, balance=False):
+    """Turn an edgartools statement dataframe into the flat StatementItem[] the UI expects:
+    ordered, labelled, level-nested (parent via the level stack), balance-sheet side-split."""
+    df = df[df["dimension"] == False]  # non-dimensional statement lines only  # noqa: E712
+    year_cols = [c for c in df.columns if re.match(r"\d{4}-\d{2}-\d{2}", str(c))]
+    col_year = {c: int(str(c)[:4]) for c in year_cols}
+    items, stack, side = [], [], ("assets" if balance else None)
+    for order, (_, r) in enumerate(df.iterrows()):
+        concept = str(r["concept"])
+        label = r["label"] if isinstance(r["label"], str) else concept
+        lvl = r["level"]
+        level = 0 if (isinstance(lvl, float) and math.isnan(lvl)) else int(lvl)
+        abstract = bool(r["abstract"])
+        if balance and _LIAB_EQUITY_HEADER.search(concept):
+            side = "liabilities_equity"
+        while stack and stack[-1][0] >= level:
+            stack.pop()
+        parent = stack[-1][1] if stack else None
+        stack.append((level, concept))
+        unit = _stmt_unit(concept, label, currency)
+        for c in year_cols:
+            items.append({
+                "normalized_label": concept, "concept_name": concept, "preferred_label": label,
+                "value": None if abstract else _stmt_num(r[c]), "unit": unit,
+                "period_date": str(c), "period_year": col_year[c], "period_type": period_type,
+                "hierarchy_level": level, "parent_normalized_label": parent,
+                "presentation_order_index": order, "presentation_source": "xbrl",
+                "is_header": abstract, "side": side,
+            })
+    return items, sorted(col_year.values(), reverse=True), (max(year_cols) if year_cols else None)
+
+
+def _build_statements(ticker):
+    import edgar
+    from src.extraction.edgartools_adapter import EdgarToolsExtractor  # noqa: F401 (sets identity)
+    EdgarToolsExtractor()  # edgar.set_identity(...)
+    company = edgar.Company(ticker)
+    filing = next((company.latest(f) for f in ("10-K", "20-F", "40-F") if company.latest(f)), None)
+    if filing is None:
+        return None
+    xb = filing.xbrl()
+    # reporting currency = modal 3-letter currency across the filing's facts
+    currency = "USD"
+    try:
+        fdf = xb.facts.to_dataframe()
+        cur = [v for v in fdf.get("currency", []) if isinstance(v, str) and len(v) == 3 and v.isupper()]
+        if cur:
+            currency = max(set(cur), key=cur.count)
+    except Exception:
+        pass
+    specs = [("income_statement", "income_statement", "duration", False),
+             ("comprehensive_income", "comprehensive_income", "duration", False),
+             ("balance_sheet", "balance_sheet", "instant", True),
+             ("cash_flow", "cash_flow_statement", "duration", False)]
+    statements, years, fye = {}, [], None
+    for key, method, ptype, bal in specs:
+        try:
+            df = getattr(xb.statements, method)().to_dataframe()
+            items, yrs, last = _stmt_items(df, ptype, currency, bal)
+            if items:
+                statements[key] = items
+                years = yrs or years
+                if bal and last:
+                    fye = last  # balance-sheet date = fiscal year end
+        except Exception:
+            continue
+    std = "IFRS" if any("ifrs" in i["concept_name"].lower()
+                        for v in statements.values() for i in v) else "US-GAAP"
+    return {
+        "company": getattr(company, "name", ticker), "ticker": ticker,
+        "year": years[0] if years else None, "years": years,
+        "accounting_standard": std, "fiscal_year_end": fye,
+        "statements": statements, "count": sum(len(v) for v in statements.values()),
+        "source": "edgartools",
+    }
+
+
 @app.route('/api/statements/<ticker>/<int:year>', methods=['GET'])
 def get_financial_statements(ticker, year):
-    """DEPRECATED in favour of GET /api/financials/<ticker>, which serves multi-year income /
-    balance / cash-flow statements directly from the star schema. The presentation-linkbase
-    reconstruction this relied on (fact_income_statement / fact_balance_sheet / fact_cash_flow)
-    was retired in the re-architecture — see docs/REARCHITECTURE.md."""
-    return jsonify({
-        "error": "gone",
-        "message": f"/api/statements is retired. Use GET /api/financials/{ticker.upper()} for "
-                   "warehouse-served statements.",
-        "replacement": f"/api/financials/{ticker.upper()}",
-    }), 410
+    """Full income / comprehensive-income / balance-sheet / cash-flow statements for the UI,
+    rendered from edgartools' presentation structure (ordered, labelled, level-nested, with the
+    balance sheet split into assets vs liabilities & equity). Cached per ticker. `year` is
+    accepted for the legacy route but the latest annual filing is used."""
+    ticker = ticker.upper()
+    try:
+        if ticker not in _STATEMENTS_CACHE:
+            built = _build_statements(ticker)
+            if built is None:
+                return jsonify({"error": "not_found", "message": f"No annual report for {ticker}"}), 404
+            _STATEMENTS_CACHE[ticker] = built
+        return jsonify(_STATEMENTS_CACHE[ticker])
+    except Exception as e:
+        return jsonify({"error": "server_error", "message": str(e)}), 500
 
 
 @app.route('/api/admin/migrate-schema', methods=['POST'])
