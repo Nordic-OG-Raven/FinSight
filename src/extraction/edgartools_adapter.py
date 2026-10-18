@@ -34,6 +34,7 @@ class Fact:
     statement_type: Optional[str]     # income_statement | balance_sheet | cash_flow | ...
     dimensions: Optional[dict]        # {axis: member} — None when undimensioned
     is_dimensioned: bool
+    standard_label: Optional[str] = None  # edgartools cross-company/standard concept, e.g. "Revenue"
 
 
 @dataclass
@@ -99,6 +100,28 @@ def _statement_type(raw) -> Optional[str]:
     return "other"
 
 
+def _standard_concept_map(xb) -> dict:
+    """Build {raw concept -> edgartools standard concept} from the filing's rendered statements.
+
+    edgartools maps company-specific us-gaap/ifrs concepts onto a common standardized vocabulary
+    (e.g. us-gaap:AccountsReceivableNetCurrent -> TradeReceivables, ifrs-full:Goodwill -> Goodwill)
+    — this is what lets different filers' (and different accounting standards') statements line up
+    for cross-company comparison. Covers ~50-70% of statement lines; niche / company-specific /
+    disclosure concepts have no standard mapping and keep their own label.
+    """
+    out = {}
+    for method in ("income_statement", "balance_sheet", "cash_flow_statement", "comprehensive_income"):
+        try:
+            df = getattr(xb.statements, method)().to_dataframe()
+        except Exception:
+            continue
+        for con, std in zip(df.get("concept", []), df.get("standard_concept", [])):
+            if isinstance(con, str) and isinstance(std, str) and std:
+                # statement df uses "us-gaap_X"/"ifrs-full_X"; facts use "us-gaap:X"/"ifrs-full:X"
+                out[con.replace("_", ":", 1)] = std
+    return out
+
+
 class EdgarToolsExtractor:
     """Extract one filing's facts (with dimensions) into an ExtractionResult."""
 
@@ -120,6 +143,7 @@ class EdgarToolsExtractor:
             raise ValueError(f"No annual report ({'/'.join(forms)}) found for {ticker}")
         xb = filing.xbrl()
         df = xb.facts.to_dataframe()
+        std_map = _standard_concept_map(xb)  # {raw concept -> edgartools standard concept}
 
         dim_cols = [c for c in df.columns if c.startswith(_DIM_PREFIX)]
 
@@ -154,6 +178,7 @@ class EdgarToolsExtractor:
                 statement_type=_statement_type(row.get("statement_type")),
                 dimensions=dims or None,
                 is_dimensioned=bool(row.get("is_dimensioned")),
+                standard_label=std_map.get(row.get("concept")),
             ))
 
         meta = CompanyMeta(

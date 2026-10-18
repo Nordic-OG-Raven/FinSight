@@ -19,6 +19,8 @@ SELECT
     co.taxonomy,
     co.concept_id,
     f.normalized_label,
+    co.standard_label,
+    co.statement_type,
     f.fiscal_year,
     f.period_type,
     f.value_numeric,

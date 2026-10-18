@@ -694,7 +694,7 @@ def get_available_metrics():
             
             if use_view:
                 query_str = """
-                    SELECT DISTINCT f.normalized_label
+                    SELECT DISTINCT COALESCE(f.standard_label, f.normalized_label) AS normalized_label
                     FROM v_facts_hierarchical f
                     WHERE 1=1
                 """
@@ -702,7 +702,7 @@ def get_available_metrics():
                 year_col = "f.fiscal_year"
             else:
                 query_str = """
-                    SELECT DISTINCT co.normalized_label
+                    SELECT DISTINCT COALESCE(co.standard_label, co.normalized_label) AS normalized_label
                     FROM fact_financial_metrics f
                     JOIN dim_companies c ON f.company_id = c.company_id
                     JOIN dim_concepts co ON f.concept_id = co.concept_id
@@ -806,11 +806,13 @@ def get_data():
                 
                 if use_view:
                     # Hierarchical view (deduplicated)
+                    # normalized_label = edgartools standard concept where available (so different
+                    # filers' equivalent line items land on one comparable row), else the raw label.
                     query_str = """
-                        SELECT 
+                        SELECT
                             f.ticker as company,
                             f.concept_name as concept,
-                            f.normalized_label,
+                            COALESCE(f.standard_label, f.normalized_label) as normalized_label,
                             f.fiscal_year,
                             f.value_numeric,
                             f.value_text,
@@ -820,7 +822,8 @@ def get_data():
                             d.member_name,
                             CASE WHEN f.dimension_id IS NULL THEN 'Total' ELSE 'Segment' END as data_type,
                             t.period_label,
-                            COALESCE(t.end_date, t.instant_date) as period_end
+                            COALESCE(t.end_date, t.instant_date) as period_end,
+                            f.statement_type
                         FROM v_facts_hierarchical f
                         LEFT JOIN dim_xbrl_dimensions d ON f.dimension_id = d.dimension_id
                         LEFT JOIN dim_time_periods t ON f.period_id = t.period_id
@@ -828,7 +831,7 @@ def get_data():
                     """
                     company_col = "f.ticker"
                     fiscal_year_col = "f.fiscal_year"
-                    normalized_label_col = "f.normalized_label"
+                    normalized_label_col = "COALESCE(f.standard_label, f.normalized_label)"
                 else:
                     # Fallback to raw table with hierarchy_level from dim_concepts
                     query_str = """
@@ -877,14 +880,11 @@ def get_data():
                 query_str += f" AND {normalized_label_col} = ANY(:concepts)"
                 params['concepts'] = concepts
             
-            # Hierarchy level filter (only for hierarchical view)
-            # Only apply if hierarchy_level column exists and has values
-            if not show_all_concepts:
-                if use_view:
-                    query_str += " AND (f.hierarchy_level IS NULL OR f.hierarchy_level >= :min_hierarchy_level)"
-                else:
-                    query_str += " AND (co.hierarchy_level IS NULL OR co.hierarchy_level >= :min_hierarchy_level)"
-                params['min_hierarchy_level'] = min_hierarchy_level
+            # Granularity: "universal" (>=3) restricts to concepts edgartools standardizes, i.e.
+            # the rows that are actually comparable across companies (few/no blanks). Lower levels
+            # ("all line items") return everything, including the un-standardized long tail.
+            if not show_all_concepts and min_hierarchy_level >= 3:
+                query_str += " AND f.standard_label IS NOT NULL" if use_view else " AND co.standard_label IS NOT NULL"
             
             # Segment filter
             if not show_segments:
@@ -913,6 +913,7 @@ def get_data():
                     "data_type": row[10] if len(row) > 10 else None,
                     "period_label": row[11] if len(row) > 11 else None,
                     "period_end": row[12].isoformat() if len(row) > 12 and row[12] else None,
+                    "statement_type": row[13] if len(row) > 13 else None,
                 })
             
             return jsonify({

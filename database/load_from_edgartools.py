@@ -91,7 +91,7 @@ class StarSchemaLoader:
 
     # ---- bulk concept resolution -------------------------------------------
     def _ensure_concepts(self, specs: dict[tuple, tuple]):
-        """specs: {(tax, local): (normalized_label, preferred_label)}"""
+        """specs: {(tax, local): (normalized_label, preferred_label, statement_type, standard_label)}"""
         need = [k for k in specs if k not in self._concept_cache]
         if need:
             self.cur.execute(
@@ -106,22 +106,23 @@ class StarSchemaLoader:
             # labels after the canonical-label change.
             existing = [k for k in need if k in self._concept_cache]
             if existing:
-                upd = [(specs[k][0], specs[k][2], self._concept_cache[k]) for k in existing]
+                upd = [(specs[k][0], specs[k][2], specs[k][3], self._concept_cache[k]) for k in existing]
                 execute_values(
                     self.cur,
                     "UPDATE dim_concepts AS d SET normalized_label = v.nl, "
-                    "statement_type = COALESCE(v.st, d.statement_type) "
-                    "FROM (VALUES %s) AS v(nl, st, cid) WHERE d.concept_id = v.cid::int",
+                    "statement_type = COALESCE(v.st, d.statement_type), "
+                    "standard_label = COALESCE(v.std, d.standard_label) "
+                    "FROM (VALUES %s) AS v(nl, st, std, cid) WHERE d.concept_id = v.cid::int",
                     upd,
                 )
             missing = [k for k in need if k not in self._concept_cache]
             if missing:
-                rows = [(local, tax, specs[(tax, local)][0], specs[(tax, local)][1], specs[(tax, local)][2])
-                        for (tax, local) in missing]
+                rows = [(local, tax, specs[(tax, local)][0], specs[(tax, local)][1],
+                         specs[(tax, local)][2], specs[(tax, local)][3]) for (tax, local) in missing]
                 for name, tax, cid in execute_values(
                     self.cur,
-                    "INSERT INTO dim_concepts (concept_name, taxonomy, normalized_label, preferred_label, statement_type) "
-                    "VALUES %s RETURNING concept_name, taxonomy, concept_id",
+                    "INSERT INTO dim_concepts (concept_name, taxonomy, normalized_label, preferred_label, "
+                    "statement_type, standard_label) VALUES %s RETURNING concept_name, taxonomy, concept_id",
                     rows, fetch=True,
                 ):
                     self._concept_cache[(tax, name)] = cid
@@ -248,7 +249,9 @@ class StarSchemaLoader:
             prev_st = prev[2] if prev else None
             # keep the first meaningful statement_type seen for a concept
             best_st = prev_st if (prev_st and prev_st != "other") else f.statement_type
-            concept_specs[(tax, local)] = (concept_label, f.label or local, best_st)
+            # keep the first non-null standard label seen for a concept
+            best_std = (prev[3] if prev and prev[3] else None) or f.standard_label
+            concept_specs[(tax, local)] = (concept_label, f.label or local, best_st, best_std)
             dh = None
             if f.dimensions:
                 dh, js = _dim_hash(f.dimensions)
