@@ -12,7 +12,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.extraction.edgartools_adapter import Fact  # noqa: E402
-from src.validation.quality import _detect_anomalies, _detect_conflicts  # noqa: E402
+from src.validation.quality import (  # noqa: E402
+    _check_cashflow_reconciliation, _detect_anomalies, _detect_conflicts,
+)
 
 
 def _dur(concept, value, year):
@@ -60,6 +62,33 @@ def test_anomaly_gross_profit_exceeds_revenue():
 def test_anomaly_yoy_scale_jump():
     facts = [_dur("us-gaap:Revenues", 100, 2024), _dur("us-gaap:Revenues", 100_000, 2025)]
     assert any("scale error" in a for a in _detect_anomalies(facts))
+
+
+def _cf(concept, value):
+    return _dur(concept, value, 2025)
+
+
+def test_cashflow_reconciliation_passes_when_statement_foots():
+    # 100 (op) - 60 (inv) - 30 (fin) + 2 (fx) = 12 net change
+    facts = [_cf("us-gaap:NetCashProvidedByUsedInOperatingActivities", 100),
+             _cf("us-gaap:NetCashProvidedByUsedInInvestingActivities", -60),
+             _cf("us-gaap:NetCashProvidedByUsedInFinancingActivities", -30),
+             _cf("us-gaap:EffectOfExchangeRateOnCashAndCashEquivalents", 2),
+             _cf("us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsPeriodIncreaseDecreaseIncludingExchangeRateEffect", 12)]
+    assert _check_cashflow_reconciliation(facts).status == "pass"
+
+
+def test_cashflow_reconciliation_fails_when_it_doesnt_foot():
+    facts = [_cf("us-gaap:NetCashProvidedByUsedInOperatingActivities", 100),
+             _cf("us-gaap:NetCashProvidedByUsedInInvestingActivities", -60),
+             _cf("us-gaap:NetCashProvidedByUsedInFinancingActivities", -30),
+             _cf("us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsPeriodIncreaseDecreaseIncludingExchangeRateEffect", 999)]
+    assert _check_cashflow_reconciliation(facts).status == "fail"
+
+
+def test_cashflow_reconciliation_skips_when_incomplete():
+    facts = [_cf("us-gaap:NetCashProvidedByUsedInOperatingActivities", 100)]
+    assert _check_cashflow_reconciliation(facts).status == "skip"
 
 
 def test_clean_facts_produce_no_findings():

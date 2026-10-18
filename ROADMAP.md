@@ -38,12 +38,13 @@ marked below so this file reflects what is actually true today.
   (`--ticker`) and `run_pipeline.sh` extract → validate → load via the edgartools loader; the
   old Arelle `run_pipeline()` was replaced (signature kept, so the Flask API still works) and
   `run_pipeline.sh` ends with an `/api/financials` smoke test instead of the legacy UI test.
-- ◐ **Validation that audits, not just gates (PRD §2.4).** Hard gates (balance identity,
-  unit/scale) plus soft reconciliation (income math, EPS), **duplicate/conflict detection**
-  (synonym concepts disagreeing on a line) and **sign/ratio/scale anomaly flagging** all ship
-  in `src/validation/quality.py` (tested in `tests/test_quality_checks.py`; the 8-filer set
-  produces zero false positives). *Still to add: cross-statement reconciliation against the
-  statement as the filer reports it (e.g. net income tying into the cash-flow statement).*
+- ✅ **Validation that audits, not just gates (PRD §2.4).** `src/validation/quality.py` ships
+  hard gates (balance identity, unit/scale), soft reconciliation (income math, EPS),
+  **cross-statement cash-flow reconciliation** (operating + investing + financing (± FX effect)
+  = reported net change in cash — ties to the penny for all 8 filers, incl. JPM's FX term and
+  NVO's before-FX IFRS convention), **duplicate/conflict detection**, and **sign/ratio/scale
+  anomaly flagging**. Tested in `tests/test_quality_checks.py`; the 8-filer set produces zero
+  false positives.
 - ✅ **Streamlit viewer + exports verified against the new warehouse (PRD §2.8).** Loader now
   populates `axis_name`/`member_name` on `dim_xbrl_dimensions`; the viewer's missing
   `v_facts_hierarchical` convenience view was created

@@ -114,10 +114,11 @@ re-architecture removed.
   "Total liabilities & equity" appears under several labels). A tested canonical mapping is the
   top roadmap item — until then, per-company figures are reliable but cross-company
   line-by-line comparison needs care.
-- **Validation is integrity-gated, not fully audited.** The balance-sheet identity and
-  unit/scale checks hard-fail; income-math and EPS are warnings. Explicit duplicate detection,
-  cross-statement reconciliation, and outlier/anomaly flagging are on the roadmap. "Validated"
-  means integrity-gated + quality-scored, not audited.
+- **Validation = hard gates + warnings, not a signed audit.** The balance-sheet identity and
+  unit/scale checks hard-fail; income math, EPS, cross-statement cash-flow reconciliation
+  (op + inv + fin ± FX = net change in cash), duplicate/conflict detection, and
+  sign/ratio/scale anomaly flagging all run as warnings feeding a per-filing quality score.
+  Comprehensive for the primary statements, but not a line-by-line audit of every disclosure.
 - **FX rates are fiscal-period-dated spot rates**, not the period-average rates a filer uses
   for its own income-statement translation — so `value_usd` is a consistent cross-company
   approximation, not a restatement of the filing. Native `value_numeric` is always preserved.

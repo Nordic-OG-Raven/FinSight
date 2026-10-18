@@ -38,7 +38,27 @@ EQUITY = {"us-gaap:StockholdersEquity",
           "us-gaap:StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
           "ifrs-full:Equity"}
 OPERATING_CF = {"us-gaap:NetCashProvidedByUsedInOperatingActivities",
+                "us-gaap:NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
                 "ifrs-full:CashFlowsFromUsedInOperatingActivities"}
+INVESTING_CF = {"us-gaap:NetCashProvidedByUsedInInvestingActivities",
+                "us-gaap:NetCashProvidedByUsedInInvestingActivitiesContinuingOperations",
+                "ifrs-full:CashFlowsFromUsedInInvestingActivities"}
+FINANCING_CF = {"us-gaap:NetCashProvidedByUsedInFinancingActivities",
+                "us-gaap:NetCashProvidedByUsedInFinancingActivitiesContinuingOperations",
+                "ifrs-full:CashFlowsFromUsedInFinancingActivities"}
+NET_CHANGE_IN_CASH = {
+    "us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsPeriodIncreaseDecreaseIncludingExchangeRateEffect",
+    "us-gaap:CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsPeriodIncreaseDecreaseExcludingExchangeRateEffect",
+    "us-gaap:CashAndCashEquivalentsPeriodIncreaseDecrease",
+    "us-gaap:CashAndCashEquivalentsPeriodIncreaseDecreaseExcludingExchangeRateEffect",
+    "ifrs-full:IncreaseDecreaseInCashAndCashEquivalents",
+    "ifrs-full:IncreaseDecreaseInCashAndCashEquivalentsBeforeEffectOfExchangeRateChanges"}
+FX_ON_CASH = {
+    "us-gaap:EffectOfExchangeRateOnCashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+    "us-gaap:EffectOfExchangeRateOnCashCashEquivalentsRestrictedCashAndRestrictedCashEquivalentsIncludingDisposalGroupAndDiscontinuedOperations",
+    "us-gaap:EffectOfExchangeRateOnCashAndCashEquivalents",
+    "us-gaap:EffectOfExchangeRateOnCashAndCashEquivalentsContinuingOperations",
+    "ifrs-full:EffectOfExchangeRateChangesOnCashAndCashEquivalents"}
 GROSS_PROFIT = {"us-gaap:GrossProfit"}
 COST_OF_REVENUE = {"us-gaap:CostOfRevenue", "us-gaap:CostOfGoodsAndServicesSold",
                    "us-gaap:CostOfGoodsSold", "ifrs-full:CostOfSales"}
@@ -202,6 +222,34 @@ def _check_eps(facts) -> Check:
                  expected=expected, actual=eps.value_numeric, rel_error=err)
 
 
+def _check_cashflow_reconciliation(facts) -> Check:
+    """SOFT, cross-statement (PRD §2.4): the cash-flow statement must foot — operating +
+    investing + financing (+ FX effect) = the reported net change in cash. Passes if it
+    reconciles with OR without the FX term, which absorbs the include/exclude-exchange-rate
+    convention differences across filers without false-positiving. Skipped when the filer
+    doesn't tag all three activity totals plus a net-change line (e.g. some abbreviated
+    cash-flow presentations)."""
+    ocf = _latest_annual(facts, OPERATING_CF)
+    icf = _latest_annual(facts, INVESTING_CF)
+    fcf = _latest_annual(facts, FINANCING_CF)
+    net = _latest_annual(facts, NET_CHANGE_IN_CASH)
+    if not (ocf and icf and fcf and net):
+        return Check("cashflow_reconciliation", "skip",
+                     "operating/investing/financing/net-change not all tagged")
+    base = ocf.value_numeric + icf.value_numeric + fcf.value_numeric
+    fx = _latest_annual(facts, FX_ON_CASH)
+    fx_v = fx.value_numeric if fx else 0.0
+    without_fx, with_fx = _rel_error(base, net.value_numeric), _rel_error(base + fx_v, net.value_numeric)
+    # the filer's net-change line may be stated before or after FX effects — accept whichever ties
+    use_fx = with_fx < without_fx
+    err = min(without_fx, with_fx)
+    matched, label = (base + fx_v, "OCF+ICF+FCF+FX") if use_fx else (base, "OCF+ICF+FCF")
+    status = "pass" if err <= 0.01 else "fail"
+    return Check("cashflow_reconciliation", status,
+                 f"{label}={matched:,.0f} vs net change in cash={net.value_numeric:,.0f}",
+                 expected=net.value_numeric, actual=matched, rel_error=err)
+
+
 # ---- duplicate / conflict + anomaly detection (soft, PRD §2.4) --------------
 def _by_year(facts, concepts, instant: bool) -> dict:
     """{year: value} for a concept set — instant facts by their year, or ~annual durations by
@@ -308,6 +356,7 @@ def validate(result) -> QualityReport:
     rep.soft_checks = [
         _check_income_math(facts),
         _check_eps(facts),
+        _check_cashflow_reconciliation(facts),
         Check("value_conflicts", "fail" if conflicts else "pass",
               "; ".join(conflicts) or "no conflicting synonym values"),
         Check("anomalies", "fail" if anomalies else "pass",
