@@ -1,4 +1,4 @@
-# Dockerfile for Railway deployment
+# Dockerfile for the FinSight Flask API (Fly.io / any container host)
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -21,7 +21,6 @@ COPY api/ ./api/
 COPY src/ ./src/
 COPY database/ ./database/
 COPY config.py .
-COPY load_missing_to_railway.py .
 
 # Create data directory
 RUN mkdir -p api/data

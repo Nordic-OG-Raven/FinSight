@@ -21,6 +21,24 @@ each layer just points at the same Neon connection string.
 | NL→SQL | **Groq** | Already wired — set `GROQ_API_KEY` in the API's env. |
 | Ingestion | **Modal** | Weekly SEC pull — see below. Chosen over GitHub Actions to avoid competing for Actions minutes. |
 
+## API on Fly.io
+
+The repo ships a `Dockerfile` (gunicorn + the Flask app) and `fly.toml` (Frankfurt region,
+nearest to Neon's eu-central-1; scales to zero when idle). Deploy:
+
+```bash
+fly launch --no-deploy                 # first time — creates the app, keeps the existing fly.toml
+fly secrets set \
+  DATABASE_URL="<neon POOLED url>" \
+  GROQ_API_KEY="<groq key>"            # secrets — never in fly.toml or git
+fly deploy
+fly open                               # or: curl https://<app>.fly.dev/health
+```
+
+The image installs `api/requirements.txt` and runs `gunicorn api.main:app` on `$PORT`. The DB
+and LLM key come from Fly secrets (the app reads `DATABASE_URL` / `GROQ_API_KEY` from the env),
+so no `.env` is baked into the image.
+
 ## Scheduled ingestion — Modal
 
 `modal_ingest.py` runs the idempotent edgartools loader on a weekly cron (Mondays 06:00 UTC)
