@@ -9,7 +9,8 @@
 -- hierarchy of the retired Arelle pipeline is no longer computed (see docs/REARCHITECTURE.md),
 -- but the columns are kept so consumers that reference them keep working.
 
-CREATE OR REPLACE VIEW v_facts_hierarchical AS
+DROP VIEW IF EXISTS v_facts_hierarchical;
+CREATE VIEW v_facts_hierarchical AS
 SELECT
     f.fact_id,
     c.ticker,
@@ -21,6 +22,7 @@ SELECT
     f.fiscal_year,
     f.period_type,
     f.value_numeric,
+    f.value_usd,
     f.value_text,
     f.unit_measure,
     NULL::integer AS hierarchy_level,

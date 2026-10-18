@@ -51,8 +51,13 @@ marked below so this file reflects what is actually true today.
   consolidated, dimensional, view-backed) run and CSV/JSON export works. `src/storage/
   export_queries.py` was rewritten off the dead flat table onto the star schema (canonical
   labels) and all seven queries verified.
-- ☐ **Currency normalization to a common reporting currency (PRD §2.3).** Currency is detected
-  (USD/DKK/EUR); conversion to a common currency needs an FX source.
+- ✅ **Currency normalization to USD (PRD §2.3).** `database/fx_rates.py` converts
+  foreign-currency facts at each fact's period date via ECB reference rates (cached in
+  `database/fx_rates.json` — reproducible, offline after first fetch, no key); the loader stores
+  `value_usd` beside the untouched native `value_numeric`, exposed via `v_facts_hierarchical`
+  and `/api/financials` (`values_usd`). NVO FY2025 revenue 309.1B DKK → $48.6B; USD filers pass
+  through unchanged. *Spot rates at period-end, not filer period-average — a consistent
+  cross-company approximation, not a restatement.*
 - ✅ **Killed the `staging_facts` ELT layer + statement-template/reconstruction machinery
   (PRD §2.5).** Dropped the eight empty tables (`staging_facts`, `dim_statement_templates`,
   `rel_statement_overrides`, `fact_income_statement` / `_balance_sheet` / `_cash_flow` /

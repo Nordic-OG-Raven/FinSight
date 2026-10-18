@@ -1097,7 +1097,7 @@ def get_financials_v2(ticker):
             rows = conn.execute(text("""
                 SELECT dc.statement_type, dc.normalized_label,
                        COALESCE(dc.preferred_label, dc.concept_name) AS label,
-                       f.fiscal_year, f.value_numeric, f.unit_measure
+                       f.fiscal_year, f.value_numeric, f.unit_measure, f.value_usd
                 FROM fact_financial_metrics f
                 JOIN dim_companies c ON c.company_id=f.company_id
                 JOIN dim_concepts dc ON dc.concept_id=f.concept_id
@@ -1110,12 +1110,15 @@ def get_financials_v2(ticker):
             all_years = sorted({r[3] for r in rows if r[3]}, reverse=True)[:years_n]
             yset, cur = set(all_years), None
             stmts = {"income_statement": {}, "balance_sheet": {}, "cash_flow": {}}
-            for st, nl, label, fy, val, unit in rows:
+            for st, nl, label, fy, val, unit, val_usd in rows:
                 if fy not in yset:
                     continue
                 if cur is None and unit and len(unit) == 3 and unit.isupper():
                     cur = unit  # a real currency code (USD/DKK/…), not 'shares'/'pure'
-                stmts[st].setdefault(nl, {"label": label, "values": {}})["values"][fy] = float(val)
+                line = stmts[st].setdefault(nl, {"label": label, "values": {}, "values_usd": {}})
+                line["values"][fy] = float(val)
+                if val_usd is not None:
+                    line["values_usd"][fy] = float(val_usd)
             statements = {st: sorted(items.values(), key=lambda x: x["label"]) for st, items in stmts.items()}
 
             seg_rows = conn.execute(text("""

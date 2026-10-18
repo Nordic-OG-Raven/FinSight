@@ -20,6 +20,7 @@ import hashlib
 import json
 import re
 import sys
+from datetime import date
 from pathlib import Path
 
 import psycopg2
@@ -30,6 +31,9 @@ from config import DATABASE_URL  # noqa: E402
 from src.extraction.edgartools_adapter import EdgarToolsExtractor, ExtractionResult  # noqa: E402
 from src.extraction.canonical_labels import canonical, canonical_label  # noqa: E402
 from src.validation.quality import QualityReport, validate, write_report  # noqa: E402
+from database.fx_rates import _load_cache, _save_cache, rate_to_usd  # noqa: E402
+
+_CCY_RE = re.compile(r"^[A-Z]{3}$")
 
 try:
     from src.utils.taxonomy_mappings import get_normalized_label
@@ -64,6 +68,26 @@ class StarSchemaLoader:
         self._concept_cache: dict[tuple, int] = {}   # (taxonomy, localname) -> id
         self._period_cache: dict[tuple, int] = {}
         self._dim_cache: dict[str, int] = {}          # hash -> id
+        self._fx_cache: dict = _load_cache()          # {currency: {iso_date: rate_to_usd}}
+        self._fx_failures: set = set()                # (currency, date) that couldn't resolve
+
+    def _value_usd(self, f):
+        """Native value expressed in USD. USD / non-currency facts pass through unchanged;
+        foreign-currency facts are converted at the fact's period date via ECB rates. None when
+        the value is non-numeric or no rate could be resolved (recorded in _fx_failures)."""
+        if f.value_numeric is None:
+            return None
+        unit = f.unit
+        if not (unit and _CCY_RE.match(str(unit))) or unit == "USD":
+            return f.value_numeric                     # USD or non-currency (shares/ratios)
+        d = f.period_end or f.instant_date
+        if d is None:
+            return None
+        try:
+            return f.value_numeric * rate_to_usd(unit, d, _cache=self._fx_cache)
+        except Exception:
+            self._fx_failures.add((unit, d.isoformat()))
+            return None
 
     # ---- bulk concept resolution -------------------------------------------
     def _ensure_concepts(self, specs: dict[tuple, tuple]):
@@ -267,7 +291,8 @@ class StarSchemaLoader:
                 continue
             seen.add(dedup)
             rows.append((cid, concept_id, period_id, fid, dim_id, nl, fy, f.period_type,
-                         f.value_numeric, f.value_text, f.unit, (not f.is_dimensioned), "edgartools"))
+                         f.value_numeric, self._value_usd(f), f.value_text, f.unit,
+                         (not f.is_dimensioned), "edgartools"))
 
         # ON CONFLICT DO NOTHING: the schema's uniqueness is on
         # (filing_id, normalized_label, fiscal_year, period_type, dimension_id), so when two
@@ -279,11 +304,12 @@ class StarSchemaLoader:
             self.cur,
             "INSERT INTO fact_financial_metrics "
             "(company_id, concept_id, period_id, filing_id, dimension_id, normalized_label, fiscal_year, "
-            " period_type, value_numeric, value_text, unit_measure, is_primary, source) VALUES %s "
+            " period_type, value_numeric, value_usd, value_text, unit_measure, is_primary, source) VALUES %s "
             "ON CONFLICT DO NOTHING",
             rows, page_size=1000,
         )
         self.conn.commit()
+        _save_cache(self._fx_cache)  # persist any newly-fetched ECB rates for reproducibility
         return len(rows), report
 
     def close(self):

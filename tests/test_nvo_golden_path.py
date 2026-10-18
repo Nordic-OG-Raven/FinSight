@@ -25,6 +25,13 @@ from src.validation.completeness import CompletenessTracker
 from src.utils.population_order import get_population_order_for_table
 from config import DATA_RAW, DATABASE_URI
 
+# Retired: this suite pins behavior of the custom Arelle parse + statement-reconstruction
+# machinery, which the edgartools re-architecture replaced (docs/REARCHITECTURE.md) and whose
+# statement sub-tables were dropped. Correctness is now covered by test_canonical_labels /
+# test_quality_checks / test_fx_rates and the /api/financials endpoint. This file is removed
+# together with the Arelle-path modules in their dedicated cleanup sweep.
+pytestmark = pytest.mark.skip(reason="retired Arelle/statement-reconstruction path — see docs/REARCHITECTURE.md")
+
 
 @pytest.fixture(scope="module")
 def nvo_2024_parse_result():

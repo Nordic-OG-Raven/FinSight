@@ -31,6 +31,10 @@ A REST API serves the result.
   unit/scale sanity are **hard gates** that block a bad load; income-statement math and diluted
   EPS are **warnings**. Each filing gets a **data-quality report** (completeness / accuracy /
   consistency / provenance → weighted score) in `data/quality_reports/`.
+- **Normalize currency to USD.** Foreign-currency facts (e.g. Novo Nordisk in DKK) are
+  converted to USD at each fact's period date using ECB reference rates, stored in `value_usd`
+  alongside the untouched native `value_numeric`. Rates are cached in `database/fx_rates.json`
+  (reproducible, offline after first fetch, no API key).
 - **Serve it** over a Flask REST API, warehouse-direct.
 
 ### Reference dataset (loaded & verified)
@@ -114,8 +118,9 @@ re-architecture removed.
   unit/scale checks hard-fail; income-math and EPS are warnings. Explicit duplicate detection,
   cross-statement reconciliation, and outlier/anomaly flagging are on the roadmap. "Validated"
   means integrity-gated + quality-scored, not audited.
-- **Currency is detected, not converted.** Facts keep their native currency (USD/DKK/EUR);
-  normalization to a single reporting currency isn't done.
+- **FX rates are fiscal-period-dated spot rates**, not the period-average rates a filer uses
+  for its own income-statement translation — so `value_usd` is a consistent cross-company
+  approximation, not a restatement of the filing. Native `value_numeric` is always preserved.
 - **Not hosted.** Runs locally via Docker only; no live demo URL at this time.
 - **Pure-ESMA EU filers are out of scope** (no SEC filing); EU companies on US exchanges work
   via their 20-F.
