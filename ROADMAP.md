@@ -65,9 +65,11 @@ marked below so this file reflects what is actually true today.
   (`database/migrations/drop_retired_statement_machinery.sql`); deprecated the two endpoints
   that read them (`/api/statements`, `/api/populate-statements`) to HTTP 410 → `/api/financials`.
   Also fixed `dim_concepts.normalized_label` drifting from the canonical labels on reload.
-  *Remaining: the retired Arelle-path Python modules (`load_financial_data.py`, `parse_xbrl.py`,
-  `fetch_sec.py`, `populate_statement_facts.py`, the old heuristic validators) are now dead code
-  and can be removed in a dedicated sweep — ~15 interdependent files + their tests.*
+- ✅ **Dead-code sweep.** Removed the retired Arelle-path Python modules — the custom parser /
+  downloader, old loader, statement/hierarchy population utils, the heuristic validator stack,
+  the old data viewer, and their tests (59 files, computed as everything outside the live import
+  closure of the edgartools entrypoints). Live imports, the test suite (15 passing), and an
+  end-to-end load all verified after removal.
 
 ### NP2SQL (PRD §15 — marked delivered)
 - ◐ **Natural-language-to-SQL — built, needs re-verification.** The `/natural_language_query`

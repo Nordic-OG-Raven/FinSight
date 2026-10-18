@@ -1,17 +1,11 @@
 """
-Validation Module
+Validation module.
 
-Implements data quality checks, completeness tracking, and validation rules
-for financial data extracted from XBRL filings.
+Post-load data-quality validation for the edgartools path lives in `quality.py`
+(hard integrity gates + soft warnings + per-filing quality report). The old heuristic
+validator stack (checks/completeness/validator/…) was removed in the re-architecture — see
+docs/REARCHITECTURE.md.
 """
-from .checks import FinancialValidator, ValidationResult, ValidationReport
-from .completeness import CompletenessTracker, CompletenessReport
+from .quality import QualityReport, validate, write_report
 
-__all__ = [
-    'FinancialValidator',
-    'ValidationResult',
-    'ValidationReport',
-    'CompletenessTracker',
-    'CompletenessReport'
-]
-
+__all__ = ["QualityReport", "validate", "write_report"]

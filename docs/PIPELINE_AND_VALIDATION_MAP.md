@@ -1,5 +1,10 @@
 # FinSight Pipeline & Validation Map
 
+> **⚠️ SUPERSEDED (2026-10).** This document describes the retired custom-Arelle pipeline and
+> its validator stack, which the edgartools re-architecture replaced and the dead-code sweep
+> removed. For the current architecture see [`REARCHITECTURE.md`](REARCHITECTURE.md); validation
+> now lives in `src/validation/quality.py`. Kept as historical record of the original design.
+
 **Status: canonical.** This document reflects what the code actually does, verified by
 reading control flow end-to-end and cross-checked against a real local pipeline run
 (AAPL 2024 10-K, 2026-08-22). Where earlier docs (`FIX_PLAN.md`, `CRITICAL_FIX_SUMMARY.md`,
