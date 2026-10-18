@@ -3,7 +3,7 @@ flask-cors==4.0.0
 gunicorn==21.2.0
 edgartools>=5.62.0
 pandas>=2.0.0
-sqlalchemy>=2.0.0
+sqlalchemy>=2.0,<2.1   # 2.1 defaults to the psycopg(v3) driver; we ship psycopg2
 psycopg2-binary>=2.9.0
 pydantic>=2.0.0
 python-dotenv>=1.0.0

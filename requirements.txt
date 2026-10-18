@@ -9,7 +9,7 @@ pandas>=2.0.0
 numpy>=1.24.0
 
 # Database & Storage
-sqlalchemy>=2.0.0
+sqlalchemy>=2.0,<2.1   # 2.1 defaults to the psycopg(v3) driver; we ship psycopg2
 psycopg2-binary>=2.9.0
 pyarrow>=12.0.0
 
