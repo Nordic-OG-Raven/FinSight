@@ -88,15 +88,24 @@ ALLOWED_STATEMENT_TYPES = {"SELECT"}
 
 
 def get_openai_client() -> Optional[Any]:
-    """Get OpenAI client if API key is available."""
+    """Return an OpenAI-compatible client. Prefers Groq (GROQ_API_KEY → Groq's OpenAI-compatible
+    endpoint), else OpenAI (OPENAI_API_KEY). None if neither key or the SDK is available."""
     if OpenAI is None:
         return None
-    
+    groq_key = os.getenv("GROQ_API_KEY")
+    if groq_key:
+        return OpenAI(api_key=groq_key, base_url="https://api.groq.com/openai/v1")
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         return None
-    
     return OpenAI(api_key=api_key)
+
+
+def _default_model() -> str:
+    """Model id to use. Override with NP2SQL_MODEL; otherwise a sensible default per provider."""
+    if os.getenv("NP2SQL_MODEL"):
+        return os.getenv("NP2SQL_MODEL")
+    return "openai/gpt-oss-120b" if os.getenv("GROQ_API_KEY") else "gpt-4o-mini"
 
 
 def generate_sql(natural_language_query: str, schema_metadata: dict, database_url: Optional[str] = None) -> str:
@@ -116,7 +125,7 @@ def generate_sql(natural_language_query: str, schema_metadata: dict, database_ur
     """
     client = get_openai_client()
     if client is None:
-        raise ValueError("OpenAI API key not configured. Set OPENAI_API_KEY environment variable.")
+        raise ValueError("No LLM API key configured. Set GROQ_API_KEY (preferred) or OPENAI_API_KEY.")
     
     # Format schema for LLM
     schema_text = format_schema_for_llm(schema_metadata)
@@ -146,7 +155,7 @@ OUTPUT FORMAT:
     
     try:
         response = client.chat.completions.create(
-            model=os.getenv("NP2SQL_MODEL", "gpt-4o-mini"),
+            model=_default_model(),
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},

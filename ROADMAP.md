@@ -78,8 +78,11 @@ marked below so this file reflects what is actually true today.
   `ALLOWED_TABLES` pruned to real objects; model bumped to `gpt-4o-mini` (override via
   `NP2SQL_MODEL`). `tests/test_np2sql.py` verifies the schema context names only live objects,
   every sample query executes read-only, a USD cross-currency comparison returns NVO + AAPL,
-  and the SQL safety layer holds. *The live LLM call still needs `OPENAI_API_KEY`; without it
-  the endpoint degrades gracefully to a clear error.*
+  and the SQL safety layer holds. **Live-verified end-to-end** against Groq
+  (`openai/gpt-oss-120b`): "compare Novo Nordisk and Apple revenue in USD for 2025" →
+  generated SQL selecting `value_usd` → NVO $48.6B, AAPL $416.2B. Provider auto-detects
+  `GROQ_API_KEY` (OpenAI-compatible, preferred) or `OPENAI_API_KEY`; without a key the endpoint
+  degrades gracefully to a clear error.
 
 ---
 
