@@ -143,12 +143,15 @@ class EdgarToolsExtractor:
             raise ValueError(f"No annual report ({'/'.join(forms)}) found for {ticker}")
         return self._result_from_filing(company, ticker, filing, filing_type)
 
-    def extract_filings(self, ticker: str, forms=("10-Q",), limit: int = 8) -> list[ExtractionResult]:
+    def extract_filings(self, ticker: str, forms=("10-Q",), limit: int = 8,
+                        skip_accessions=frozenset()) -> list[ExtractionResult]:
         """Extract up to `limit` most-recent filings per form (newest first) for `ticker`.
 
         This is the multi-filing path that builds quarterly history (10-Q) for the forecasting
-        marts; it also works to pull annual back-history. A filing whose XBRL fails to parse is
-        skipped with a note rather than aborting the whole run."""
+        marts; it also works to pull annual back-history. Filings whose accession is in
+        `skip_accessions` are skipped BEFORE the (expensive) XBRL parse — this is the incremental
+        path (only land genuinely-new filings). A filing whose XBRL fails to parse is skipped with
+        a note rather than aborting the whole run."""
         company = edgar.Company(ticker)
         results: list[ExtractionResult] = []
         for form in forms:
@@ -167,6 +170,8 @@ class EdgarToolsExtractor:
                 chosen = list(chosen)
             for filing in chosen:
                 acc = getattr(filing, "accession_no", "?")
+                if acc in skip_accessions:
+                    continue  # already landed (incremental)
                 try:
                     results.append(self._result_from_filing(company, ticker, filing, form))
                 except Exception as e:  # noqa: BLE001 — one bad filing shouldn't kill the batch

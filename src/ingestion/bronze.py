@@ -133,7 +133,14 @@ def land(conn, r: ExtractionResult) -> int:
     return len(rows)
 
 
-def ingest(tickers, annual: bool = True, quarters: int = 8, dsn: str | None = None) -> None:
+def _existing_accessions(conn, ticker: str) -> set:
+    with conn.cursor() as cur:
+        cur.execute("SELECT accession FROM bronze.raw_filings WHERE ticker = %s", (ticker,))
+        return {r[0] for r in cur.fetchall()}
+
+
+def ingest(tickers, annual: bool = True, quarters: int = 8, only_new: bool = False,
+           dsn: str | None = None) -> None:
     dsn = dsn or direct_dsn()
     ex = EdgarToolsExtractor()
     conn = psycopg2.connect(dsn)
@@ -141,14 +148,17 @@ def ingest(tickers, annual: bool = True, quarters: int = 8, dsn: str | None = No
         ensure_schema(conn)
         total_filings = total_facts = 0
         for tk in tickers:
+            # Incremental: skip accessions already landed (so weekly runs only fetch new filings).
+            skip = _existing_accessions(conn, tk) if only_new else frozenset()
             results: list[ExtractionResult] = []
             if annual:
-                try:
-                    results.append(ex.extract(tk))  # latest annual (10-K / 20-F / 40-F)
-                except Exception as e:  # noqa: BLE001
-                    print(f"  {tk}: no annual filing ({e})")
+                results.extend(ex.extract_filings(
+                    tk, forms=EdgarToolsExtractor._ANNUAL_FORMS, limit=1, skip_accessions=skip))
             if quarters:
-                results.extend(ex.extract_filings(tk, forms=("10-Q",), limit=quarters))
+                results.extend(ex.extract_filings(
+                    tk, forms=("10-Q",), limit=quarters, skip_accessions=skip))
+            if not results:
+                print(f"  {tk}: nothing new to land" if only_new else f"  {tk}: no filings found")
             for r in results:
                 n = land(conn, r)
                 total_filings += 1
@@ -167,9 +177,12 @@ if __name__ == "__main__":
     ap.add_argument("--quarters", type=int, default=8,
                     help="number of recent 10-Q filings to land per filer (0 to skip)")
     ap.add_argument("--no-annual", action="store_true", help="skip the latest annual filing")
+    ap.add_argument("--only-new", action="store_true",
+                    help="incremental: skip filings already landed in bronze")
     args = ap.parse_args()
     ingest(
         [t.strip().upper() for t in args.tickers.split(",") if t.strip()],
         annual=not args.no_annual,
         quarters=args.quarters,
+        only_new=args.only_new,
     )
