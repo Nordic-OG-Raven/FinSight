@@ -23,13 +23,37 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from config import DATABASE_URL  # noqa: E402
 from src.analysis import forecasting_v2 as fv  # noqa: E402
 from src.analysis import pit  # noqa: E402
+from src.analysis import regime as rg  # noqa: E402
 from src.ingestion.bronze import direct_dsn  # noqa: E402
 
-# validated regime routing only (others wait for auto-regime-routing)
-SPECS = [
-    ("NVDA", ["segment:compute_and_networking", "segment:graphics"], "growth"),
-    ("MSFT", ["revenue"], "seasonal"),
-]
+# Ledger universe. REVENUE is logged for every ticker here — it is our strongest, best-generalizing
+# output (leakage-safe backtest MAPE < 8% for all; see scripts/forecast_coverage.py). EPS is logged
+# ONLY where the revenue->margin->EPS chain is competitive with analyst consensus: AVGO/GOOGL/JPM
+# have reliable revenue forecasts but their EPS is distorted by acquisition amortization, other
+# income/FX, and bank accounting respectively, so we do not log an EPS number we know is weak.
+# Routes (guidance vs seasonal) are auto-detected per ticker by regime.classify; components are
+# overridden only where segment roll-up has been validated to help (NVDA).
+LEDGER = {
+    "NVDA":  {"eps": True},    # revenue 1.2%, EPS 4.5% vs consensus 4.8% (we edge it)
+    "AMZN":  {"eps": False},   # revenue 3.9%, but EPS chain broken by lumpy one-time items (83% vs 52%)
+    "MSFT":  {"eps": True},    # revenue 3.6%, EPS 8.9% vs consensus 5.7% (we trail but it's close+honest)
+    "AVGO":  {"eps": False},   # revenue 0.6%, EPS chain broken by acquisition amortization
+    "GOOGL": {"eps": False},   # revenue 6.1%, EPS chain weak (other income / FX swings)
+    "JPM":   {"eps": False},   # revenue 8.0%, bank P&L does not fit revenue->margin->EPS
+    "AAPL":  {"eps": False},   # revenue weaker historically (trend-inflection lag); report it honestly
+}
+_COMPONENTS = {"NVDA": ["segment:compute_and_networking", "segment:graphics"]}
+
+
+def build_specs(db=DATABASE_URL):
+    """Auto-route each ledger ticker into (ticker, components, regime, method, log_eps)."""
+    specs = []
+    for tk, cfg in LEDGER.items():
+        # regex covers the whole current universe deterministically; the LLM net is insurance for
+        # future odd-phrasing tickers, so we don't pay for it on every routine routing pass.
+        r = rg.classify(db, tk, use_llm=False)
+        specs.append((tk, _COMPONENTS.get(tk, r.components), r.regime, r.method, cfg["eps"]))
+    return specs
 
 DDL = """
 CREATE SCHEMA IF NOT EXISTS forecasts;
@@ -64,8 +88,7 @@ def _conn():
 
 def _revenue_consensus(ticker):
     try:
-        import yfinance as yf
-        re = yf.Ticker(ticker).revenue_estimate
+        re = fv.yf_revenue_estimate(ticker)
         if re is not None and "0q" in re.index:
             return float(re.loc["0q", "avg"])
     except Exception:  # noqa: BLE001
@@ -73,12 +96,13 @@ def _revenue_consensus(ticker):
     return None
 
 
-def log_forecasts(db=DATABASE_URL, specs=SPECS) -> None:
+def log_forecasts(db=DATABASE_URL, specs=None) -> None:
     """Compute + upsert the current next-quarter revenue & EPS forecast for each tracked ticker.
     Only rows not yet graded are overwritten (a frozen, graded row is never changed)."""
+    specs = specs or build_specs(db)
     conn = _conn()
     try:
-        for tk, comps, regime in specs:
+        for tk, comps, regime, method, log_eps in specs:
             r = fv.forecast_eps(db, tk, comps, regime)
             fy_s, q_s = r["target"].replace("FY", "").split(" Q")
             fy, q = int(fy_s), int(q_s)
@@ -86,9 +110,10 @@ def log_forecasts(db=DATABASE_URL, specs=SPECS) -> None:
             rows = [
                 (tk, fy, q, "revenue", rev["forecast"], iv[0] if iv else None, iv[1] if iv else None,
                  rev["best_model"], _revenue_consensus(tk)),
-                (tk, fy, q, "eps", r["eps_forecast"], None, None,
-                 "revenue->margin->eps", r["consensus_eps"]),
             ]
+            if log_eps and r.get("eps_forecast") is not None:
+                rows.append((tk, fy, q, "eps", r["eps_forecast"], None, None,
+                             "revenue->margin->eps", r["consensus_eps"]))
             with conn.cursor() as cur:
                 execute_values(cur, """
                     INSERT INTO forecasts.forecast_log
@@ -102,7 +127,8 @@ def log_forecasts(db=DATABASE_URL, specs=SPECS) -> None:
                     WHERE forecasts.forecast_log.graded_at IS NULL
                 """, rows)
             conn.commit()
-            print(f"  logged {tk} FY{fy} Q{q}: revenue {rev['forecast']/1e9:.1f}B, EPS {r['eps_forecast']:.2f}")
+            eps_s = f", EPS {r['eps_forecast']:.2f}" if (log_eps and r.get("eps_forecast") is not None) else ""
+            print(f"  logged {tk} FY{fy} Q{q}: revenue {rev['forecast']/1e9:.1f}B{eps_s}")
     finally:
         conn.close()
 
@@ -110,8 +136,7 @@ def log_forecasts(db=DATABASE_URL, specs=SPECS) -> None:
 def _reported_eps(ticker, quarter_end):
     """yfinance Reported EPS for the quarter ending `quarter_end` (report lands within ~70 days)."""
     try:
-        import yfinance as yf
-        ed = yf.Ticker(ticker).get_earnings_dates(limit=16)
+        ed = fv.yf_earnings_dates(ticker, 16)
         if ed is None:
             return None, None
         for dt, row in ed.iterrows():
@@ -173,8 +198,7 @@ def grade(db=DATABASE_URL) -> None:
 def _eps_actual_and_consensus(ticker, quarter_end):
     """(reported_eps, consensus_eps, report_date) for the quarter ending quarter_end, from yfinance."""
     try:
-        import yfinance as yf
-        ed = yf.Ticker(ticker).get_earnings_dates(limit=16)
+        ed = fv.yf_earnings_dates(ticker, 16)
         if ed is None:
             return None, None, None
         for dt, row in ed.iterrows():
@@ -187,53 +211,37 @@ def _eps_actual_and_consensus(ticker, quarter_end):
     return None, None, None
 
 
-def backfill(db=DATABASE_URL, specs=SPECS) -> None:
+def backfill(db=DATABASE_URL, specs=None) -> None:
     """Seed the ledger with the HISTORICAL point-in-time record (forecasts made as-of before each
     past print), so the track record is populated from day one. Rows are tagged model='backtest:*'
-    to distinguish them from going-forward live forecasts. Reuses the forecasting_v2 internals."""
-    from src.analysis import guidance as gd
+    to distinguish them from going-forward live forecasts.
 
+    Revenue comes from `forecasting_v2.realized_backtest` — the SAME walk-forward the coverage
+    scorecard reports — so the ledger and the scorecard always agree. EPS (where logged) applies the
+    point-in-time net margin to that realized revenue forecast."""
+    specs = specs or build_specs(db)
     conn = _conn()
     try:
-        for tk, comps, regime in specs:
-            method = "guidance" if regime == "growth" else "seasonal"
-            guid = gd.guidance_history(tk) if method == "guidance" else None
-            beats = fv._beat_pairs(db, tk, guid) if method == "guidance" else None
+        for tk, comps, regime, method, log_eps in specs:
+            rb = fv.realized_backtest(db, tk, comps, method)
             sh = pit.latest_series(db, tk, "weighted_average_shares_diluted")
             cur_shares = sh[-1].value if sh else None
-            reps = pit.quarter_report_dates(db, tk)
-            with conn.cursor() as cur:
-                cur.execute("""SELECT fiscal_year, fiscal_period, quarter_end, revenue_usd
-                               FROM gold.earnings
-                               WHERE ticker=%s AND revenue_usd IS NOT NULL AND NOT is_derived
-                               ORDER BY quarter_end""", (tk,))
-                qrows = cur.fetchall()
             n = 0
-            for fy, fp, qe, rev_actual in qrows:
-                if not str(fp).startswith("Q"):
-                    continue
-                q = int(str(fp)[1])
-                qe_d = qe.date() if hasattr(qe, "date") else qe
-                report_date = reps.get(qe_d)
-                if not report_date:
-                    continue
-                as_of = report_date - timedelta(days=1)
-                rev_hat = fv._revenue_asof(db, tk, as_of, method, guid, beats)
-                if rev_hat is None:
-                    continue
-                rev_actual = float(rev_actual)
-                writes = [("revenue", "backtest:" + method, rev_hat, None, rev_actual,
-                           abs(rev_hat - rev_actual) / abs(rev_actual), None)]
-                nm_pts = fv._ratio_points(db, tk, "net_income", as_of)
-                if len(nm_pts) >= 4 and cur_shares:
-                    eps_our = rev_hat * fv.recent_mean(nm_pts, None, None) / cur_shares
-                    eps_act, eps_cons, _ = _eps_actual_and_consensus(tk, qe_d)
-                    if eps_act:
-                        writes.append(("eps", "backtest:chain", eps_our, eps_cons, eps_act,
-                                       abs(eps_our - eps_act) / abs(eps_act),
-                                       (abs(eps_cons - eps_act) / abs(eps_act)) if eps_cons else None))
+            for item in rb:
+                fy, q, qe_d, report_date = item["fy"], item["q"], item["quarter_end"], item["report_date"]
+                rev_hat, rev_actual = item["forecast"], item["actual"]
+                writes = [("revenue", "backtest:" + method, rev_hat, None, rev_actual, item["ape"], None)]
+                if log_eps and cur_shares:
+                    nm_pts = fv._ratio_points(db, tk, "net_income", report_date - timedelta(days=1))
+                    if len(nm_pts) >= 4:
+                        eps_our = rev_hat * fv.recent_mean(nm_pts, None, None) / cur_shares
+                        eps_act, eps_cons, _ = _eps_actual_and_consensus(tk, qe_d)
+                        if eps_act:
+                            writes.append(("eps", "backtest:chain", eps_our, eps_cons, eps_act,
+                                           abs(eps_our - eps_act) / abs(eps_act),
+                                           (abs(eps_cons - eps_act) / abs(eps_act)) if eps_cons else None))
                 with conn.cursor() as cur:
-                    for metric, model, fcast, cons, act, ape, cape in writes:
+                    for metric, mdl, fcast, cons, act, ape, cape in writes:
                         cur.execute("""INSERT INTO forecasts.forecast_log
                             (ticker,target_fiscal_year,target_quarter,metric,forecast,model,consensus,
                              actual,actual_reported_at,our_ape,consensus_ape,graded_at)
@@ -242,7 +250,7 @@ def backfill(db=DATABASE_URL, specs=SPECS) -> None:
                              forecast=EXCLUDED.forecast, consensus=EXCLUDED.consensus, actual=EXCLUDED.actual,
                              actual_reported_at=EXCLUDED.actual_reported_at, our_ape=EXCLUDED.our_ape,
                              consensus_ape=EXCLUDED.consensus_ape, model=EXCLUDED.model, graded_at=now()""",
-                            (tk, fy, q, metric, fcast, model, cons, act, report_date, ape, cape))
+                            (tk, fy, q, metric, fcast, mdl, cons, act, report_date, ape, cape))
                 conn.commit()
                 n += 1
             print(f"  backfilled {tk}: {n} quarters")

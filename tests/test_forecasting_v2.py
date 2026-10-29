@@ -59,6 +59,28 @@ def test_log_trend_recovers_exponential():
     assert abs(pred / (1000.0 * np.exp(g * (t_qidx - base))) - 1.0) < 1e-6
 
 
+def test_weighted_trend_recovers_linear():
+    # on an exactly linear+seasonal series, recency weighting still recovers the line exactly
+    seq = _seq(11)
+    a, b = 100.0, 2.0
+    vals = [a + b * qidx + SEASON[qn] for (_, qn, qidx) in seq[:-1]]
+    pts = _pts(vals)
+    t_fy, t_qn, t_qidx = seq[-1]
+    pred = fv.weighted_trend_seasonal(pts, t_fy, t_qn)
+    assert abs(pred - (a + b * t_qidx + SEASON[t_qn])) < 1e-6
+
+
+def test_weighted_trend_tracks_inflection_better_than_linear():
+    # a series that grows fast then plateaus: the plain linear trend overshoots the next point,
+    # the recency-weighted trend sits closer to the recent (flat) level.
+    vals = [100, 110, 121, 133, 146, 150, 151, 150, 152]  # steep then flat
+    pts = _pts(vals)
+    t_fy, t_qn = 2026, 1
+    lin = fv.trend_seasonal(pts, t_fy, t_qn)
+    wtd = fv.weighted_trend_seasonal(pts, t_fy, t_qn)
+    assert wtd < lin                      # weighted extrapolates the flattening, not the old slope
+
+
 def test_recent_mean_on_sticky_series():
     pts = _pts([0.55, 0.54, 0.56, 0.55, 0.57, 0.56])  # a sticky margin
     out = fv.recent_mean(pts, 2026, 1)
@@ -76,6 +98,27 @@ def test_guidance_beat_formula():
     # guidance-beat forecast = guidance * (1 + median beat); verify the arithmetic directly
     guidance, beats = 108.0, [0.056, 0.048, 0.057]
     assert abs(guidance * (1 + float(np.median(beats))) - 108.0 * 1.056) < 1e-9
+
+
+def test_revenue_asof_guidance_pairs_to_guided_quarter():
+    """The guidance-beat point forecast must pair a quarter to the guidance issued at the PRIOR
+    earnings (given before the quarter ends), not the one issued at the quarter's own earnings
+    (which guides the NEXT quarter and is filed days before the 10-Q). db is unused on this branch.
+    """
+    from src.analysis.guidance import Guidance
+    guid = [Guidance(date(2025, 12, 11), 19.1e9), Guidance(date(2026, 3, 4), 22.0e9),
+            Guidance(date(2026, 6, 3), 29.4e9), Guidance(date(2026, 9, 2), 34.8e9)]
+    beats = [(date(2025, 12, 11), 19.1e9, 19.31e9, 0.011),
+             (date(2026, 3, 4), 22.0e9, 22.19e9, 0.009),
+             (date(2026, 6, 3), 29.4e9, 29.59e9, 0.006)]
+    # target quarter ends 2026-08-02; its guidance is the 2026-06-03 one ($29.4B), NOT the
+    # 2026-09-02 one — even though the 10-Q (report date ~2026-09-09) is later.
+    out = fv._revenue_asof(None, "AVGO", date(2026, 9, 9), "guidance", guid, beats,
+                           target_qend=date(2026, 8, 2))
+    assert abs(out - 29.4e9 * (1 + 0.010)) < 1e6     # median prior beats [0.011, 0.009] = 0.010
+    # not enough resolved prior beats (only 1 before 2026-03-04) -> no forecast
+    assert fv._revenue_asof(None, "AVGO", date(2026, 5, 1), "guidance", guid, beats,
+                            target_qend=date(2026, 5, 3)) is None
 
 
 @pytest.mark.skipif("CI" in os.environ, reason="needs the warehouse")
