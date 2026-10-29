@@ -1045,8 +1045,9 @@ def get_financials_v2(ticker):
         with engine.connect() as conn:
             meta = conn.execute(text("""
                 SELECT (SELECT company_name FROM gold.companies WHERE ticker=:t LIMIT 1) AS company_name,
-                       MAX(fiscal_year_end) AS fye
-                FROM gold.v_facts_hierarchical WHERE ticker=:t
+                       MAX(COALESCE(end_date, instant_date)) AS fye
+                FROM gold.v_facts_hierarchical
+                WHERE ticker=:t AND period_grain IN ('annual','instant')
             """), {"t": ticker}).fetchone()
             if not meta or meta[0] is None:
                 return jsonify({"error": "not_found", "message": f"No data for {ticker}"}), 404
