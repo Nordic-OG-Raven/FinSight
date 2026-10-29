@@ -16,6 +16,7 @@ select
     f.fiscal_year,
     f.fiscal_period,
     f.period_type,
+    f.period_grain,  -- 'annual'|'quarter'|'ytd_or_other'|'instant'(year-end)|'quarter_instant'
     f.period_start                                    as start_date,
     f.period_end                                      as end_date,
     f.instant_date,

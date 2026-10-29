@@ -14,14 +14,7 @@ select
     f.fiscal_year,
     f.fiscal_period,
     f.period_type,
-    -- period grain so annual vs quarterly vs YTD facts are distinguishable (the legacy
-    -- annual-only view had no such ambiguity; the medallion now carries 10-Q data too)
-    case
-        when f.period_type = 'instant' then 'instant'
-        when f.period_days between 330 and 380 then 'annual'
-        when f.period_days between 80 and 100 then 'quarter'
-        else 'ytd_or_other'
-    end                                               as period_grain,
+    f.period_grain,  -- 'annual'|'quarter'|'ytd_or_other'|'instant'(year-end)|'quarter_instant'
     f.period_start                                    as start_date,
     f.period_end                                      as end_date,
     f.instant_date,

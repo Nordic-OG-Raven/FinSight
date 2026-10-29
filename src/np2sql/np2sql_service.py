@@ -53,27 +53,19 @@ for ticker, name in COMPANY_NAMES.items():
         COMPANY_NAME_TO_TICKER[name.split()[0].lower()] = ticker  # First word
 
 
-# Allowed tables (whitelist)
+# Allowed tables (whitelist). The medallion gold serving objects; the connection's search_path
+# is set to `gold, public` so bare names resolve to gold.
 ALLOWED_TABLES = {
-    # core fact table + dimensions (the statement sub-tables were retired)
-    "fact_financial_metrics",
-    "dim_companies",
-    "dim_concepts",
-    "dim_time_periods",
-    "dim_filings",
-    "dim_xbrl_dimensions",
-    "dim_taxonomies",
-    "dim_reporting_frameworks",
-    "dim_currencies",
-    "dim_segments",
-    "dim_consolidation_levels",
-    "dim_fiscal_periods",
-    # query-friendly views
+    # gold serving views
     "v_facts_consolidated",
     "v_facts_hierarchical",
-    "v_facts_deduplicated",
-    "v_facts_with_dimensions",
-    "v_data_quality_summary",
+    "companies",
+    # gold analytical marts
+    "company_financials",
+    "ratios",
+    "peers",
+    "company_quarterly",
+    "earnings",
 }
 
 # Dangerous SQL keywords to block
@@ -278,10 +270,15 @@ def execute_query(sql: str, database_url: str, timeout: int = 30, max_rows: int 
         SQLAlchemyError: If query execution fails
         TimeoutError: If query exceeds timeout
     """
-    engine = create_engine(database_url, connect_args={"connect_timeout": timeout})
-    
+    # search_path=gold,public so the LLM's bare table names resolve to the medallion gold layer.
+    # Neon's pooler rejects the search_path startup option, so use the DIRECT (unpooled) endpoint.
+    engine = create_engine(
+        database_url.replace("-pooler", ""),
+        connect_args={"connect_timeout": timeout, "options": "-c search_path=gold,public"},
+    )
+
     start_time = time.time()
-    
+
     try:
         with engine.connect() as conn:
             # Add LIMIT if not present and query might return many rows

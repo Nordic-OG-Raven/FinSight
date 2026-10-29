@@ -39,8 +39,9 @@ def test_canonical_labels_exposed():
 
 
 def test_value_usd_documented():
-    assert "value_usd" in META["tables"]["fact_financial_metrics"]["columns"]
-    assert "value_usd" in META["views"]["v_facts_consolidated"]["columns"]
+    assert "value_usd" in META["tables"]["v_facts_consolidated"]["columns"]
+    assert "value_usd" in META["tables"]["ratios"]["columns"] or \
+        "revenue_usd" in META["tables"]["ratios"]["columns"]
 
 
 def test_validate_sql_safety():
@@ -64,7 +65,7 @@ def test_sample_queries_execute():
 @pytest.mark.skipif("CI" in os.environ, reason="needs local warehouse")
 def test_usd_comparison_query_returns_both_filers():
     sql = ("SELECT ticker, value_usd FROM v_facts_consolidated WHERE ticker IN ('NVO','AAPL') "
-           "AND normalized_label='revenue' AND fiscal_year=2025 AND period_type='duration' "
+           "AND normalized_label='revenue' AND fiscal_year=2025 AND period_grain='annual' "
            "ORDER BY value_usd DESC")
     res = execute_query(sql, _db_url())
     tickers = {r["ticker"] for r in res["data"]}

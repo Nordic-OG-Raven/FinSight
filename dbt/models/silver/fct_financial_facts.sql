@@ -39,34 +39,53 @@ canonical_ranked as (
             )
         end as canon_rank
     from one_per_fact
+),
+
+-- fiscal-year-end date per (company, year) from the annual income/cash-flow durations, so an
+-- instant can be tagged as the YEAR-END balance vs a quarter-end balance (10-Qs contribute the
+-- latter, and all of a year's quarter-end instants share that fiscal_year).
+fye as (
+    select ticker, fiscal_year, max(period_end) as fye_date
+    from canonical_ranked
+    where period_type = 'duration' and period_days between 330 and 380
+    group by ticker, fiscal_year
 )
 
 select
-    ticker,
-    accession,
-    form,
-    period_of_report,
-    concept,
-    taxonomy,
-    label,
-    standard_label,
-    case when canon_rank = 1 and is_dimensioned = false then canonical_candidate end as canonical_label,
-    value_numeric,
-    value_text,
-    currency,
-    value_usd,
-    fx_unconvertible,
-    unit,
-    period_type,
-    period_start,
-    period_end,
-    instant_date,
-    period_days,
-    fiscal_year,
-    fiscal_year_reported,
-    fiscal_period,
-    statement_type,
-    dimensions,
-    dimension_hash,
-    is_dimensioned
-from canonical_ranked
+    cr.ticker,
+    cr.accession,
+    cr.form,
+    cr.period_of_report,
+    cr.concept,
+    cr.taxonomy,
+    cr.label,
+    cr.standard_label,
+    case when cr.canon_rank = 1 and cr.is_dimensioned = false then cr.canonical_candidate end as canonical_label,
+    cr.value_numeric,
+    cr.value_text,
+    cr.currency,
+    cr.value_usd,
+    cr.fx_unconvertible,
+    cr.unit,
+    cr.period_type,
+    cr.period_start,
+    cr.period_end,
+    cr.instant_date,
+    cr.period_days,
+    cr.fiscal_year,
+    cr.fiscal_year_reported,
+    cr.fiscal_period,
+    cr.statement_type,
+    -- period grain: annual flows, single quarters, YTD rollups, fiscal-year-end vs quarter-end instants
+    case
+        when cr.period_type = 'duration' and cr.period_days between 330 and 380 then 'annual'
+        when cr.period_type = 'duration' and cr.period_days between 80 and 100 then 'quarter'
+        when cr.period_type = 'duration' then 'ytd_or_other'
+        when cr.period_type = 'instant' and cr.instant_date = fye.fye_date then 'instant'
+        when cr.period_type = 'instant' then 'quarter_instant'
+    end as period_grain,
+    cr.dimensions,
+    cr.dimension_hash,
+    cr.is_dimensioned
+from canonical_ranked cr
+left join fye on fye.ticker = cr.ticker and fye.fiscal_year = cr.fiscal_year
