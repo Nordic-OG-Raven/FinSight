@@ -362,7 +362,7 @@ def forecast_eps(db, ticker, components, regime="seasonal", use_guidance=True) -
     return {
         "ticker": ticker, "target": rev["target"],
         "revenue": {"forecast": rev_hat, "best_model": rev["best_model"], "mape": rev["best_model_mape"],
-                    "interval_80": rev["interval_80"]},
+                    "interval_80": rev["interval_80"], "backtest": rev["backtest"], "n_eval": rev["n_eval"]},
         "net_margin": {"forecast": nm["forecast"], "mape": nm["mape"], "model": nm["best_model"]},
         "operating_margin": {"forecast": om["forecast"], "mape": om["mape"], "model": om["best_model"]},
         "net_income_forecast": net_income_hat,
