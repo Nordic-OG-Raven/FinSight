@@ -1,16 +1,17 @@
 # FinSight — SEC XBRL Financial Data Pipeline
 
-An ETL pipeline that ingests SEC annual filings, extracts and normalizes their XBRL
-financial facts, validates them, and loads them into a PostgreSQL star schema for analysis.
-A REST API serves the result.
+An ETL pipeline that ingests SEC filings (annual **10-K / 20-F** + quarterly **10-Q**), extracts
+and normalizes their XBRL financial facts, validates them, and loads them into a **medallion data
+warehouse** (bronze → silver → gold, dbt on Neon Postgres). A REST API serves it, with
+quarterly-earnings forecasting on top.
 
-> **What this is (and isn't).** The quantitative core does one thing well: it turns a public
-> company's annual filing (domestic **10-K** or foreign **20-F/40-F**) into a clean, queryable,
-> validated set of annual financials — for **every SEC filer**, including banks and IFRS
-> filers. The broader ambition — a consolidated cross-company label vocabulary, audit-grade
-> (non-heuristic) validation, LLM-based ESG/qualitative extraction, analytics, and a hosted
-> demo — is real but not done; it lives in [`ROADMAP.md`](ROADMAP.md). This README describes
-> **what actually works today**, verified end-to-end. Built primarily with AI-assisted
+> **What this is.** The quantitative core turns a public company's SEC filings (domestic
+> **10-K/10-Q** or foreign **20-F/40-F**) into a clean, queryable, validated set of financials —
+> for **every SEC filer**, including banks and IFRS filers — through a medallion warehouse with
+> consolidated cross-company labels, USD normalization, cross-currency ratios/peers, and
+> quarterly-earnings forecasting. It's **hosted live** (Fly + Neon) with CI on ephemeral Neon
+> branches. Still on the roadmap: LLM-based ESG/qualitative extraction and audit-grade
+> (non-heuristic) validation — see [`ROADMAP.md`](ROADMAP.md). Built primarily with AI-assisted
 > development; the architecture, limitations, and trade-offs below are ones I can walk through.
 
 ---
