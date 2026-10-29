@@ -152,6 +152,54 @@ def backtest(db, ticker, components, min_train=6) -> dict:
     return out
 
 
+def guidance_model(db, ticker) -> Optional[dict]:
+    """Guidance-beat model: forecast = company's forward guidance x (1 + median historical beat).
+
+    Leakage-safe: guidance for quarter T is issued at T-1's earnings (before T); the beat rate uses
+    only quarters already reported. The single strongest signal for hyper-growth names, where
+    filings-only models lag. Actuals come from gold.earnings (includes the derived Q4 so every
+    guided quarter can be paired). Returns None if the company doesn't give parseable guidance.
+    """
+    from sqlalchemy import create_engine, text
+
+    from src.analysis import guidance as gd
+
+    hist = gd.guidance_history(ticker)
+    if len(hist) < 3:
+        return None
+    eng = create_engine(db)
+    with eng.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT quarter_end, revenue_usd FROM gold.earnings "
+            "WHERE ticker = :t AND revenue_usd IS NOT NULL ORDER BY quarter_end"
+        ), {"t": ticker.upper()}).fetchall()
+    acts = [(r[0].date() if hasattr(r[0], "date") else r[0], float(r[1])) for r in rows]
+
+    def actual_after(d):
+        nxt = [v for qe, v in acts if qe > d]
+        return min(nxt) if nxt else None   # first quarter to END after the guidance date
+
+    pairs = [(g.given_date, g.guided_revenue, actual_after(g.given_date)) for g in hist]
+    pairs = [(d, gv, a, a / gv - 1.0) for d, gv, a in pairs if a]
+    if len(pairs) < 3:
+        return None
+    apes, resid = [], []
+    for i in range(2, len(pairs)):           # walk-forward: beat from prior pairs only
+        beat = float(np.median([p[3] for p in pairs[:i]]))
+        pred, act = pairs[i][1] * (1 + beat), pairs[i][2]
+        apes.append(abs(pred - act) / act)
+        resid.append((pred - act) / act)
+    beat = float(np.median([p[3] for p in pairs]))
+    return {
+        "n": len(apes),
+        "mape": float(np.mean(apes) * 100) if apes else None,
+        "resid": np.array(resid),
+        "forecast": hist[-1].guided_revenue * (1 + beat),
+        "guidance": hist[-1].guided_revenue,
+        "median_beat_pct": beat * 100,
+    }
+
+
 def _empirical_interval(point: float, resid: np.ndarray, level=0.80):
     """Prediction interval from the empirical distribution of walk-forward % residuals."""
     if point is None or len(resid) < 3:
@@ -162,11 +210,18 @@ def _empirical_interval(point: float, resid: np.ndarray, level=0.80):
     return (float(min(lo, hi)), float(max(lo, hi)))
 
 
-def forecast_next(db, ticker, components, regime="seasonal", min_train=6) -> dict:
-    """Live next-quarter revenue forecast: regime model + inverse-MAPE ensemble + interval,
-    with the backtest accuracy attached (so we only trust what the backtest earns)."""
+def forecast_next(db, ticker, components, regime="seasonal", min_train=6, use_guidance=True) -> dict:
+    """Live next-quarter revenue forecast: best-backtested model (incl. the guidance-beat model
+    where guidance exists) + inverse-MAPE ensemble + empirical interval."""
     ticker = ticker.upper()
     bt = backtest(db, ticker, components, min_train=min_train)
+    # Fold in the guidance-beat model (strongest signal for hyper-growth names) as another model.
+    all_models = list(MODELS)
+    if use_guidance:
+        gm = guidance_model(db, ticker)
+        if gm and gm["mape"] is not None:
+            bt["guidance_beat"] = gm
+            all_models = all_models + ["guidance_beat"]
     # next target quarter = one after the latest known consolidated quarter
     latest = pit.latest_series(db, ticker, "revenue")
     if not latest:
@@ -177,11 +232,13 @@ def forecast_next(db, ticker, components, regime="seasonal", min_train=6) -> dic
 
     comp_points = _series_asof(db, ticker, components, pit.date(2100, 1, 1))
     preds = _forecast_components(comp_points, t_fy, t_qn)
+    if "guidance_beat" in all_models:
+        preds["guidance_beat"] = bt["guidance_beat"]["forecast"]
 
     # ensemble: inverse-MAPE weight over models that have a backtest + a prediction
     wsum = num = 0.0
-    for m, pred in preds.items():
-        mape = bt[m]["mape"]
+    for m in all_models:
+        pred, mape = preds.get(m), bt[m]["mape"]
         if pred is not None and mape:
             w = 1.0 / mape
             num += w * pred
@@ -189,9 +246,8 @@ def forecast_next(db, ticker, components, regime="seasonal", min_train=6) -> dic
     ensemble = (num / wsum) if wsum else None
 
     # Let the BACKTEST pick the model (it is the regime detector): lowest-MAPE model that also
-    # produced a forecast. Intervals come from that model's empirical residuals, around the
-    # ensemble point (robust blend as the primary number).
-    scored = [(bt[m]["mape"], m) for m in MODELS if bt[m]["mape"] and preds.get(m) is not None]
+    # produced a forecast. Intervals come from that model's empirical residuals, around its point.
+    scored = [(bt[m]["mape"], m) for m in all_models if bt[m]["mape"] and preds.get(m) is not None]
     best_model = min(scored)[1] if scored else None
     resid = bt[best_model]["resid"] if best_model else np.array([])
     return {
@@ -199,7 +255,7 @@ def forecast_next(db, ticker, components, regime="seasonal", min_train=6) -> dic
         "target": f"FY{t_fy} Q{t_qn}",
         "components": components,
         "regime_hint": regime,
-        "backtest": {m: {k: v for k, v in bt[m].items() if k != "resid"} for m in MODELS},
+        "backtest": {m: {k: v for k, v in bt[m].items() if k != "resid"} for m in all_models},
         "n_eval": bt["_n_eval"],
         "forecast_by_model": preds,
         "best_model": best_model,
@@ -223,7 +279,7 @@ if __name__ == "__main__":
     for tk, comps, regime in specs:
         r = forecast_next(DATABASE_URL, tk, comps, regime=regime)
         print(f"\n=== {tk} revenue -> {r['target']} (n_eval={r['n_eval']}) ===")
-        print("  backtest MAPE:", {m: (round(r['backtest'][m]['mape'], 1) if r['backtest'][m]['mape'] else None) for m in MODELS})
+        print("  backtest MAPE:", {m: (round(r['backtest'][m]['mape'], 1) if r['backtest'][m]['mape'] else None) for m in r['backtest']})
         fb = r["forecast_by_model"]
         print("  model forecasts ($B):", {m: (round(v / 1e9, 1) if v else None) for m, v in fb.items()})
         print(f"  best model: {r['best_model']} (MAPE {r['best_model_mape']:.1f}%) -> {r['best_model_forecast']/1e9:.1f}B")
