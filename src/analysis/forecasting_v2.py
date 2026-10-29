@@ -74,10 +74,30 @@ def log_trend_seasonal(points, t_fy, t_qn):
     return _regress(points, t_fy, t_qn, log=True)
 
 
+def recent_mean(points, t_fy, t_qn, k=4):
+    """Mean of the last k observations — right for sticky, mean-reverting series (margins)."""
+    vals = [p.value for p in points[-k:]]
+    return float(np.mean(vals)) if vals else None
+
+
+def seasonal_hold(points, t_fy, t_qn):
+    """Same fiscal quarter last year, held flat (no growth) — a seasonal margin baseline."""
+    vals = {(p.fiscal_year, p.quarter_num): p.value for p in points}
+    return vals.get((t_fy - 1, t_qn)) or (points[-1].value if points else None)
+
+
 MODELS: dict[str, Callable] = {
     "seasonal_naive": seasonal_naive,
     "trend_seasonal": trend_seasonal,
     "log_trend_seasonal": log_trend_seasonal,
+}
+
+# Margins are mean-reverting/sticky, not trending — a linear trend overshoots. Use conservative
+# models and let the backtest pick.
+MARGIN_MODELS: dict[str, Callable] = {
+    "recent_mean": recent_mean,
+    "seasonal_hold": seasonal_hold,
+    "trend_seasonal": trend_seasonal,
 }
 
 # which model each series regime prefers (ensemble still computes all + a weighted blend)
@@ -264,6 +284,90 @@ def forecast_next(db, ticker, components, regime="seasonal", min_train=6, use_gu
         "ensemble": ensemble,
         "interval_80": _empirical_interval(ensemble, resid, 0.80),
         "interval_90": _empirical_interval(ensemble, resid, 0.90),
+    }
+
+
+_FAR = None  # set lazily to pit.date(2100,1,1)
+
+
+def _ratio_points(db, ticker, num_metric, as_of):
+    """Quarterly ratio series num_metric/revenue, as known at as_of (for margins)."""
+    rev = {p.period_end: p for p in pit.series_asof(db, ticker, "revenue", as_of)}
+    num = {p.period_end: p.value for p in pit.series_asof(db, ticker, num_metric, as_of)}
+    pts = []
+    for pe, rp in sorted(rev.items()):
+        if pe in num and rp.value:
+            pts.append(pit.Point(pe, rp.fiscal_year, rp.quarter_num, num[pe] / rp.value, rp.filing_date, rp.accession))
+    return pts
+
+
+def _margin_forecast(db, ticker, num_metric, t_fy, t_qn, min_train=6) -> dict:
+    """Backtest the margin (num/revenue) across MARGIN_MODELS point-in-time, pick the best, and
+    forecast the target quarter's margin with it."""
+    reports = pit.quarter_report_dates(db, ticker)
+    truth = _ratio_points(db, ticker, num_metric, pit.date(2100, 1, 1))
+    apes = {m: [] for m in MARGIN_MODELS}
+    for tp in truth:
+        cutoff = reports.get(tp.period_end)
+        if cutoff is None:
+            continue
+        hist = _ratio_points(db, ticker, num_metric, cutoff - timedelta(days=1))
+        if len(hist) < min_train:
+            continue
+        for name, fn in MARGIN_MODELS.items():
+            pred = fn(hist, tp.fiscal_year, tp.quarter_num)
+            if pred is not None and tp.value:
+                apes[name].append(abs(pred - tp.value) / abs(tp.value))
+    mapes = {m: (float(np.mean(a) * 100) if a else None) for m, a in apes.items()}
+    scored = [(v, m) for m, v in mapes.items() if v is not None]
+    best = min(scored)[1] if scored else "recent_mean"
+    latest = _ratio_points(db, ticker, num_metric, pit.date(2100, 1, 1))
+    forecast = MARGIN_MODELS[best](latest, t_fy, t_qn)
+    return {"forecast": forecast, "best_model": best, "mape": mapes.get(best), "mapes": mapes}
+
+
+def forecast_eps(db, ticker, components, regime="seasonal", use_guidance=True) -> dict:
+    """Revenue -> margins -> net income -> EPS. Net income (split-immune $) is the backtested
+    earnings metric; EPS = net_income / current diluted shares, compared to analyst consensus."""
+    far = pit.date(2100, 1, 1)
+    rev = forecast_next(db, ticker, components, regime=regime, use_guidance=use_guidance)
+    rev_hat = rev.get("best_model_forecast") or rev.get("ensemble")
+    fy_s, q_s = rev["target"].replace("FY", "").split(" Q")
+    t_fy, t_qn = int(fy_s), int(q_s)
+
+    nm = _margin_forecast(db, ticker, "net_income", t_fy, t_qn)
+    om = _margin_forecast(db, ticker, "operating_income", t_fy, t_qn)
+    net_income_hat = rev_hat * nm["forecast"] if (rev_hat and nm["forecast"]) else None
+    op_income_hat = rev_hat * om["forecast"] if (rev_hat and om["forecast"]) else None
+
+    shares = pit.latest_series(db, ticker, "weighted_average_shares_diluted")
+    cur_shares = shares[-1].value if shares else None
+    eps_hat = (net_income_hat / cur_shares) if (net_income_hat and cur_shares) else None
+
+    # consensus EPS for the upcoming print (yfinance)
+    cons_eps = None
+    try:
+        import yfinance as yf
+        ed = yf.Ticker(ticker).get_earnings_dates(limit=8)
+        if ed is not None:
+            for _, r in ed.iterrows():
+                rep = r.get("Reported EPS")
+                if rep is None or (isinstance(rep, float) and np.isnan(rep)):
+                    est = r.get("EPS Estimate")
+                    cons_eps = float(est) if est is not None and not np.isnan(est) else None
+                    break
+    except Exception:  # noqa: BLE001
+        pass
+
+    return {
+        "ticker": ticker, "target": rev["target"],
+        "revenue": {"forecast": rev_hat, "best_model": rev["best_model"], "mape": rev["best_model_mape"],
+                    "interval_80": rev["interval_80"]},
+        "net_margin": {"forecast": nm["forecast"], "mape": nm["mape"], "model": nm["best_model"]},
+        "operating_margin": {"forecast": om["forecast"], "mape": om["mape"], "model": om["best_model"]},
+        "net_income_forecast": net_income_hat,
+        "operating_income_forecast": op_income_hat,
+        "eps_forecast": eps_hat, "consensus_eps": cons_eps,
     }
 
 
