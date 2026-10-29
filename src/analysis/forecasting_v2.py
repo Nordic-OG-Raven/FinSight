@@ -196,7 +196,7 @@ def backtest(db, ticker, components, min_train=6) -> dict:
         for m, pred in preds.items():
             if pred is None:
                 continue
-            errs[m].append((pred - actual) / actual)
+            errs[m].append((actual - pred) / pred)   # signed rel. error: actual = pred*(1+err)
             apes[m].append(abs(pred - actual) / abs(actual))
     out = {}
     for m in MODELS:
@@ -250,7 +250,7 @@ def guidance_model(db, ticker) -> Optional[dict]:
         beat = float(np.median([p[3] for p in pairs[:i]]))
         pred, act = pairs[i][1] * (1 + beat), pairs[i][2]
         apes.append(abs(pred - act) / act)
-        resid.append((pred - act) / act)
+        resid.append((act - pred) / pred)   # signed rel. error: actual = pred*(1+err)
     beat = float(np.median([p[3] for p in pairs]))
     return {
         "n": len(apes),
@@ -263,12 +263,16 @@ def guidance_model(db, ticker) -> Optional[dict]:
 
 
 def _empirical_interval(point: float, resid: np.ndarray, level=0.80):
-    """Prediction interval from the empirical distribution of walk-forward % residuals."""
+    """Prediction interval from the empirical SPREAD of walk-forward % residuals, centered on the
+    point. Residuals are de-meaned (by their median) so the interval always brackets the reported
+    point and expresses dispersion; any systematic bias is a calibration question surfaced by the
+    track record, not folded into the interval."""
     if point is None or len(resid) < 3:
         return None
+    spread = np.asarray(resid, dtype=float) - float(np.median(resid))
     lo_q, hi_q = (1 - level) / 2, 1 - (1 - level) / 2
-    lo = point * (1 + np.quantile(resid, lo_q))
-    hi = point * (1 + np.quantile(resid, hi_q))
+    lo = point * (1 + float(np.quantile(spread, lo_q)))
+    hi = point * (1 + float(np.quantile(spread, hi_q)))
     return (float(min(lo, hi)), float(max(lo, hi)))
 
 
@@ -325,8 +329,10 @@ def forecast_next(db, ticker, components, regime="seasonal", min_train=6, use_gu
         "best_model_mape": bt[best_model]["mape"] if best_model else None,
         "best_model_forecast": preds.get(best_model),
         "ensemble": ensemble,
-        "interval_80": _empirical_interval(ensemble, resid, 0.80),
-        "interval_90": _empirical_interval(ensemble, resid, 0.90),
+        # center the interval on the point we actually report (best model, else ensemble) using that
+        # model's residuals, so the interval always brackets the headline forecast
+        "interval_80": _empirical_interval(preds.get(best_model) or ensemble, resid, 0.80),
+        "interval_90": _empirical_interval(preds.get(best_model) or ensemble, resid, 0.90),
     }
 
 
