@@ -213,53 +213,12 @@ def health():
 
 @app.route('/api/init-db', methods=['POST'])
 def init_database():
-    """Initialize database tables - one-time setup endpoint"""
-    try:
-        from sqlalchemy import create_engine, text
-        engine = create_engine(DATABASE_URL)
-        
-        with engine.connect() as conn:
-            # Create financial_facts table
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS financial_facts (
-                    id SERIAL PRIMARY KEY,
-                    company VARCHAR(10) NOT NULL,
-                    concept VARCHAR(500) NOT NULL,
-                    normalized_label VARCHAR(500),
-                    value NUMERIC,
-                    unit VARCHAR(50),
-                    period_start DATE,
-                    period_end DATE,
-                    fiscal_year_end DATE,
-                    instant_date DATE,
-                    context_id VARCHAR(500),
-                    decimals INTEGER,
-                    taxonomy VARCHAR(100),
-                    filing_type VARCHAR(10),
-                    filing_date DATE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    CONSTRAINT unique_fact UNIQUE (company, concept, context_id, period_end)
-                )
-            """))
-            
-            # Create indexes
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_company ON financial_facts(company)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_fiscal_year ON financial_facts(fiscal_year_end)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_normalized_label ON financial_facts(normalized_label)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_company_year ON financial_facts(company, fiscal_year_end)"))
-            
-            conn.commit()
-            
-            return jsonify({
-                "status": "success",
-                "message": "Database tables created successfully"
-            })
-            
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
+    """DEPRECATED. Schema is owned by the dbt medallion warehouse (bronze/silver/gold on Neon);
+    there is no app-managed table to create."""
+    return jsonify({
+        "error": "gone",
+        "message": "Schema is managed by the dbt medallion warehouse; this endpoint is retired.",
+    }), 410
 
 @app.route('/api/populate-statements', methods=['POST'])
 def populate_statements():
@@ -900,105 +859,12 @@ def get_financial_statements(ticker, year):
 
 @app.route('/api/admin/migrate-schema', methods=['POST'])
 def migrate_schema():
-    """Admin endpoint to run database schema migration"""
-    auth_key = request.headers.get('X-Admin-Key')
-    if auth_key != os.getenv('ADMIN_KEY', 'change-me-in-production'):
-        return jsonify({"error": "Unauthorized"}), 401
-    
-    try:
-        from sqlalchemy import create_engine, text
-        engine = create_engine(DATABASE_URL)
-        
-        migration_sql = """
-        -- Add hierarchy_level if missing
-        DO $$ 
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns 
-                WHERE table_name = 'dim_concepts' 
-                AND column_name = 'hierarchy_level'
-            ) THEN
-                ALTER TABLE dim_concepts ADD COLUMN hierarchy_level INTEGER;
-            END IF;
-        END $$;
-        
-        -- Add parent_concept_id if missing
-        DO $$ 
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns 
-                WHERE table_name = 'dim_concepts' 
-                AND column_name = 'parent_concept_id'
-            ) THEN
-                ALTER TABLE dim_concepts ADD COLUMN parent_concept_id INTEGER REFERENCES dim_concepts(concept_id) ON DELETE SET NULL;
-            END IF;
-        END $$;
-        
-        -- Add is_calculated if missing
-        DO $$ 
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns 
-                WHERE table_name = 'dim_concepts' 
-                AND column_name = 'is_calculated'
-            ) THEN
-                ALTER TABLE dim_concepts ADD COLUMN is_calculated BOOLEAN DEFAULT FALSE;
-            END IF;
-        END $$;
-        
-        -- Add calculation_weight if missing
-        DO $$ 
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns 
-                WHERE table_name = 'dim_concepts' 
-                AND column_name = 'calculation_weight'
-            ) THEN
-                ALTER TABLE dim_concepts ADD COLUMN calculation_weight DECIMAL(10,4) DEFAULT 1.0;
-            END IF;
-        END $$;
-        
-        -- Add statement_type if missing
-        DO $$ 
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns 
-                WHERE table_name = 'dim_concepts' 
-                AND column_name = 'statement_type'
-            ) THEN
-                ALTER TABLE dim_concepts ADD COLUMN statement_type VARCHAR(50);
-            END IF;
-        END $$;
-        
-        CREATE INDEX IF NOT EXISTS idx_concepts_hierarchy_level ON dim_concepts(hierarchy_level);
-        CREATE INDEX IF NOT EXISTS idx_concepts_parent ON dim_concepts(parent_concept_id);
-        CREATE INDEX IF NOT EXISTS idx_concepts_statement ON dim_concepts(statement_type);
-        """
-        
-        with engine.begin() as conn:  # Use begin() for autocommit
-            conn.execute(text(migration_sql))
-            
-            # Verify columns
-            verify_query = text("""
-                SELECT column_name, data_type 
-                FROM information_schema.columns
-                WHERE table_name = 'dim_concepts'
-                ORDER BY ordinal_position
-            """)
-            result = conn.execute(verify_query)
-            columns = [{"name": row[0], "type": row[1]} for row in result]
-            
-            return jsonify({
-                "success": True,
-                "message": "Schema migration completed",
-                "columns": columns
-            })
-            
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
+    """DEPRECATED. The legacy star-schema migrations it ran are retired; schema is now owned by
+    the dbt medallion warehouse (bronze/silver/gold on Neon)."""
+    return jsonify({
+        "error": "gone",
+        "message": "Legacy schema migrations are retired; schema is managed by dbt.",
+    }), 410
 
 @app.route('/api/admin/load-companies', methods=['POST'])
 def admin_load_companies():
