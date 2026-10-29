@@ -287,6 +287,92 @@ def forecast_next(db, ticker, components, regime="seasonal", min_train=6, use_gu
     }
 
 
+def _beat_pairs(db, ticker, guid):
+    """[(given_date, guided_revenue, next_quarter_actual, beat)] — for the guidance-beat model."""
+    from sqlalchemy import create_engine, text
+    eng = create_engine(db)
+    with eng.connect() as conn:
+        rows = conn.execute(text(
+            "SELECT quarter_end, revenue_usd FROM gold.earnings "
+            "WHERE ticker=:t AND revenue_usd IS NOT NULL ORDER BY quarter_end"
+        ), {"t": ticker.upper()}).fetchall()
+    acts = [(r[0].date() if hasattr(r[0], "date") else r[0], float(r[1])) for r in rows]
+    out = []
+    for g in guid:
+        nxt = [v for qe, v in acts if qe > g.given_date]
+        if nxt:
+            a = min(nxt)
+            out.append((g.given_date, g.guided_revenue, a, a / g.guided_revenue - 1))
+    return out
+
+
+def _revenue_asof(db, ticker, as_of, method, guid=None, beat_pairs=None):
+    """Point-in-time next-quarter revenue forecast by the ticker's method."""
+    from src.analysis import guidance as gd
+    if method == "guidance":
+        g = gd.guidance_asof(guid, as_of)
+        prior = [b for (d, _gv, _a, b) in beat_pairs if d < as_of]
+        if g is None or len(prior) < 2:
+            return None
+        return g.guided_revenue * (1 + float(np.median(prior)))
+    pts = pit.series_asof(db, ticker, "revenue", as_of)
+    if len(pts) < 6:
+        return None
+    last = pts[-1]
+    t_qn = {1: 2, 2: 3, 3: 1}[last.quarter_num]
+    t_fy = last.fiscal_year + (1 if last.quarter_num == 3 else 0)
+    return log_trend_seasonal(pts, t_fy, t_qn) or trend_seasonal(pts, t_fy, t_qn)
+
+
+def eps_vs_consensus(db, ticker, method, min_prior_beats=2) -> dict:
+    """Backtest OUR EPS error vs the analyst-consensus EPS error over the same quarters.
+
+    Our EPS = point-in-time revenue x net-margin / current diluted shares (net income is
+    split-immune; using current shares keeps us on the same split-adjusted basis as the
+    consensus/reported EPS). Leakage-safe: each quarter forecast as-of the day before its print.
+    """
+    from datetime import timedelta
+
+    import yfinance as yf
+
+    from src.analysis import guidance as gd
+
+    ed = yf.Ticker(ticker).get_earnings_dates(limit=14)
+    if ed is None:
+        return {"n": 0}
+    guid = gd.guidance_history(ticker) if method == "guidance" else None
+    beat_pairs = _beat_pairs(db, ticker, guid) if method == "guidance" else None
+
+    sh = pit.latest_series(db, ticker, "weighted_average_shares_diluted")
+    cur_shares = sh[-1].value if sh else None
+    if not cur_shares:
+        return {"n": 0}
+
+    ours, cons, detail = [], [], []
+    for dt, row in ed.iterrows():
+        reported, est = row.get("Reported EPS"), row.get("EPS Estimate")
+        if reported is None or est is None or np.isnan(reported) or np.isnan(est):
+            continue
+        as_of = dt.date() - timedelta(days=1)
+        rev = _revenue_asof(db, ticker, as_of, method, guid, beat_pairs)
+        if rev is None:
+            continue
+        nm_pts = _ratio_points(db, ticker, "net_income", as_of)
+        if len(nm_pts) < 4:
+            continue
+        eps_ours = rev * recent_mean(nm_pts, None, None) / cur_shares
+        a_ours, a_cons = abs(eps_ours - reported) / abs(reported), abs(est - reported) / abs(reported)
+        ours.append(a_ours)
+        cons.append(a_cons)
+        detail.append((str(dt.date()), round(eps_ours, 2), float(est), float(reported)))
+    return {
+        "n": len(ours),
+        "our_eps_mape": float(np.mean(ours) * 100) if ours else None,
+        "consensus_eps_mape": float(np.mean(cons) * 100) if cons else None,
+        "detail": detail,
+    }
+
+
 _FAR = None  # set lazily to pit.date(2100,1,1)
 
 
