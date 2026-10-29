@@ -50,11 +50,18 @@ _SEED = Path(__file__).resolve().parent.parent.parent / "dbt" / "seeds" / "segme
 
 
 def _segment_members() -> dict[tuple[str, str], list[str]]:
-    """{(ticker, segment): [member, ...]} from the segment_members seed (the forecasting vocab)."""
+    """{(ticker, segment): [member, ...]} from the segment_members seed (the forecasting vocab).
+
+    Tolerant of a missing seed: the API image (which imports this module only to read the ledger)
+    ships without dbt/seeds, and segment roll-ups aren't needed there. Returns {} if absent rather
+    than failing at import."""
     out: dict[tuple[str, str], list[str]] = defaultdict(list)
-    with _SEED.open() as fh:
-        for r in csv.DictReader(fh):
-            out[(r["ticker"], r["segment"])].append(r["member"])
+    try:
+        with _SEED.open() as fh:
+            for r in csv.DictReader(fh):
+                out[(r["ticker"], r["segment"])].append(r["member"])
+    except FileNotFoundError:
+        pass
     return dict(out)
 
 
