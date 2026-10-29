@@ -1,4 +1,12 @@
-{{ config(materialized='view') }}
+{{ config(
+    materialized='table',
+    post_hook="create index if not exists idx_vfh_ticker_year on {{ this }} (ticker, fiscal_year) where not is_dimensioned"
+) }}
+
+-- Materialized as a TABLE (not a view): the axis_name/member_name columns below run correlated jsonb
+-- subqueries per row, which made the serving view ~30s/query and timed out the API (/api/analyze,
+-- /api/metrics, /api/data, /api/financials). As a table the jsonb work is done once at build time and
+-- the API reads are index scans. Refreshed by the weekly dbt build.
 
 -- Richer denormalized serving view (reproduces legacy public.v_facts_hierarchical + the columns
 -- the API joined dim_xbrl_dimensions for). Includes BOTH consolidated and dimensional facts, with
