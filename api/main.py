@@ -981,6 +981,23 @@ def get_ratios(ticker):
         return jsonify({"error": "server_error", "message": str(e)}), 500
 
 
+@app.route('/api/forecast/<ticker>', methods=['GET'])
+def get_forecast(ticker):
+    """Next-quarter earnings forecast + live track record for a company, read from the forecast
+    ledger (leakage-safe, logged before each print). Returns the current pending forecast(s),
+    graded history, and running accuracy vs analyst consensus. Pure read — no backtest."""
+    try:
+        from src.analysis.forecast_log import read_forecast
+        data = read_forecast(DATABASE_URL, ticker)
+        if not data["pending"] and not data["history"]:
+            return jsonify({"error": "not_found",
+                            "message": f"No forecast for {ticker.upper()}. Tracked: "
+                                       "NVDA, AMZN, AVGO, MSFT, GOOGL, AAPL, JPM."}), 404
+        return jsonify(data)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": "server_error", "message": str(e)}), 500
+
+
 @app.route('/api/peers', methods=['GET'])
 def get_peers():
     """Latest-year peer comparison across all loaded companies: headline USD figures + key

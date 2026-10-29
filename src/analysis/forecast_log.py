@@ -86,6 +86,56 @@ def _conn():
     return conn
 
 
+def read_forecast(db=DATABASE_URL, ticker=None) -> dict:
+    """Serve the ledger for one ticker — current pending forecast(s), graded history, and running
+    accuracy (us vs consensus). Pure read (no backtest / no network), fast enough for an API."""
+    ticker = (ticker or "").upper()
+    cfg = LEDGER.get(ticker)
+    conn = psycopg2.connect(direct_dsn())
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT target_fiscal_year, target_quarter, metric, forecast, interval_lo,
+                       interval_hi, model, consensus, actual, actual_reported_at,
+                       our_ape, consensus_ape, graded_at
+                FROM forecasts.forecast_log WHERE ticker=%s
+                ORDER BY metric, target_fiscal_year, target_quarter""", (ticker,))
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    pending, history, acc = [], [], {}
+    for (fy, q, metric, forecast, lo, hi, model, consensus, actual,
+         reported_at, our_ape, cons_ape, graded_at) in rows:
+        rec = {"fiscal_year": fy, "quarter": q, "metric": metric,
+               "forecast": forecast, "consensus": consensus, "model": model}
+        if graded_at is None:
+            if lo is not None and hi is not None:
+                rec["interval_80"] = [lo, hi]
+            pending.append(rec)
+        else:
+            rec.update(actual=actual, our_ape=our_ape, consensus_ape=cons_ape,
+                       reported_at=reported_at.isoformat() if reported_at else None)
+            history.append(rec)
+            a = acc.setdefault(metric, {"our_apes": [], "cons_apes": []})
+            if our_ape is not None:
+                a["our_apes"].append(our_ape)
+            if cons_ape is not None:
+                a["cons_apes"].append(cons_ape)
+
+    accuracy = {}
+    for metric, a in acc.items():
+        o, c = a["our_apes"], a["cons_apes"]
+        accuracy[metric] = {
+            "our_mape": round(sum(o) / len(o) * 100, 1) if o else None,
+            "consensus_mape": round(sum(c) / len(c) * 100, 1) if c else None,
+            "n": len(o),
+        }
+    return {"ticker": ticker, "tracked": cfg is not None,
+            "logs_eps": bool(cfg and cfg.get("eps")),
+            "pending": pending, "history": history, "accuracy": accuracy}
+
+
 def _revenue_consensus(ticker):
     try:
         re = fv.yf_revenue_estimate(ticker)
