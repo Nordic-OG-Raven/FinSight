@@ -1,0 +1,10 @@
+ticker,member,segment,segment_label,structure
+NVDA,nvda:ComputeAndNetworkingSegmentMember,compute_and_networking,Compute & Networking,current
+NVDA,nvda:ComputeAndNetworkingMember,compute_and_networking,Compute & Networking,legacy
+NVDA,nvda:GraphicsSegmentMember,graphics,Graphics,current
+NVDA,nvda:GraphicsMember,graphics,Graphics,legacy
+MSFT,msft:ProductivityAndBusinessProcessesMember,productivity_and_business_processes,Productivity & Business Processes,classic
+MSFT,msft:IntelligentCloudMember,intelligent_cloud,Intelligent Cloud,classic
+MSFT,msft:MorePersonalComputingMember,more_personal_computing,More Personal Computing,classic
+MSFT,msft:AgentsAndInfraMember,agents_and_infra,Agents & Infra,realigned
+MSFT,msft:DevicesAndConsumerMember,devices_and_consumer,Devices & Consumer,realigned
