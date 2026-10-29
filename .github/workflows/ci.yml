@@ -1,0 +1,90 @@
+name: CI
+
+# Test on every push/PR against an EPHEMERAL Neon branch (never touches production data),
+# then deploy to Fly only from main after tests pass.
+
+on:
+  push:
+    branches: [main, master, medallion-cutover]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NEON_PROJECT_ID: muddy-truth-56443165
+
+jobs:
+  test:
+    name: dbt build + pytest (ephemeral Neon branch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Create ephemeral Neon branch
+        id: neon
+        uses: neondatabase/create-branch-action@v5
+        with:
+          project_id: ${{ env.NEON_PROJECT_ID }}
+          branch_name: ci-${{ github.run_id }}
+          api_key: ${{ secrets.NEON_API_KEY }}
+
+      - name: dbt deps + build (models + data tests)
+        env:
+          DATABASE_URL: ${{ steps.neon.outputs.db_url }}
+        run: |
+          chmod +x dbt/run_dbt.sh
+          ./dbt/run_dbt.sh deps
+          ./dbt/run_dbt.sh build
+
+      - name: dbt source freshness
+        env:
+          DATABASE_URL: ${{ steps.neon.outputs.db_url }}
+        run: ./dbt/run_dbt.sh source freshness
+
+      - name: pytest
+        env:
+          DATABASE_URL: ${{ steps.neon.outputs.db_url }}
+        run: pytest -q
+
+      - name: dbt docs generate
+        env:
+          DATABASE_URL: ${{ steps.neon.outputs.db_url }}
+        run: ./dbt/run_dbt.sh docs generate
+
+      - name: Upload dbt docs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-docs
+          path: dbt/target/
+          if-no-files-found: ignore
+
+      - name: Delete ephemeral Neon branch
+        if: always()
+        uses: neondatabase/delete-branch-action@v3
+        with:
+          project_id: ${{ env.NEON_PROJECT_ID }}
+          branch: ci-${{ github.run_id }}
+          api_key: ${{ secrets.NEON_API_KEY }}
+
+  deploy:
+    name: Deploy to Fly
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency: deploy-group
+    steps:
+      - uses: actions/checkout@v4
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+      - run: flyctl deploy --remote-only
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
