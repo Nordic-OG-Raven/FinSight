@@ -1,0 +1,40 @@
+version: 2
+
+models:
+  - name: company_financials
+    description: Annual canonical lines per company/year, USD + native. Serving mart.
+    columns:
+      - name: ticker
+        tests: [not_null]
+      - name: canonical_label
+        tests: [not_null]
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [ticker, fiscal_year, canonical_label]
+
+  - name: ratios
+    description: Annual financial ratios in USD (SQL port of src/analysis/ratios).
+    columns:
+      - name: ticker
+        tests: [not_null]
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [ticker, fiscal_year]
+
+  - name: peers
+    description: Latest-year cross-company snapshot, revenue-sorted (reproduces /api/peers).
+    columns:
+      - name: ticker
+        tests: [not_null, unique]
+
+  - name: company_quarterly
+    description: Quarterly series per company (USD); Q1-Q3 reported, Q4 derived (FY - sum(Q1..Q3)).
+
+  - name: earnings
+    description: Forecasting-ready quarterly earnings, wide, with a monotonic quarter_index.
+    columns:
+      - name: quarter_index
+        tests: [not_null]
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [ticker, fiscal_year, quarter_num]

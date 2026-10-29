@@ -141,6 +141,40 @@ class EdgarToolsExtractor:
                 break
         if filing is None:
             raise ValueError(f"No annual report ({'/'.join(forms)}) found for {ticker}")
+        return self._result_from_filing(company, ticker, filing, filing_type)
+
+    def extract_filings(self, ticker: str, forms=("10-Q",), limit: int = 8) -> list[ExtractionResult]:
+        """Extract up to `limit` most-recent filings per form (newest first) for `ticker`.
+
+        This is the multi-filing path that builds quarterly history (10-Q) for the forecasting
+        marts; it also works to pull annual back-history. A filing whose XBRL fails to parse is
+        skipped with a note rather than aborting the whole run."""
+        company = edgar.Company(ticker)
+        results: list[ExtractionResult] = []
+        for form in forms:
+            try:
+                filings = company.get_filings(form=form)
+            except Exception as e:  # noqa: BLE001 — surface and continue
+                print(f"  [extract_filings] {ticker} {form}: no filings ({e})")
+                continue
+            chosen = filings.latest(limit) if hasattr(filings, "latest") else list(filings)[:limit]
+            if chosen is None:
+                continue
+            # .latest(1) returns a single Filing; .latest(n>1) a Filings collection — normalize.
+            if hasattr(chosen, "xbrl"):
+                chosen = [chosen]
+            else:
+                chosen = list(chosen)
+            for filing in chosen:
+                acc = getattr(filing, "accession_no", "?")
+                try:
+                    results.append(self._result_from_filing(company, ticker, filing, form))
+                except Exception as e:  # noqa: BLE001 — one bad filing shouldn't kill the batch
+                    print(f"  [extract_filings] skip {ticker} {form} {acc}: {e}")
+        return results
+
+    def _result_from_filing(self, company, ticker, filing, form_hint=None) -> ExtractionResult:
+        """Turn one edgartools Filing into an ExtractionResult (the XBRL -> facts seam)."""
         xb = filing.xbrl()
         df = xb.facts.to_dataframe()
         std_map = _standard_concept_map(xb)  # {raw concept -> edgartools standard concept}
@@ -190,7 +224,7 @@ class EdgarToolsExtractor:
         )
         fmeta = FilingMeta(
             accession=getattr(filing, "accession_no", ""),
-            form=getattr(filing, "form", filing_type),
+            form=getattr(filing, "form", form_hint),
             filing_date=_as_date(getattr(filing, "filing_date", None)),
             # Authoritative fiscal-year-end = dei:DocumentPeriodEndDate (edgartools'
             # period_of_report). Do NOT derive it from max(period_end) — forward-looking

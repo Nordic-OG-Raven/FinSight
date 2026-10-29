@@ -1,0 +1,18 @@
+# Credentials are injected as env vars by ./run_dbt.sh (parsed from ../.env, DIRECT endpoint).
+# Nothing secret lives in this file.
+finsight:
+  target: prod
+  outputs:
+    prod:
+      type: postgres
+      host: "{{ env_var('DBT_PG_HOST') }}"
+      port: "{{ env_var('DBT_PG_PORT') | as_number }}"
+      user: "{{ env_var('DBT_PG_USER') }}"
+      password: "{{ env_var('DBT_PG_PASSWORD') }}"
+      dbname: "{{ env_var('DBT_PG_DBNAME') }}"
+      # Default/target schema = gold; silver & seeds override via +schema in dbt_project.yml.
+      schema: gold
+      sslmode: require
+      threads: 4
+      keepalives_idle: 0
+      connect_timeout: 20
