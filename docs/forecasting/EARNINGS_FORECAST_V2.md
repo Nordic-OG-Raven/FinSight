@@ -20,6 +20,20 @@ with less information, and be honestly calibrated.
 | NVDA | FY2027 Q3 | guidance_beat | 0.7% | $113.6B | 61% | $69.9B | 2.88 | 2.47 |
 | MSFT | FY2027 Q2 | log_trend_seasonal | 2.1% | $95.7B | 40% | $38.5B | 5.17 | 4.82 |
 
+## Us vs consensus — EPS accuracy over the same quarters (leakage-safe)
+
+The metric that matters: our EPS error vs the analyst-consensus EPS error on the *same* historical
+quarters, each forecast using only data filed before its print.
+
+| Ticker | Our EPS MAPE | Consensus EPS MAPE | Quarters |
+| --- | --- | --- | --- |
+| NVDA | 4.9% | 5.4% | 3 |
+| MSFT | 3.3% | 7.1% | 7 |
+
+We match/beat consensus on both — largely because **consensus is systematically biased low**
+(these companies beat estimates most quarters; analysts sandbag) and our model forecasts the
+unbiased trend. An honest, explainable edge, not superior fundamental insight. Small samples.
+
 ## Per-company detail
 
 ### NVDA — growth regime → FY2027 Q3
