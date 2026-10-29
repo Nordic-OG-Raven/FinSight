@@ -1,4 +1,4 @@
-{{ config(materialized='table') }}
+{{ config(materialized='view') }}
 
 -- Annual financial ratios in USD, a SQL port of src/analysis/ratios.compute_ratios so the
 -- serving layer is self-contained in the warehouse (the Python module can read this mart

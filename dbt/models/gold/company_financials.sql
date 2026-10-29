@@ -1,4 +1,4 @@
-{{ config(materialized='table') }}
+{{ config(materialized='view') }}
 
 -- Annual serving mart: one row per (company, fiscal year, canonical line) in USD and native.
 -- Mirrors how src/analysis/ratios.load_metrics reads the warehouse (undimensioned core lines,

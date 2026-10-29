@@ -52,6 +52,7 @@ select
     standard_label,
     case when canon_rank = 1 and is_dimensioned = false then canonical_candidate end as canonical_label,
     value_numeric,
+    value_text,
     currency,
     value_usd,
     fx_unconvertible,
