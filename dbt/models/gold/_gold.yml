@@ -13,8 +13,6 @@ models:
       /api/metrics, /api/data, /api/analyze, /api/financials.
   - name: companies
     description: Company/filing metadata for /api/companies (one row per annual filing).
-  - name: company_quarterly
-    description: Quarterly series per company (USD); Q1-Q3 reported, Q4 derived (FY - sum(Q1..Q3)).
   - name: company_financials
     description: Annual canonical lines per company/year, USD + native. Serving mart.
     columns:
