@@ -17,6 +17,19 @@ models:
     columns:
       - name: ticker
         tests: [not_null]
+      - name: revenue_usd
+        description: Revenue in USD; must be non-negative.
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              config: {where: "revenue_usd is not null"}
+      - name: net_margin
+        description: Net margin as a fraction; sanity band well beyond any real value.
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: -5
+              max_value: 5
+              config: {where: "net_margin is not null"}
     tests:
       - dbt_utils.unique_combination_of_columns:
           combination_of_columns: [ticker, fiscal_year]

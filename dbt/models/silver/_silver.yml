@@ -8,6 +8,11 @@ sources:
       no conformance. Both annual (10-K/20-F) and quarterly (10-Q) filings.
     tables:
       - name: raw_filings
+        description: One row per landed filing. Freshness-checked (weekly ingestion cadence).
+        loaded_at_field: loaded_at
+        freshness:
+          warn_after: {count: 8, period: day}
+          error_after: {count: 30, period: day}
       - name: raw_facts
       - name: corporate_actions
         description: Stock splits (yfinance), used to split-adjust per-share metrics in gold.
