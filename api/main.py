@@ -23,7 +23,6 @@ from contextlib import contextmanager
 # Add parent directory to path to import from src/
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.main import run_pipeline
 from src.utils.concept_label_mapping import get_humanized_label
 from config import DATABASE_URL, NP2SQL_DATABASE_URL, NP2SQL_QUERY_TIMEOUT, NP2SQL_MAX_ROWS
 
@@ -433,47 +432,53 @@ def analyze_custom():
                 "contact": "jonas.haahr@aol.com"
             }), 507
     
-    # Check if already exists in DB
+    # Check if already present in the warehouse (gold serving view, medallion)
     try:
         from sqlalchemy import create_engine, text
         engine = create_engine(DATABASE_URL)
-        
         with engine.connect() as conn:
-            check_query = text("""
-                SELECT COUNT(*) as count
-                FROM financial_facts
-                WHERE company = :ticker AND EXTRACT(YEAR FROM fiscal_year_end) = :year
-            """)
-            result = conn.execute(check_query, {"ticker": ticker, "year": year})
-            count = result.fetchone()[0]
-            
-            if count > 0:
-                # Already processed, return existing data
-                return analyze_preloaded(ticker, year)
-    except:
+            exists = conn.execute(text(
+                "SELECT 1 FROM gold.v_facts_hierarchical WHERE ticker = :t AND fiscal_year = :y LIMIT 1"
+            ), {"t": ticker, "y": year}).fetchone()
+        if exists:
+            return analyze_preloaded(ticker, year)
+    except Exception:
         pass
-    
-    # Run full ETL pipeline with timeout
+
+    # Land the ticker into the medallion BRONZE layer (latest annual + recent quarters) plus its
+    # stock splits. Serving is view-based (silver/gold are views over bronze), so the data is
+    # queryable through gold immediately — no dbt run per request. The materialized forecasting
+    # marts (earnings/company_quarterly) pick it up on the next scheduled dbt build.
     try:
-        print(f"Starting ETL pipeline for {ticker} {year}...")
-        
+        print(f"Landing {ticker} into the medallion bronze layer...")
         with timeout(600):  # 10 minute max
-            # Run pipeline from src/main.py
-            success = run_pipeline(ticker=ticker, year=year)
-            
-            if not success:
-                return jsonify({
-                    "error": "pipeline_failed",
-                    "message": f"Failed to process {ticker} {year}. Filing may not exist or be in unsupported format."
-                }), 500
-        
+            from src.ingestion.bronze import ingest as bronze_ingest
+            from src.ingestion.corporate_actions import ingest as ca_ingest
+            bronze_ingest([ticker], quarters=4)
+            try:
+                ca_ingest([ticker])
+            except Exception as e:  # noqa: BLE001 — splits are best-effort
+                print(f"corporate-actions skip for {ticker}: {e}")
+
+        # Confirm something landed for the requested year
+        engine = create_engine(DATABASE_URL)
+        with engine.connect() as conn:
+            landed = conn.execute(text(
+                "SELECT 1 FROM gold.v_facts_hierarchical WHERE ticker = :t LIMIT 1"
+            ), {"t": ticker}).fetchone()
+        if not landed:
+            return jsonify({
+                "error": "pipeline_failed",
+                "message": f"Failed to process {ticker}. Filing may not exist or be in an unsupported format."
+            }), 500
+
         # Increment quota (only on success)
         if ticker not in TEST_TICKERS:
             increment_quota()
-        
+
         # Return processed data
         return analyze_preloaded(ticker, year)
-        
+
     except TimeoutError:
         return jsonify({
             "error": "timeout",
@@ -1006,27 +1011,24 @@ def admin_load_companies():
     data = request.json
     companies = data.get('companies', [])
     
+    from src.ingestion.bronze import ingest as bronze_ingest
+    from src.ingestion.corporate_actions import ingest as ca_ingest
+
     results = []
     for company_data in companies:
         ticker = company_data.get('ticker', '').upper()
         year = company_data.get('year')
-        filing_type = company_data.get('filing_type', '10-K')
-        
         try:
-            success = run_pipeline(ticker=ticker, year=year, filing_type=filing_type)
-            results.append({
-                "ticker": ticker,
-                "year": year,
-                "success": success
-            })
+            # Land into the medallion bronze layer (annual + quarters); serving views pick it up.
+            bronze_ingest([ticker])
+            try:
+                ca_ingest([ticker])
+            except Exception as e:  # noqa: BLE001 — splits are best-effort
+                print(f"corporate-actions skip for {ticker}: {e}")
+            results.append({"ticker": ticker, "year": year, "success": True})
         except Exception as e:
-            results.append({
-                "ticker": ticker,
-                "year": year,
-                "success": False,
-                "error": str(e)
-            })
-    
+            results.append({"ticker": ticker, "year": year, "success": False, "error": str(e)})
+
     return jsonify({"results": results})
 
 
