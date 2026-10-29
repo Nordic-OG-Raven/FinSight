@@ -1,33 +1,30 @@
-# Fly.io config for the FinSight Flask API.
-# Deploy:
-#   fly launch --no-deploy        # first time (creates the app; keep this toml)
-#   fly secrets set DATABASE_URL="<neon pooled url>" GROQ_API_KEY="<groq key>"
-#   fly deploy
-# The DB connection and LLM key are SECRETS (set via `fly secrets`), never in this file.
+# fly.toml app configuration file generated for finsight-api-verdant-log-1735 on 2026-10-18T20:56:37+02:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
 
-app = "finsight-api"
-primary_region = "fra"   # Frankfurt — closest to Neon's eu-central-1
+app = 'finsight-api-verdant-log-1735'
+primary_region = 'fra'
 
 [build]
-
 [env]
-  PORT = "8080"
-  ENVIRONMENT = "production"
+  ENVIRONMENT = 'production'
+  PORT = '8080'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = true
+  auto_stop_machines = 'stop'
   auto_start_machines = true
-  min_machines_running = 0   # scale to zero when idle (free-tier friendly)
+  min_machines_running = 0
 
   [[http_service.checks]]
-    method = "GET"
-    path = "/health"
-    interval = "30s"
-    timeout = "5s"
-    grace_period = "20s"
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '20s'
+    method = 'GET'
+    path = '/health'
 
 [[vm]]
-  size = "shared-cpu-1x"
-  memory = "512mb"
+  size = 'shared-cpu-1x'
+  memory = '512mb'

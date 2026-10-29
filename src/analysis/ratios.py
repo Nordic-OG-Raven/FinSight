@@ -62,17 +62,13 @@ def load_metrics(database_url: str, ticker: Optional[str] = None) -> dict:
     Uses value_usd so figures are comparable across currencies; falls back to value_numeric if
     value_usd is null. Undimensioned facts only; annual durations and instants."""
     engine = create_engine(database_url)
+    # Gold serving mart (medallion): one USD value per (ticker, fiscal_year, canonical line).
     sql = """
-        SELECT c.ticker, f.fiscal_year, f.normalized_label,
-               COALESCE(f.value_usd, f.value_numeric) AS val
-        FROM fact_financial_metrics f
-        JOIN dim_companies c ON c.company_id = f.company_id
-        JOIN dim_time_periods dt ON dt.period_id = f.period_id
-        WHERE f.dimension_id IS NULL
-          AND f.normalized_label = ANY(:labels)
-          AND f.value_numeric IS NOT NULL
-          AND (dt.period_type = 'instant' OR (dt.end_date - dt.start_date) BETWEEN 330 AND 380)
-    """ + (" AND c.ticker = :ticker" if ticker else "")
+        SELECT ticker, fiscal_year, canonical_label AS normalized_label,
+               COALESCE(value_usd, value_native) AS val
+        FROM gold.company_financials
+        WHERE canonical_label = ANY(:labels)
+    """ + (" AND ticker = :ticker" if ticker else "")
     params = {"labels": METRIC_LABELS}
     if ticker:
         params["ticker"] = ticker.upper()

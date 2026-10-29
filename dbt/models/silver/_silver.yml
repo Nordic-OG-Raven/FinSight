@@ -1,0 +1,57 @@
+version: 2
+
+sources:
+  - name: bronze
+    schema: bronze
+    description: >
+      Raw edgartools XBRL facts as landed by src/ingestion/bronze.py — the as-ingested truth,
+      no conformance. Both annual (10-K/20-F) and quarterly (10-Q) filings.
+    tables:
+      - name: raw_filings
+        description: One row per landed filing. Freshness-checked (weekly ingestion cadence).
+        loaded_at_field: loaded_at
+        freshness:
+          warn_after: {count: 8, period: day}
+          error_after: {count: 30, period: day}
+      - name: raw_facts
+      - name: corporate_actions
+        description: Stock splits (yfinance), used to split-adjust per-share metrics in gold.
+
+models:
+  - name: stg_facts
+    description: >
+      Conformed bronze facts: typed, filing form/as-of attached, reporting currency derived,
+      USD value computed via the fx_rates seed, and core lines tagged with a canonical-label
+      candidate (+ priority) via the canonical_labels seed.
+    columns:
+      - name: ticker
+        tests: [not_null]
+      - name: period_type
+        tests:
+          - accepted_values: {values: ['duration', 'instant']}
+
+  - name: fct_financial_facts
+    description: >
+      One conformed row per economic fact. Deduped across filings (the same quarter/year recurs
+      as comparatives in multiple filings) to the most-recently-filed source, and the canonical
+      label resolved to the single highest-priority undimensioned concept per (company, period)
+      so core lines reconcile 1:1.
+    columns:
+      - name: ticker
+        tests: [not_null]
+      - name: canonical_label
+        description: Canonical cross-taxonomy label for core lines; NULL for the long tail.
+      - name: value_usd
+        description: USD-normalized value (native passes through; FX via ECB seed rates).
+    tests:
+      # Reconciliation guarantee: a canonical line resolves to exactly one fact per company+period.
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - ticker
+            - canonical_label
+            - period_type
+            - period_start
+            - period_end
+            - instant_date
+          config:
+            where: "canonical_label is not null"

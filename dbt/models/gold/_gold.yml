@@ -1,0 +1,65 @@
+version: 2
+
+models:
+  - name: v_facts_consolidated
+    description: >
+      Serving view (reproduces the legacy public.v_facts_consolidated shape): consolidated
+      (non-segment) facts across annual + quarterly grains. period_grain distinguishes
+      annual/quarter/instant(year-end)/quarter_instant. Consumed by NP2SQL.
+  - name: v_facts_hierarchical
+    description: >
+      Rich denormalized serving view: all facts (consolidated + dimensional) with dimension
+      axis/member embedded (no join needed) and period_grain. Consumed by
+      /api/metrics, /api/data, /api/analyze, /api/financials.
+  - name: companies
+    description: Company/filing metadata for /api/companies (one row per annual filing).
+  - name: company_financials
+    description: Annual canonical lines per company/year, USD + native. Serving mart.
+    columns:
+      - name: ticker
+        tests: [not_null]
+      - name: canonical_label
+        tests: [not_null]
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [ticker, fiscal_year, canonical_label]
+
+  - name: ratios
+    description: Annual financial ratios in USD (SQL port of src/analysis/ratios).
+    columns:
+      - name: ticker
+        tests: [not_null]
+      - name: revenue_usd
+        description: Revenue in USD; must be non-negative.
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: 0
+              config: {where: "revenue_usd is not null"}
+      - name: net_margin
+        description: Net margin as a fraction; sanity band well beyond any real value.
+        tests:
+          - dbt_utils.accepted_range:
+              min_value: -5
+              max_value: 5
+              config: {where: "net_margin is not null"}
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [ticker, fiscal_year]
+
+  - name: peers
+    description: Latest-year cross-company snapshot, revenue-sorted (reproduces /api/peers).
+    columns:
+      - name: ticker
+        tests: [not_null, unique]
+
+  - name: company_quarterly
+    description: Quarterly series per company (USD); Q1-Q3 reported, Q4 derived (FY - sum(Q1..Q3)).
+
+  - name: earnings
+    description: Forecasting-ready quarterly earnings, wide, with a monotonic quarter_index.
+    columns:
+      - name: quarter_index
+        tests: [not_null]
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: [ticker, fiscal_year, quarter_num]

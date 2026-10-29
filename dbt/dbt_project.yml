@@ -1,0 +1,34 @@
+name: 'finsight'
+version: '1.0.0'
+config-version: 2
+
+# Connection comes from profiles.yml in this same dir (run via ./run_dbt.sh, which
+# sets DBT_PROFILES_DIR here and injects the Neon DIRECT-endpoint credentials from ../.env).
+profile: 'finsight'
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+analysis-paths: ["analyses"]
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+# Medallion layering. Bronze is landed by the Python extractor (declared as a dbt source,
+# not built here); dbt owns silver (conform/clean) and gold (serving marts).
+#   silver -> views   (cheap, always-fresh conformance over bronze)
+#   gold   -> tables  (materialized marts the API/analytics read)
+models:
+  finsight:
+    silver:
+      +schema: silver
+      +materialized: view
+    gold:
+      +schema: gold
+      +materialized: table
+
+seeds:
+  finsight:
+    +schema: seeds

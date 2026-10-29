@@ -49,3 +49,10 @@ sec-edgar-downloader>=5.0.0
 # NP2SQL (Natural Language to SQL)
 openai>=1.0.0
 
+
+# Medallion transforms (silver/gold) run on dbt against Neon Postgres.
+dbt-postgres>=1.8,<1.10
+
+# Phase 3 forecasting: quarterly earnings models + analyst-consensus benchmark.
+scikit-learn>=1.4
+yfinance>=0.2.40

@@ -11,6 +11,36 @@ marked below so this file reflects what is actually true today.
 
 ---
 
+## Medallion warehouse (bronze / silver / gold on dbt + Neon)
+
+The warehouse is organized as an explicit medallion, with **dbt** owning the SQL transforms on
+**Neon** Postgres (project `muddy-truth-56443165`). Lives in [`dbt/`](dbt/); run via
+`dbt/run_dbt.sh` (parses the Neon DIRECT endpoint from `.env`).
+
+- ✅ **Bronze — raw landing.** `src/ingestion/bronze.py` lands XBRL facts exactly as edgartools
+  yields them (`bronze.raw_facts` / `bronze.raw_filings`) for annual **10-K/20-F** and quarterly
+  **10-Q** filings, idempotent per accession; `src/ingestion/corporate_actions.py` lands stock
+  splits (`bronze.corporate_actions`, yfinance).
+- ✅ **Silver — conform/clean.** dbt views (`stg_facts`, `fct_financial_facts`): type-cast, USD
+  normalization (ECB `fx_rates` seed), canonical labels (`canonical_labels` seed, priority-
+  resolved so a line reconciles 1:1 — dbt-tested), cross-filing dedup to the most-recent source,
+  and a **reliably derived fiscal year** (from period-end + each filer's FYE month — fixed a real
+  NVDA mis-attribution that edgartools' per-filing tag got wrong).
+- ✅ **Gold — serving marts.** dbt tables: `company_financials`, `ratios`, `peers` (reproduce the
+  REST API surface — verified against the live endpoints, and *more* current than the legacy
+  load), plus `company_quarterly` and `earnings` (quarterly series with derived Q4 and
+  split-adjusted EPS) that power forecasting. 30 dbt tests pass.
+- ✅ **Cutover complete.** The live Flask API reads the gold layer for every DB-backed endpoint
+  (companies / analyze / financials / metrics / data / ratios / peers / NP2SQL), verified live;
+  on-demand custom ingest lands into bronze. The legacy `public` star schema was **dropped** (a
+  pre-cutover backup is in `database/backup_public_preCutover_*.csv.gz`) and the legacy loader /
+  schema / migrations removed. One pipeline, one source of truth.
+
+> The earlier single-layer Kimball star schema (`public`, loaded by the retired
+> `database/load_from_edgartools.py`) was replaced by this medallion in the 2026-10 cutover.
+
+---
+
 ## Phase 1 — Deterministic quantitative extraction (the MVP)
 
 ### Resolved by the re-architecture
@@ -69,7 +99,7 @@ marked below so this file reflects what is actually true today.
 - ✅ **Dead-code sweep.** Removed the retired Arelle-path Python modules — the custom parser /
   downloader, old loader, statement/hierarchy population utils, the heuristic validator stack,
   the old data viewer, and their tests (59 files, computed as everything outside the live import
-  closure of the edgartools entrypoints). Live imports, the test suite (15 passing), and an
+  closure of the edgartools entrypoints). Live imports, the test suite (30 passing), and an
   end-to-end load all verified after removal.
 
 ### NP2SQL (PRD §15 — marked delivered)
@@ -105,10 +135,30 @@ marked below so this file reflects what is actually true today.
   don't carry (a future market-data integration).*
 - ☐ **Standardized visualization / dashboard templates** (Superset) and automated insight
   generation (YoY growth, peer comparison).
-- ☐ **ML on the normalized facts** — anomaly/outlier detection, time-series forecasting
-  (ARIMA/Prophet), margin-trend detection; later, a finance-tuned extraction model.
+- ◐ **ML on the normalized facts** — **quarterly earnings forecasting shipped.**
+  `src/analysis/forecasting.py` forecasts next-quarter revenue / diluted EPS from the gold
+  quarterly series (`gold.earnings`) with three transparent, seasonality-aware models
+  (seasonal-naive, OLS trend+seasonal, gradient-boosted lags) + an inverse-MAPE ensemble, walk-
+  forward backtested per company, and benchmarked against analyst consensus + actuals from
+  Yahoo Finance. Write-up: [`docs/forecasting/EARNINGS_FORECAST.md`](docs/forecasting/EARNINGS_FORECAST.md)
+  (e.g. Apple FQ4-FY2026 EPS ensemble $2.03 vs consensus $1.98). Tested in
+  `tests/test_forecasting.py`. The run also surfaced a real data-quality finding — stock splits
+  (AVGO/NVDA 10:1, 2024) and one-time items distort the short EPS history, so EPS forecasts are
+  gated by their own backtest reliability while **revenue** (unaffected) forecasts cleanly.
+  The split half was then **fixed**: splits are landed as raw corporate actions in
+  `bronze.corporate_actions` (yfinance) and gold computes a split-adjusted EPS
+  (`gold.earnings.eps_diluted_adj`) on a current-share basis — backtest error fell sharply
+  (AVGO 148%→30%, NVDA 38%→20%). *Still open: anomaly/outlier detection; non-GAAP/one-time-item
+  normalization for EPS (the reported figure is correct but unrepresentative — not in the XBRL);
+  longer history.*
 - ☐ **GraphQL API**; webhook notifications for new filings.
-- ☐ **Re-host** the API + database and restore a live demo (earlier Railway/Azure deployment
-  retired — see `docs/archive/deployment-history/`); wire up and verify the Next.js frontend
-  against it.
+- ✅ **Re-host** the API + database and restore a live demo (earlier Railway/Azure deployment
+  retired — see `docs/archive/deployment-history/`). The Flask API is deployed on **Fly.io**
+  (`finsight-api-verdant-log-1735.fly.dev`, scale-to-zero) against a managed **Neon** Postgres
+  warehouse (project `muddy-truth-56443165`, branch `production`) with the 8-filer reference set
+  loaded; `/health`, `/api/companies|financials|statements|ratios|peers|analyze|metrics|data|quota|query`
+  all verified live. The Next.js frontend consumes it via a server-side proxy
+  (`app/api/finsight/route.ts`) that defaults to the Fly URL (override with
+  `NEXT_PUBLIC_FINSIGHT_API`); every endpoint the dashboard calls was verified end-to-end.
+  *Optional polish left: a custom domain instead of the generated `*.fly.dev` host.*
 - ☐ **Multi-language** EU/Asian filings; ESEF handling once ESAP provides unified access.

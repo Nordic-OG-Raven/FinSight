@@ -11,6 +11,8 @@ retired in the edgartools re-architecture — see docs/REARCHITECTURE.md.
 import os
 import sys
 import json
+import re
+import math
 from datetime import datetime
 from pathlib import Path
 from flask import Flask, jsonify, request
@@ -21,7 +23,6 @@ from contextlib import contextmanager
 # Add parent directory to path to import from src/
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.main import run_pipeline
 from src.utils.concept_label_mapping import get_humanized_label
 from config import DATABASE_URL, NP2SQL_DATABASE_URL, NP2SQL_QUERY_TIMEOUT, NP2SQL_MAX_ROWS
 
@@ -63,19 +64,15 @@ def get_preloaded_companies_from_db():
         
         with engine.connect() as conn:
             # Query for companies, years, and quarters
+            # Gold serving view (medallion). One row per annual filing per company.
             query = text("""
-                SELECT DISTINCT
-                    c.ticker,
-                    EXTRACT(YEAR FROM f.fiscal_year_end)::INTEGER as year,
-                    tp.fiscal_quarter,
-                    f.filing_type,
-                    f.reporting_frequency
-                FROM fact_financial_metrics fm
-                JOIN dim_companies c ON fm.company_id = c.company_id
-                JOIN dim_filings f ON fm.filing_id = f.filing_id
-                LEFT JOIN dim_time_periods tp ON fm.period_id = tp.period_id
-                WHERE fm.dimension_id IS NULL
-                ORDER BY c.ticker, year DESC, tp.fiscal_quarter NULLS LAST
+                SELECT ticker,
+                       fiscal_year AS year,
+                       fiscal_quarter,
+                       filing_type,
+                       reporting_frequency
+                FROM gold.companies
+                ORDER BY ticker, year DESC, fiscal_quarter NULLS LAST
             """)
             
             result = conn.execute(query)
@@ -216,53 +213,12 @@ def health():
 
 @app.route('/api/init-db', methods=['POST'])
 def init_database():
-    """Initialize database tables - one-time setup endpoint"""
-    try:
-        from sqlalchemy import create_engine, text
-        engine = create_engine(DATABASE_URL)
-        
-        with engine.connect() as conn:
-            # Create financial_facts table
-            conn.execute(text("""
-                CREATE TABLE IF NOT EXISTS financial_facts (
-                    id SERIAL PRIMARY KEY,
-                    company VARCHAR(10) NOT NULL,
-                    concept VARCHAR(500) NOT NULL,
-                    normalized_label VARCHAR(500),
-                    value NUMERIC,
-                    unit VARCHAR(50),
-                    period_start DATE,
-                    period_end DATE,
-                    fiscal_year_end DATE,
-                    instant_date DATE,
-                    context_id VARCHAR(500),
-                    decimals INTEGER,
-                    taxonomy VARCHAR(100),
-                    filing_type VARCHAR(10),
-                    filing_date DATE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    CONSTRAINT unique_fact UNIQUE (company, concept, context_id, period_end)
-                )
-            """))
-            
-            # Create indexes
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_company ON financial_facts(company)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_fiscal_year ON financial_facts(fiscal_year_end)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_normalized_label ON financial_facts(normalized_label)"))
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_company_year ON financial_facts(company, fiscal_year_end)"))
-            
-            conn.commit()
-            
-            return jsonify({
-                "status": "success",
-                "message": "Database tables created successfully"
-            })
-            
-    except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
+    """DEPRECATED. Schema is owned by the dbt medallion warehouse (bronze/silver/gold on Neon);
+    there is no app-managed table to create."""
+    return jsonify({
+        "error": "gone",
+        "message": "Schema is managed by the dbt medallion warehouse; this endpoint is retired.",
+    }), 410
 
 @app.route('/api/populate-statements', methods=['POST'])
 def populate_statements():
@@ -315,104 +271,47 @@ def analyze_preloaded(ticker, year):
         engine = create_engine(DATABASE_URL)
         
         with engine.connect() as conn:
-            # Check if data exists
+            # Existence check (gold serving view, medallion)
             query = text("""
                 SELECT COUNT(*) as count
-                FROM fact_financial_metrics fm
-                JOIN dim_companies c ON fm.company_id = c.company_id
-                JOIN dim_filings f ON fm.filing_id = f.filing_id
-                WHERE c.ticker = :ticker 
-                  AND EXTRACT(YEAR FROM f.fiscal_year_end) = :year
+                FROM gold.v_facts_hierarchical
+                WHERE ticker = :ticker AND fiscal_year = :year AND is_dimensioned = false
             """)
             result = conn.execute(query, {"ticker": ticker, "year": year})
             count = result.fetchone()[0]
-            
+
             if count == 0:
                 return jsonify({
                     "error": "not_found",
                     "message": f"No data for {ticker} {year}. Try custom analysis or select a pre-loaded company."
                 }), 404
-            
-            # Fetch ALL metrics (not just hardcoded 9)
-            # Use COALESCE to handle both duration (end_date) and instant (instant_date) periods
-            # Check if hierarchy_level column exists (handle schema migration gracefully)
-            try:
-                check_col = text("SELECT hierarchy_level FROM dim_concepts LIMIT 1")
-                conn.execute(check_col)
-                has_hierarchy = True
-            except:
-                has_hierarchy = False
-            
-            if has_hierarchy:
-                metrics_query = text("""
-                    SELECT 
-                        co.normalized_label, 
-                        fm.value_numeric as value,
-                        fm.unit_measure as unit,
-                        COALESCE(p.end_date, p.instant_date) as period_end,
-                        p.period_type,
-                        co.statement_type,
-                        co.hierarchy_level
-                    FROM fact_financial_metrics fm
-                    JOIN dim_companies c ON fm.company_id = c.company_id
-                    JOIN dim_concepts co ON fm.concept_id = co.concept_id
-                    JOIN dim_time_periods p ON fm.period_id = p.period_id
-                    JOIN dim_filings f ON fm.filing_id = f.filing_id
-                    LEFT JOIN rel_presentation_hierarchy ph ON 
-                        ph.filing_id = f.filing_id 
-                        AND ph.child_concept_id = co.concept_id
-                        AND ph.parent_concept_id IS NOT DISTINCT FROM co.parent_concept_id
-                    WHERE c.ticker = :ticker 
-                      AND EXTRACT(YEAR FROM f.fiscal_year_end) = :year
-                      AND fm.dimension_id IS NULL
-                      AND fm.value_numeric IS NOT NULL
-                    ORDER BY 
-                        CASE 
-                            WHEN co.statement_type IS NULL THEN 4
-                            WHEN co.statement_type = 'income_statement' THEN 1
-                            WHEN co.statement_type = 'balance_sheet' THEN 2
-                            WHEN co.statement_type = 'cash_flow' THEN 3
-                            ELSE 4
-                        END,
-                        -- Two-tier ordering: XBRL first, then standard templates
-                        CASE 
-                            WHEN ph.source = 'xbrl' THEN 1
-                            WHEN ph.source = 'standard' THEN 2
-                            ELSE 3
-                        END,
-                        COALESCE(ph.order_index, 999999),
-                        COALESCE(co.hierarchy_level, 0) DESC,
-                        co.normalized_label
-                """)
-            else:
-                # Fallback for older schema without hierarchy_level
-                metrics_query = text("""
-                    SELECT 
-                        co.normalized_label, 
-                        fm.value_numeric as value,
-                        fm.unit_measure as unit,
-                        COALESCE(p.end_date, p.instant_date) as period_end,
-                        p.period_type,
-                        co.statement_type,
-                        NULL as hierarchy_level
-                    FROM fact_financial_metrics fm
-                    JOIN dim_companies c ON fm.company_id = c.company_id
-                    JOIN dim_concepts co ON fm.concept_id = co.concept_id
-                    JOIN dim_time_periods p ON fm.period_id = p.period_id
-                    JOIN dim_filings f ON fm.filing_id = f.filing_id
-                    WHERE c.ticker = :ticker 
-                      AND EXTRACT(YEAR FROM f.fiscal_year_end) = :year
-                      AND fm.dimension_id IS NULL
-                      AND fm.value_numeric IS NOT NULL
-                    ORDER BY 
-                        CASE WHEN co.statement_type = 'income_statement' THEN 1
-                             WHEN co.statement_type = 'balance_sheet' THEN 2
-                             WHEN co.statement_type = 'cash_flow' THEN 3
-                             ELSE 4
-                        END,
-                        co.normalized_label
-                """)
-            
+
+            # Annual snapshot: undimensioned, annual durations + fiscal-year-end instants.
+            # (hierarchy_level is retired/NULL; statement_type drives the ordering.)
+            metrics_query = text("""
+                SELECT normalized_label,
+                       value_numeric            as value,
+                       unit_measure             as unit,
+                       COALESCE(end_date, instant_date) as period_end,
+                       period_type,
+                       statement_type,
+                       hierarchy_level
+                FROM gold.v_facts_hierarchical
+                WHERE ticker = :ticker
+                  AND fiscal_year = :year
+                  AND is_dimensioned = false
+                  AND value_numeric IS NOT NULL
+                  AND period_grain IN ('annual', 'instant')
+                ORDER BY
+                    CASE statement_type
+                        WHEN 'income_statement' THEN 1
+                        WHEN 'balance_sheet' THEN 2
+                        WHEN 'cash_flow' THEN 3
+                        ELSE 4
+                    END,
+                    normalized_label
+            """)
+
             metrics_result = conn.execute(metrics_query, {"ticker": ticker, "year": year})
             
             metrics = {}
@@ -492,47 +391,53 @@ def analyze_custom():
                 "contact": "jonas.haahr@aol.com"
             }), 507
     
-    # Check if already exists in DB
+    # Check if already present in the warehouse (gold serving view, medallion)
     try:
         from sqlalchemy import create_engine, text
         engine = create_engine(DATABASE_URL)
-        
         with engine.connect() as conn:
-            check_query = text("""
-                SELECT COUNT(*) as count
-                FROM financial_facts
-                WHERE company = :ticker AND EXTRACT(YEAR FROM fiscal_year_end) = :year
-            """)
-            result = conn.execute(check_query, {"ticker": ticker, "year": year})
-            count = result.fetchone()[0]
-            
-            if count > 0:
-                # Already processed, return existing data
-                return analyze_preloaded(ticker, year)
-    except:
+            exists = conn.execute(text(
+                "SELECT 1 FROM gold.v_facts_hierarchical WHERE ticker = :t AND fiscal_year = :y LIMIT 1"
+            ), {"t": ticker, "y": year}).fetchone()
+        if exists:
+            return analyze_preloaded(ticker, year)
+    except Exception:
         pass
-    
-    # Run full ETL pipeline with timeout
+
+    # Land the ticker into the medallion BRONZE layer (latest annual + recent quarters) plus its
+    # stock splits. Serving is view-based (silver/gold are views over bronze), so the data is
+    # queryable through gold immediately — no dbt run per request. The materialized forecasting
+    # marts (earnings/company_quarterly) pick it up on the next scheduled dbt build.
     try:
-        print(f"Starting ETL pipeline for {ticker} {year}...")
-        
+        print(f"Landing {ticker} into the medallion bronze layer...")
         with timeout(600):  # 10 minute max
-            # Run pipeline from src/main.py
-            success = run_pipeline(ticker=ticker, year=year)
-            
-            if not success:
-                return jsonify({
-                    "error": "pipeline_failed",
-                    "message": f"Failed to process {ticker} {year}. Filing may not exist or be in unsupported format."
-                }), 500
-        
+            from src.ingestion.bronze import ingest as bronze_ingest
+            from src.ingestion.corporate_actions import ingest as ca_ingest
+            bronze_ingest([ticker], quarters=4)
+            try:
+                ca_ingest([ticker])
+            except Exception as e:  # noqa: BLE001 — splits are best-effort
+                print(f"corporate-actions skip for {ticker}: {e}")
+
+        # Confirm something landed for the requested year
+        engine = create_engine(DATABASE_URL)
+        with engine.connect() as conn:
+            landed = conn.execute(text(
+                "SELECT 1 FROM gold.v_facts_hierarchical WHERE ticker = :t LIMIT 1"
+            ), {"t": ticker}).fetchone()
+        if not landed:
+            return jsonify({
+                "error": "pipeline_failed",
+                "message": f"Failed to process {ticker}. Filing may not exist or be in an unsupported format."
+            }), 500
+
         # Increment quota (only on success)
         if ticker not in TEST_TICKERS:
             increment_quota()
-        
+
         # Return processed data
         return analyze_preloaded(ticker, year)
-        
+
     except TimeoutError:
         return jsonify({
             "error": "timeout",
@@ -679,38 +584,15 @@ def get_available_metrics():
         engine = create_engine(DATABASE_URL)
         
         with engine.begin() as conn:  # Use begin() for proper transaction handling
-            # Check if view exists (use separate connection to avoid transaction issues)
-            try:
-                test_engine = create_engine(DATABASE_URL)
-                with test_engine.connect() as test_conn:
-                    test_query = text("SELECT 1 FROM v_facts_hierarchical LIMIT 1")
-                    test_conn.execute(test_query)
-                use_view = True
-                test_engine.dispose()
-            except:
-                use_view = False
-            
-            if use_view:
-                query_str = """
-                    SELECT DISTINCT f.normalized_label
-                    FROM v_facts_hierarchical f
-                    WHERE 1=1
-                """
-                ticker_col = "f.ticker"
-                year_col = "f.fiscal_year"
-            else:
-                query_str = """
-                    SELECT DISTINCT co.normalized_label
-                    FROM fact_financial_metrics f
-                    JOIN dim_companies c ON f.company_id = c.company_id
-                    JOIN dim_concepts co ON f.concept_id = co.concept_id
-                    JOIN dim_time_periods t ON f.period_id = t.period_id
-                    JOIN dim_filings fi ON f.filing_id = fi.filing_id
-                    WHERE 1=1
-                """
-                ticker_col = "c.ticker"
-                year_col = "EXTRACT(YEAR FROM fi.fiscal_year_end)"
-            
+            # Gold serving view (medallion).
+            query_str = """
+                SELECT DISTINCT COALESCE(f.standard_label, f.normalized_label) AS normalized_label
+                FROM gold.v_facts_hierarchical f
+                WHERE 1=1
+            """
+            ticker_col = "f.ticker"
+            year_col = "f.fiscal_year"
+
             params = {}
             
             if companies:
@@ -762,106 +644,41 @@ def get_data():
         engine = create_engine(DATABASE_URL)
         
         with engine.begin() as conn:  # Use begin() for proper transaction handling
-            # Build query string
-            if show_all_concepts:
-                # Raw table query
-                query_str = """
-                    SELECT 
-                        c.ticker as company,
-                        co.concept_name as concept,
-                        co.normalized_label,
-                        t.fiscal_year,
-                        f.value_numeric,
-                        f.value_text,
-                        f.unit_measure,
-                        d.axis_name,
-                        d.member_name,
-                        CASE WHEN f.dimension_id IS NULL THEN 'Total' ELSE 'Segment' END as data_type,
-                        t.period_label,
-                        t.end_date as period_end
-                    FROM fact_financial_metrics f
-                    JOIN dim_companies c ON f.company_id = c.company_id
-                    JOIN dim_concepts co ON f.concept_id = co.concept_id
-                    JOIN dim_time_periods t ON f.period_id = t.period_id
-                    LEFT JOIN dim_xbrl_dimensions d ON f.dimension_id = d.dimension_id
-                    WHERE 1=1
-                """
-                company_col = "c.ticker"
-                fiscal_year_col = "t.fiscal_year"
-                normalized_label_col = "co.normalized_label"
-            else:
-                # Try hierarchical view first, fallback to raw table if view doesn't exist
-                # Check if view exists by trying to query it (use separate connection to avoid transaction issues)
-                try:
-                    test_engine = create_engine(DATABASE_URL)
-                    with test_engine.connect() as test_conn:
-                        test_query = text("SELECT 1 FROM v_facts_hierarchical LIMIT 1")
-                        test_conn.execute(test_query)
-                    use_view = True
-                    test_engine.dispose()
-                except:
-                    use_view = False
-                
-                if use_view:
-                    # Hierarchical view (deduplicated)
-                    query_str = """
-                        SELECT 
-                            f.ticker as company,
-                            f.concept_name as concept,
-                            f.normalized_label,
-                            f.fiscal_year,
-                            f.value_numeric,
-                            f.value_text,
-                            f.unit_measure,
-                            f.hierarchy_level,
-                            d.axis_name,
-                            d.member_name,
-                            CASE WHEN f.dimension_id IS NULL THEN 'Total' ELSE 'Segment' END as data_type,
-                            t.period_label,
-                            COALESCE(t.end_date, t.instant_date) as period_end
-                        FROM v_facts_hierarchical f
-                        LEFT JOIN dim_xbrl_dimensions d ON f.dimension_id = d.dimension_id
-                        LEFT JOIN dim_time_periods t ON f.period_id = t.period_id
-                        WHERE 1=1
-                    """
-                    company_col = "f.ticker"
-                    fiscal_year_col = "f.fiscal_year"
-                    normalized_label_col = "f.normalized_label"
-                else:
-                    # Fallback to raw table with hierarchy_level from dim_concepts
-                    query_str = """
-                        SELECT 
-                            c.ticker as company,
-                            co.concept_name as concept,
-                            co.normalized_label,
-                            t.fiscal_year,
-                            f.value_numeric,
-                            f.value_text,
-                            f.unit_measure,
-                            co.hierarchy_level,
-                            d.axis_name,
-                            d.member_name,
-                            CASE WHEN f.dimension_id IS NULL THEN 'Total' ELSE 'Segment' END as data_type,
-                            t.period_label,
-                            COALESCE(t.end_date, t.instant_date) as period_end
-                        FROM fact_financial_metrics f
-                        JOIN dim_companies c ON f.company_id = c.company_id
-                        JOIN dim_concepts co ON f.concept_id = co.concept_id
-                        JOIN dim_time_periods t ON f.period_id = t.period_id
-                        LEFT JOIN dim_xbrl_dimensions d ON f.dimension_id = d.dimension_id
-                        WHERE 1=1
-                    """
-                    company_col = "c.ticker"
-                    fiscal_year_col = "t.fiscal_year"
-                    normalized_label_col = "co.normalized_label"
-            
+            # Gold serving view (medallion) — dimensions embedded, no dim join needed.
+            # normalized_label = edgartools standard concept where available (so different filers'
+            # equivalent line items land on one comparable row), else the raw label. Auditor view
+            # (show_all_concepts) uses the raw normalized_label instead.
+            label_expr = "f.normalized_label" if show_all_concepts else "COALESCE(f.standard_label, f.normalized_label)"
+            query_str = f"""
+                SELECT
+                    f.ticker as company,
+                    f.concept_name as concept,
+                    {label_expr} as normalized_label,
+                    f.fiscal_year,
+                    f.value_numeric,
+                    f.value_text,
+                    f.unit_measure,
+                    f.hierarchy_level,
+                    f.axis_name,
+                    f.member_name,
+                    CASE WHEN f.is_dimensioned THEN 'Segment' ELSE 'Total' END as data_type,
+                    f.period_label,
+                    COALESCE(f.end_date, f.instant_date) as period_end,
+                    f.statement_type
+                FROM gold.v_facts_hierarchical f
+                WHERE 1=1
+            """
+            company_col = "f.ticker"
+            fiscal_year_col = "f.fiscal_year"
+            normalized_label_col = label_expr
+
             params = {}
-            
+
             # Company filter
             if companies:
                 query_str += f" AND {company_col} = ANY(:companies)"
                 params['companies'] = companies
-            
+
             # Year range
             if start_year is not None:
                 query_str += f" AND {fiscal_year_col} >= :start_year"
@@ -869,25 +686,22 @@ def get_data():
             if end_year is not None:
                 query_str += f" AND {fiscal_year_col} <= :end_year"
                 params['end_year'] = end_year
-            
+
             # Concept filter
             if concepts:
                 query_str += f" AND {normalized_label_col} = ANY(:concepts)"
                 params['concepts'] = concepts
-            
-            # Hierarchy level filter (only for hierarchical view)
-            # Only apply if hierarchy_level column exists and has values
-            if not show_all_concepts:
-                if use_view:
-                    query_str += " AND (f.hierarchy_level IS NULL OR f.hierarchy_level >= :min_hierarchy_level)"
-                else:
-                    query_str += " AND (co.hierarchy_level IS NULL OR co.hierarchy_level >= :min_hierarchy_level)"
-                params['min_hierarchy_level'] = min_hierarchy_level
-            
+
+            # Granularity: "universal" (>=3) restricts to concepts edgartools standardizes, i.e.
+            # the rows that are actually comparable across companies (few/no blanks). Lower levels
+            # ("all line items") return everything, including the un-standardized long tail.
+            if not show_all_concepts and min_hierarchy_level >= 3:
+                query_str += " AND f.standard_label IS NOT NULL"
+
             # Segment filter
             if not show_segments:
-                query_str += " AND f.dimension_id IS NULL"
-            
+                query_str += " AND f.is_dimensioned = false"
+
             query_str += " ORDER BY company, fiscal_year, normalized_label"
             
             query = text(query_str)
@@ -911,6 +725,7 @@ def get_data():
                     "data_type": row[10] if len(row) > 10 else None,
                     "period_label": row[11] if len(row) > 11 else None,
                     "period_end": row[12].isoformat() if len(row) > 12 and row[12] else None,
+                    "statement_type": row[13] if len(row) > 13 else None,
                 })
             
             return jsonify({
@@ -925,121 +740,131 @@ def get_data():
             "error": str(e)
         }), 500
 
+_STATEMENTS_CACHE = {}
+_LIAB_EQUITY_HEADER = re.compile(
+    r"(LiabilitiesAndStockholdersEquityAbstract|LiabilitiesAndEquityAbstract|EquityAndLiabilitiesAbstract|EquityAndLiabilities$)")
+
+
+def _stmt_num(v):
+    try:
+        f = float(v)
+        return None if math.isnan(f) else f
+    except (TypeError, ValueError):
+        return None
+
+
+def _stmt_unit(concept, label, currency):
+    c, l = (concept or "").lower(), (label or "").lower()
+    if "pershare" in c or "per share" in l:
+        return f"{currency}/share"
+    if "sharesoutstanding" in c or "in shares" in l or c.endswith("shares"):
+        return "shares"
+    return currency
+
+
+def _stmt_items(df, period_type, currency, balance=False):
+    """Turn an edgartools statement dataframe into the flat StatementItem[] the UI expects:
+    ordered, labelled, level-nested (parent via the level stack), balance-sheet side-split."""
+    df = df[df["dimension"] == False]  # non-dimensional statement lines only  # noqa: E712
+    year_cols = [c for c in df.columns if re.match(r"\d{4}-\d{2}-\d{2}", str(c))]
+    col_year = {c: int(str(c)[:4]) for c in year_cols}
+    items, stack, side = [], [], ("assets" if balance else None)
+    for order, (_, r) in enumerate(df.iterrows()):
+        concept = str(r["concept"])
+        label = r["label"] if isinstance(r["label"], str) else concept
+        lvl = r["level"]
+        level = 0 if (isinstance(lvl, float) and math.isnan(lvl)) else int(lvl)
+        abstract = bool(r["abstract"])
+        if balance and _LIAB_EQUITY_HEADER.search(concept):
+            side = "liabilities_equity"
+        while stack and stack[-1][0] >= level:
+            stack.pop()
+        parent = stack[-1][1] if stack else None
+        stack.append((level, concept))
+        unit = _stmt_unit(concept, label, currency)
+        for c in year_cols:
+            items.append({
+                "normalized_label": concept, "concept_name": concept, "preferred_label": label,
+                "value": None if abstract else _stmt_num(r[c]), "unit": unit,
+                "period_date": str(c), "period_year": col_year[c], "period_type": period_type,
+                "hierarchy_level": level, "parent_normalized_label": parent,
+                "presentation_order_index": order, "presentation_source": "xbrl",
+                "is_header": abstract, "side": side,
+            })
+    return items, sorted(col_year.values(), reverse=True), (max(year_cols) if year_cols else None)
+
+
+def _build_statements(ticker):
+    import edgar
+    from src.extraction.edgartools_adapter import EdgarToolsExtractor  # noqa: F401 (sets identity)
+    EdgarToolsExtractor()  # edgar.set_identity(...)
+    company = edgar.Company(ticker)
+    filing = next((company.latest(f) for f in ("10-K", "20-F", "40-F") if company.latest(f)), None)
+    if filing is None:
+        return None
+    xb = filing.xbrl()
+    # reporting currency = modal 3-letter currency across the filing's facts
+    currency = "USD"
+    try:
+        fdf = xb.facts.to_dataframe()
+        cur = [v for v in fdf.get("currency", []) if isinstance(v, str) and len(v) == 3 and v.isupper()]
+        if cur:
+            currency = max(set(cur), key=cur.count)
+    except Exception:
+        pass
+    specs = [("income_statement", "income_statement", "duration", False),
+             ("comprehensive_income", "comprehensive_income", "duration", False),
+             ("balance_sheet", "balance_sheet", "instant", True),
+             ("cash_flow", "cash_flow_statement", "duration", False)]
+    statements, years, fye = {}, [], None
+    for key, method, ptype, bal in specs:
+        try:
+            df = getattr(xb.statements, method)().to_dataframe()
+            items, yrs, last = _stmt_items(df, ptype, currency, bal)
+            if items:
+                statements[key] = items
+                years = yrs or years
+                if bal and last:
+                    fye = last  # balance-sheet date = fiscal year end
+        except Exception:
+            continue
+    std = "IFRS" if any("ifrs" in i["concept_name"].lower()
+                        for v in statements.values() for i in v) else "US-GAAP"
+    return {
+        "company": getattr(company, "name", ticker), "ticker": ticker,
+        "year": years[0] if years else None, "years": years,
+        "accounting_standard": std, "fiscal_year_end": fye,
+        "statements": statements, "count": sum(len(v) for v in statements.values()),
+        "source": "edgartools",
+    }
+
+
 @app.route('/api/statements/<ticker>/<int:year>', methods=['GET'])
 def get_financial_statements(ticker, year):
-    """DEPRECATED in favour of GET /api/financials/<ticker>, which serves multi-year income /
-    balance / cash-flow statements directly from the star schema. The presentation-linkbase
-    reconstruction this relied on (fact_income_statement / fact_balance_sheet / fact_cash_flow)
-    was retired in the re-architecture — see docs/REARCHITECTURE.md."""
-    return jsonify({
-        "error": "gone",
-        "message": f"/api/statements is retired. Use GET /api/financials/{ticker.upper()} for "
-                   "warehouse-served statements.",
-        "replacement": f"/api/financials/{ticker.upper()}",
-    }), 410
+    """Full income / comprehensive-income / balance-sheet / cash-flow statements for the UI,
+    rendered from edgartools' presentation structure (ordered, labelled, level-nested, with the
+    balance sheet split into assets vs liabilities & equity). Cached per ticker. `year` is
+    accepted for the legacy route but the latest annual filing is used."""
+    ticker = ticker.upper()
+    try:
+        if ticker not in _STATEMENTS_CACHE:
+            built = _build_statements(ticker)
+            if built is None:
+                return jsonify({"error": "not_found", "message": f"No annual report for {ticker}"}), 404
+            _STATEMENTS_CACHE[ticker] = built
+        return jsonify(_STATEMENTS_CACHE[ticker])
+    except Exception as e:
+        return jsonify({"error": "server_error", "message": str(e)}), 500
 
 
 @app.route('/api/admin/migrate-schema', methods=['POST'])
 def migrate_schema():
-    """Admin endpoint to run database schema migration"""
-    auth_key = request.headers.get('X-Admin-Key')
-    if auth_key != os.getenv('ADMIN_KEY', 'change-me-in-production'):
-        return jsonify({"error": "Unauthorized"}), 401
-    
-    try:
-        from sqlalchemy import create_engine, text
-        engine = create_engine(DATABASE_URL)
-        
-        migration_sql = """
-        -- Add hierarchy_level if missing
-        DO $$ 
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns 
-                WHERE table_name = 'dim_concepts' 
-                AND column_name = 'hierarchy_level'
-            ) THEN
-                ALTER TABLE dim_concepts ADD COLUMN hierarchy_level INTEGER;
-            END IF;
-        END $$;
-        
-        -- Add parent_concept_id if missing
-        DO $$ 
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns 
-                WHERE table_name = 'dim_concepts' 
-                AND column_name = 'parent_concept_id'
-            ) THEN
-                ALTER TABLE dim_concepts ADD COLUMN parent_concept_id INTEGER REFERENCES dim_concepts(concept_id) ON DELETE SET NULL;
-            END IF;
-        END $$;
-        
-        -- Add is_calculated if missing
-        DO $$ 
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns 
-                WHERE table_name = 'dim_concepts' 
-                AND column_name = 'is_calculated'
-            ) THEN
-                ALTER TABLE dim_concepts ADD COLUMN is_calculated BOOLEAN DEFAULT FALSE;
-            END IF;
-        END $$;
-        
-        -- Add calculation_weight if missing
-        DO $$ 
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns 
-                WHERE table_name = 'dim_concepts' 
-                AND column_name = 'calculation_weight'
-            ) THEN
-                ALTER TABLE dim_concepts ADD COLUMN calculation_weight DECIMAL(10,4) DEFAULT 1.0;
-            END IF;
-        END $$;
-        
-        -- Add statement_type if missing
-        DO $$ 
-        BEGIN
-            IF NOT EXISTS (
-                SELECT 1 FROM information_schema.columns 
-                WHERE table_name = 'dim_concepts' 
-                AND column_name = 'statement_type'
-            ) THEN
-                ALTER TABLE dim_concepts ADD COLUMN statement_type VARCHAR(50);
-            END IF;
-        END $$;
-        
-        CREATE INDEX IF NOT EXISTS idx_concepts_hierarchy_level ON dim_concepts(hierarchy_level);
-        CREATE INDEX IF NOT EXISTS idx_concepts_parent ON dim_concepts(parent_concept_id);
-        CREATE INDEX IF NOT EXISTS idx_concepts_statement ON dim_concepts(statement_type);
-        """
-        
-        with engine.begin() as conn:  # Use begin() for autocommit
-            conn.execute(text(migration_sql))
-            
-            # Verify columns
-            verify_query = text("""
-                SELECT column_name, data_type 
-                FROM information_schema.columns
-                WHERE table_name = 'dim_concepts'
-                ORDER BY ordinal_position
-            """)
-            result = conn.execute(verify_query)
-            columns = [{"name": row[0], "type": row[1]} for row in result]
-            
-            return jsonify({
-                "success": True,
-                "message": "Schema migration completed",
-                "columns": columns
-            })
-            
-    except Exception as e:
-        return jsonify({
-            "success": False,
-            "error": str(e)
-        }), 500
+    """DEPRECATED. The legacy star-schema migrations it ran are retired; schema is now owned by
+    the dbt medallion warehouse (bronze/silver/gold on Neon)."""
+    return jsonify({
+        "error": "gone",
+        "message": "Legacy schema migrations are retired; schema is managed by dbt.",
+    }), 410
 
 @app.route('/api/admin/load-companies', methods=['POST'])
 def admin_load_companies():
@@ -1052,27 +877,24 @@ def admin_load_companies():
     data = request.json
     companies = data.get('companies', [])
     
+    from src.ingestion.bronze import ingest as bronze_ingest
+    from src.ingestion.corporate_actions import ingest as ca_ingest
+
     results = []
     for company_data in companies:
         ticker = company_data.get('ticker', '').upper()
         year = company_data.get('year')
-        filing_type = company_data.get('filing_type', '10-K')
-        
         try:
-            success = run_pipeline(ticker=ticker, year=year, filing_type=filing_type)
-            results.append({
-                "ticker": ticker,
-                "year": year,
-                "success": success
-            })
+            # Land into the medallion bronze layer (annual + quarters); serving views pick it up.
+            bronze_ingest([ticker])
+            try:
+                ca_ingest([ticker])
+            except Exception as e:  # noqa: BLE001 — splits are best-effort
+                print(f"corporate-actions skip for {ticker}: {e}")
+            results.append({"ticker": ticker, "year": year, "success": True})
         except Exception as e:
-            results.append({
-                "ticker": ticker,
-                "year": year,
-                "success": False,
-                "error": str(e)
-            })
-    
+            results.append({"ticker": ticker, "year": year, "success": False, "error": str(e)})
+
     return jsonify({"results": results})
 
 
@@ -1087,24 +909,22 @@ def get_financials_v2(ticker):
         from sqlalchemy import create_engine, text
         engine = create_engine(DATABASE_URL)
         with engine.connect() as conn:
-            meta = conn.execute(text(
-                "SELECT c.company_name, MAX(f.fiscal_year_end) FROM dim_companies c "
-                "JOIN dim_filings f ON f.company_id=c.company_id WHERE c.ticker=:t GROUP BY c.company_name"
-            ), {"t": ticker}).fetchone()
-            if not meta:
+            meta = conn.execute(text("""
+                SELECT (SELECT company_name FROM gold.companies WHERE ticker=:t LIMIT 1) AS company_name,
+                       MAX(COALESCE(end_date, instant_date)) AS fye
+                FROM gold.v_facts_hierarchical
+                WHERE ticker=:t AND period_grain IN ('annual','instant')
+            """), {"t": ticker}).fetchone()
+            if not meta or meta[0] is None:
                 return jsonify({"error": "not_found", "message": f"No data for {ticker}"}), 404
 
             rows = conn.execute(text("""
-                SELECT dc.statement_type, dc.normalized_label,
-                       COALESCE(dc.preferred_label, dc.concept_name) AS label,
-                       f.fiscal_year, f.value_numeric, f.unit_measure, f.value_usd
-                FROM fact_financial_metrics f
-                JOIN dim_companies c ON c.company_id=f.company_id
-                JOIN dim_concepts dc ON dc.concept_id=f.concept_id
-                JOIN dim_time_periods dt ON dt.period_id=f.period_id
-                WHERE c.ticker=:t AND f.dimension_id IS NULL AND f.value_numeric IS NOT NULL
-                  AND dc.statement_type IN ('income_statement','balance_sheet','cash_flow')
-                  AND (dt.period_type='instant' OR (dt.end_date-dt.start_date) BETWEEN 330 AND 380)
+                SELECT statement_type, normalized_label, preferred_label AS label,
+                       fiscal_year, value_numeric, unit_measure, value_usd
+                FROM gold.v_facts_hierarchical
+                WHERE ticker=:t AND is_dimensioned=false AND value_numeric IS NOT NULL
+                  AND statement_type IN ('income_statement','balance_sheet','cash_flow')
+                  AND period_grain IN ('annual','instant')
             """), {"t": ticker}).fetchall()
 
             all_years = sorted({r[3] for r in rows if r[3]}, reverse=True)[:years_n]
@@ -1122,18 +942,14 @@ def get_financials_v2(ticker):
             statements = {st: sorted(items.values(), key=lambda x: x["label"]) for st, items in stmts.items()}
 
             seg_rows = conn.execute(text("""
-                SELECT f.fiscal_year, d.dimension_json->>'srt_ProductOrServiceAxis' AS member, f.value_numeric
-                FROM fact_financial_metrics f
-                JOIN dim_companies c ON c.company_id=f.company_id
-                JOIN dim_concepts dc ON dc.concept_id=f.concept_id
-                JOIN dim_xbrl_dimensions d ON d.dimension_id=f.dimension_id
-                JOIN dim_time_periods dt ON dt.period_id=f.period_id
-                WHERE c.ticker=:t
-                  AND dc.concept_name IN ('RevenueFromContractWithCustomerExcludingAssessedTax',
-                                          'RevenueFromContractWithCustomerIncludingAssessedTax')
-                  AND d.dimension_json ? 'srt_ProductOrServiceAxis'
-                  AND (SELECT count(*) FROM jsonb_object_keys(d.dimension_json))=1
-                  AND (dt.end_date-dt.start_date) BETWEEN 330 AND 380
+                SELECT fiscal_year, dimension_json->>'srt_ProductOrServiceAxis' AS member, value_numeric
+                FROM gold.v_facts_hierarchical
+                WHERE ticker=:t
+                  AND split_part(concept_name, ':', 2) IN ('RevenueFromContractWithCustomerExcludingAssessedTax',
+                                                           'RevenueFromContractWithCustomerIncludingAssessedTax')
+                  AND dimension_json ? 'srt_ProductOrServiceAxis'
+                  AND (SELECT count(*) FROM jsonb_object_keys(dimension_json))=1
+                  AND period_grain='annual'
             """), {"t": ticker}).fetchall()
             segments = {}
             for fy, member, val in seg_rows:
