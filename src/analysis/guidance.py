@@ -27,7 +27,7 @@ class Guidance:
     guided_revenue: float     # USD, for the NEXT quarter
 
 
-def guidance_history(ticker: str, limit: int = 14,
+def guidance_history(ticker: str, limit: int = 20,
                      identity: str = "Jonas Haahr itsxidey@gmail.com") -> list[Guidance]:
     """Forward revenue guidance from recent earnings 8-Ks, oldest-first. One per earnings release."""
     edgar.set_identity(identity)

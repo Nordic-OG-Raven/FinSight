@@ -83,6 +83,14 @@ def _run(tickers: list[str]) -> None:
     env = _dbt_env()
     subprocess.run(["dbt", "deps"], cwd="/app/dbt", env=env, check=True)
     subprocess.run(["dbt", "build"], cwd="/app/dbt", env=env, check=True)
+
+    print("== forecast ledger: grade reported quarters, log the new forecast ==")
+    try:
+        from src.analysis import forecast_log
+        forecast_log.grade()
+        forecast_log.log_forecasts()
+    except Exception as e:  # noqa: BLE001 — forecasting shouldn't fail the ingestion run
+        print(f"forecast ledger step skipped: {e}")
     print("== DONE ==")
 
 
