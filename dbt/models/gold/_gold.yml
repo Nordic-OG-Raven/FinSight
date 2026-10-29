@@ -1,6 +1,20 @@
 version: 2
 
 models:
+  - name: v_facts_consolidated
+    description: >
+      Serving view (reproduces the legacy public.v_facts_consolidated shape): consolidated
+      (non-segment) facts across annual + quarterly grains. period_grain distinguishes
+      annual/quarter/instant(year-end)/quarter_instant. Consumed by NP2SQL.
+  - name: v_facts_hierarchical
+    description: >
+      Rich denormalized serving view: all facts (consolidated + dimensional) with dimension
+      axis/member embedded (no join needed) and period_grain. Consumed by
+      /api/metrics, /api/data, /api/analyze, /api/financials.
+  - name: companies
+    description: Company/filing metadata for /api/companies (one row per annual filing).
+  - name: company_quarterly
+    description: Quarterly series per company (USD); Q1-Q3 reported, Q4 derived (FY - sum(Q1..Q3)).
   - name: company_financials
     description: Annual canonical lines per company/year, USD + native. Serving mart.
     columns:
