@@ -43,10 +43,10 @@ A REST API serves the result.
 - **Hosted live.** The API runs on Fly.io backed by a managed Neon Postgres warehouse (the
   8-filer reference set is loaded there); a live demo URL is up. Scale-to-zero, so the first
   request after an idle period cold-starts (a few seconds).
-- **Medallion warehouse (dbt).** Alongside the star schema there's an explicit
-  **bronze → silver → gold** pipeline on Neon, with [dbt](https://www.getdbt.com) owning the
-  silver/gold transforms (see [`dbt/`](dbt/) and the Medallion section of [`ROADMAP.md`](ROADMAP.md)).
-  It adds **quarterly (10-Q)** ingestion and fixes a real fiscal-year mis-attribution the naive
+- **Medallion warehouse (dbt).** The warehouse is an explicit **bronze → silver → gold** pipeline
+  on Neon, with [dbt](https://www.getdbt.com) owning the silver/gold transforms (see [`dbt/`](dbt/)
+  and the Medallion section of [`ROADMAP.md`](ROADMAP.md)). It adds **quarterly (10-Q)** ingestion
+  and fixes a real fiscal-year mis-attribution the naive
   path had.
 - **Quarterly earnings forecasting.** Next-quarter revenue / EPS forecast from the gold quarterly
   series, backtested and benchmarked against analyst consensus (Yahoo Finance) — write-up in
@@ -60,54 +60,67 @@ Eight filers across sectors and taxonomies load cleanly and pass the validation 
 
 ## 🏗️ Architecture
 
+A **medallion warehouse** (bronze → silver → gold) on Neon Postgres, with **dbt** owning the
+silver/gold transforms. (This replaced the earlier single-layer star schema in the 2026-10
+cutover — see the Medallion section of [`ROADMAP.md`](ROADMAP.md).)
+
 ```
-SEC EDGAR → edgartools → FactExtractor adapter → slim loader → PostgreSQL star schema → REST API
-            (extraction)   (our seam)             (+ validation gate)        (SQLAlchemy)   (Flask)
+SEC EDGAR ─┐  (Python extractor, edgartools adapter)
+           ├─► bronze.raw_facts / raw_filings    (10-K + 10-Q, raw as-ingested)
+yfinance ──┘  bronze.corporate_actions           (stock splits)
+                      │  dbt
+                      ├─► silver  (views): conform — USD, canonical labels, dedup, fiscal-year derivation
+                      └─► gold:
+                            • views  (serving):   v_facts_consolidated, v_facts_hierarchical, companies,
+                            │                      company_financials, ratios, peers   ← the REST API
+                            • tables (forecasting): company_quarterly, earnings         ← the ML models
 ```
 
 Extraction runs on [edgartools](https://github.com/dgunning/edgartools) (pinned) behind our own
-`FactExtractor` adapter, so the warehouse never depends on the library's internals and the
-extraction layer stays swappable. Rationale and the decision record are in
-[`docs/REARCHITECTURE.md`](docs/REARCHITECTURE.md).
+`FactExtractor` adapter, so the warehouse never depends on the library's internals. Rationale and
+the decision record are in [`docs/REARCHITECTURE.md`](docs/REARCHITECTURE.md).
 
 **Pipeline stages**
 
-1. **Extraction** — `EdgarToolsExtractor` reads the latest annual filing's XBRL into a uniform
-   `ExtractionResult` (facts with raw concepts, periods, units, dimensions).
-2. **Validation** — hard integrity gates + soft warnings; produces the per-filing quality report.
-3. **Load** — slim upsert into the star schema (idempotent; no gap-fill or statement
-   reconstruction — edgartools hands over clean, correctly-periodized facts).
-4. **Serving** — Flask REST API over the warehouse.
+1. **Bronze (land)** — `src/ingestion/bronze.py` + `corporate_actions.py` land raw edgartools facts
+   (annual + quarterly) and yfinance splits, idempotent per accession.
+2. **Silver (conform, dbt)** — USD normalization, canonical labels (priority-resolved so lines
+   reconcile 1:1), cross-filing dedup, reliable fiscal-year derivation, validation tests.
+3. **Gold (serve, dbt)** — serving views the API reads + quarterly/earnings marts the forecasting
+   models read.
+4. **Serving** — Flask REST API over gold; forecasting over `gold.earnings`.
 
 ## 🛠️ Tech stack
 
-Python 3.11 · [edgartools](https://github.com/dgunning/edgartools) (SEC XBRL extraction) ·
-PostgreSQL ([Neon](https://neon.tech) in production) · SQLAlchemy · Flask · Docker · deployed on
-[Fly.io](https://fly.io). A Next.js frontend
-(`Website/portfolio/app/finsight`) consumes the API (point it at the deployed backend via
-`NEXT_PUBLIC_FINSIGHT_API`). *(The earlier Arelle-based custom parser was retired in the 2026-10
-re-architecture; see `docs/REARCHITECTURE.md`.)*
+Python 3.12 · [edgartools](https://github.com/dgunning/edgartools) (SEC XBRL extraction) ·
+[dbt](https://www.getdbt.com) (silver/gold transforms) · PostgreSQL
+([Neon](https://neon.tech)) · SQLAlchemy · Flask · deployed on [Fly.io](https://fly.io) ·
+scikit-learn + yfinance (forecasting). A Next.js frontend (`Website/portfolio/app/finsight`)
+consumes the API (point it at the backend via `NEXT_PUBLIC_FINSIGHT_API`). *(The earlier
+Arelle-based parser and the single-layer star schema were both retired; see
+`docs/REARCHITECTURE.md` and the Medallion section of `ROADMAP.md`.)*
 
-## 📦 Run it locally
+## 📦 Run it
 
 ```bash
-# 1. Docker Desktop running, with a Postgres container named `superset_db`
-#    (DB `finsight`, user/pass superset/superset — see .env / .env.template).
-docker ps | grep superset_db
-
-# 2. Python env (if not already present)
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+# DATABASE_URL (Neon) in .env — the pipeline writes to the DIRECT endpoint, dbt reads it too.
 
-# 3. Extract + validate + load — pick any entrypoint (all run the edgartools path)
-./run_pipeline.sh AVGO                                 # one filer, then start API + smoke-test
-.venv/bin/python src/main.py --ticker NVO --filing-type 20-F   # single filer, CLI
-.venv/bin/python database/load_from_edgartools.py              # the full reference set (batch)
+# 1. Bronze: land raw facts (10-K + 10-Q) + splits
+.venv/bin/python -m src.ingestion.bronze                 # all reference filers (annual + 8 quarters)
+.venv/bin/python -m src.ingestion.corporate_actions      # stock splits
+
+# 2. Silver + gold: build + test the medallion transforms
+./dbt/run_dbt.sh build                                   # dbt run + dbt test
+
+# 3. Serve / analyze
+.venv/bin/python api/main.py                             # Flask API over gold
+.venv/bin/python scripts/forecast_report.py              # earnings forecast write-up
 ```
 
-Each filer prints a `GATE`/`QUAL` line and writes a quality report to `data/quality_reports/`.
-The loader is idempotent — re-running reuses existing filing rows rather than duplicating.
-`--year` is accepted for backward compatibility but ignored; the edgartools path always loads
-the latest annual filing.
+Bronze landing is idempotent per accession (re-running replaces a filing's facts in place, or
+skip already-landed filings with `--only-new`). `dbt build` runs the models + data tests (incl.
+the balance-sheet-identity and canonical-reconciliation checks).
 
 ## 🤝 API endpoints
 

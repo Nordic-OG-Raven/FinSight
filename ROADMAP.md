@@ -30,12 +30,14 @@ The warehouse is organized as an explicit medallion, with **dbt** owning the SQL
   REST API surface — verified against the live endpoints, and *more* current than the legacy
   load), plus `company_quarterly` and `earnings` (quarterly series with derived Q4 and
   split-adjusted EPS) that power forecasting. 30 dbt tests pass.
-- ◐ **Remaining:** cut the live Flask API over to read the gold marts (+ Fly redeploy); retire the
-  legacy inline loader once gold fully supersedes it.
+- ✅ **Cutover complete.** The live Flask API reads the gold layer for every DB-backed endpoint
+  (companies / analyze / financials / metrics / data / ratios / peers / NP2SQL), verified live;
+  on-demand custom ingest lands into bronze. The legacy `public` star schema was **dropped** (a
+  pre-cutover backup is in `database/backup_public_preCutover_*.csv.gz`) and the legacy loader /
+  schema / migrations removed. One pipeline, one source of truth.
 
-> The earlier single-layer Kimball star schema (in `public`, loaded by
-> `database/load_from_edgartools.py`) still backs the live API and is untouched; the medallion was
-> built alongside it in separate schemas so there's no downtime during the cutover.
+> The earlier single-layer Kimball star schema (`public`, loaded by the retired
+> `database/load_from_edgartools.py`) was replaced by this medallion in the 2026-10 cutover.
 
 ---
 
