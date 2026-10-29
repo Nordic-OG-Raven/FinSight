@@ -56,3 +56,5 @@ dbt-postgres>=1.8,<1.10
 # Phase 3 forecasting: quarterly earnings models + analyst-consensus benchmark.
 scikit-learn>=1.4
 yfinance>=0.2.40
+# guidance extraction LLM fallback (only fires when regex misses; key-gated, so optional at runtime)
+anthropic>=0.40

@@ -17,12 +17,34 @@ import csv
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
+from functools import lru_cache
 from math import ceil
 from pathlib import Path
 
 from sqlalchemy import create_engine, text
 
 from src.extraction.canonical_labels import CANONICAL
+
+# One engine (connection pool) per database URL, reused across the thousands of point-in-time reads
+# a backtest makes. Without this, every query called create_engine() afresh and opened a brand-new
+# connection to the remote warehouse (full TCP+TLS+auth, ~100ms each) — the dominant cost of batch
+# backtests. Pooling reuses the connection; it does not change any query or result.
+_ENGINES: dict = {}
+
+
+def _engine(database_url: str):
+    eng = _ENGINES.get(database_url)
+    if eng is None:
+        eng = _ENGINES[database_url] = create_engine(database_url, pool_size=4, max_overflow=4,
+                                                      pool_recycle=300)
+    return eng
+
+
+def clear_caches() -> None:
+    """Drop the point-in-time read caches. Call after an ingest in a long-lived process so fresh
+    filings are picked up (one-shot scripts and the per-run Modal job don't need this)."""
+    series_asof.cache_clear()
+    quarter_report_dates.cache_clear()
 
 _SEED = Path(__file__).resolve().parent.parent.parent / "dbt" / "seeds" / "segment_members.csv"
 
@@ -71,13 +93,19 @@ def _fy_and_quarter(period_end: date, fye_month: int) -> tuple[int, int]:
     return fiscal_year, quarter_num
 
 
+@lru_cache(maxsize=8192)
 def series_asof(database_url: str, ticker: str, metric: str, as_of: date) -> list[Point]:
     """Quarterly series for `metric` as it was known at `as_of`, newest-vintage-wins per quarter.
 
     metric: a canonical label (e.g. 'revenue', 'gross_profit') or 'segment:<name>'
             (e.g. 'segment:compute_and_networking').
+
+    Cached: a backtest reconstructs the same (ticker, metric, as_of) series across several models and
+    across the routing/forecast/scoring passes; the warehouse is static within a run, so caching
+    returns the identical result without re-querying. Callers must treat the returned list as
+    read-only (they do). Call `clear_caches()` after an ingest in a long-lived process.
     """
-    eng = create_engine(database_url)
+    eng = _engine(database_url)
     ticker = ticker.upper()
 
     if metric.startswith("segment:"):
@@ -138,10 +166,12 @@ def latest_series(database_url: str, ticker: str, metric: str) -> list[Point]:
     return series_asof(database_url, ticker, metric, date(2100, 1, 1))
 
 
+@lru_cache(maxsize=256)
 def quarter_report_dates(database_url: str, ticker: str) -> dict[date, date]:
     """{quarter_end: original 10-Q filing date} — when each quarter was first reported. Used to set
-    the backtest cutoff (forecast a quarter using only what was filed before its own 10-Q)."""
-    eng = create_engine(database_url)
+    the backtest cutoff (forecast a quarter using only what was filed before its own 10-Q).
+    Cached (read-only result; static within a run)."""
+    eng = _engine(database_url)
     with eng.connect() as conn:
         rows = conn.execute(text("""
             SELECT period_of_report, min(filing_date) AS first_filed

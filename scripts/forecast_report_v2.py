@@ -1,8 +1,11 @@
 """Generate the forecasting-v2 write-up (docs/forecasting/EARNINGS_FORECAST_V2.md).
 
-Regime-routed, segment-level, leakage-safe next-quarter revenue -> margins -> EPS for MSFT + NVDA,
-benchmarked against analyst consensus. Slow: it runs point-in-time walk-forward backtests + fetches
-guidance from 8-Ks.
+Focused NVDA + MSFT deep-dive (the two reference regimes). The full auto-routed, all-ticker accuracy
+scorecard is docs/forecasting/COVERAGE.md (scripts/forecast_coverage.py).
+
+Regime-routed, segment-level, leakage-safe next-quarter revenue -> margins -> EPS, benchmarked
+against analyst consensus. Slow: it runs point-in-time walk-forward backtests + fetches guidance
+from 8-Ks.
 
     .venv/bin/python scripts/forecast_report_v2.py
 """

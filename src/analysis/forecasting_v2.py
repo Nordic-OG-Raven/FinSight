@@ -17,11 +17,28 @@ intervals are empirical, from the walk-forward residuals.
 from __future__ import annotations
 
 from datetime import timedelta
+from functools import lru_cache
 from typing import Callable, Optional
 
 import numpy as np
 
 from src.analysis import pit
+
+
+# yfinance reads, memoized per run: the same earnings table is otherwise re-fetched many times
+# (once per quarter in the backfill, again in scoring/logging/grading) for identical data. yfinance
+# is slow and throttles, so this is the dominant external cost. Static within a run → output-
+# identical. Short-lived processes (scripts, weekly job) start cold, so grading sees fresh prints.
+@lru_cache(maxsize=256)
+def yf_earnings_dates(ticker: str, limit: int):
+    import yfinance as yf
+    return yf.Ticker(ticker).get_earnings_dates(limit=limit)
+
+
+@lru_cache(maxsize=256)
+def yf_revenue_estimate(ticker: str):
+    import yfinance as yf
+    return yf.Ticker(ticker).revenue_estimate
 
 # --- series shape -----------------------------------------------------------
 
@@ -59,10 +76,16 @@ def _regress(points, t_fy, t_qn, log: bool) -> Optional[float]:
     y, qidx, qn = _arrays(points)
     if len(y) < 5 or (log and np.any(y <= 0)):
         return None
+    # center the quarter index on the first observation: the absolute index is ~8100, which makes
+    # the log-trend exponent huge and the fit ill-conditioned (exp(pred) overflows). Centering is
+    # mathematically equivalent but numerically stable.
+    base = qidx[0]
     Y = np.log(y) if log else y
-    beta, *_ = np.linalg.lstsq(_design(qidx, qn), Y, rcond=None)
-    xt = np.array([1.0, float(t_fy * 4 + t_qn), float(t_qn == 1), float(t_qn == 2)])
+    beta, *_ = np.linalg.lstsq(_design(qidx - base, qn), Y, rcond=None)
+    xt = np.array([1.0, float(t_fy * 4 + t_qn) - base, float(t_qn == 1), float(t_qn == 2)])
     pred = float(xt @ beta)
+    if log and pred > 50.0:          # guard: exp(50) ~ 5e21; a fit extrapolating past this is broken
+        return None
     return float(np.exp(pred)) if log else pred
 
 
@@ -72,6 +95,24 @@ def trend_seasonal(points, t_fy, t_qn):
 
 def log_trend_seasonal(points, t_fy, t_qn):
     return _regress(points, t_fy, t_qn, log=True)
+
+
+def weighted_trend_seasonal(points, t_fy, t_qn, halflife=6.0):
+    """Trend+seasonal fit with exponential RECENCY weights (recent quarters weigh more), so the
+    slope reflects the CURRENT regime rather than the full-history average. Robust where growth has
+    inflected — e.g. a company that grew fast then plateaued: blind linear extrapolation keeps
+    projecting the old slope and overshoots for years (Apple 2023-24), this tracks the flattening.
+    Reduces to the plain trend when growth is steady, so the backtest only adopts it where it wins."""
+    y, qidx, qn = _arrays(points)
+    if len(y) < 5:
+        return None
+    base = qidx[0]
+    w = 0.5 ** ((qidx[-1] - qidx) / halflife)      # 1.0 at the most recent quarter, decaying back
+    rw = np.sqrt(w)
+    beta, *_ = np.linalg.lstsq(_design(qidx - base, qn) * rw[:, None], y * rw, rcond=None)
+    xt = np.array([1.0, float(t_fy * 4 + t_qn) - base, float(t_qn == 1), float(t_qn == 2)])
+    pred = float(xt @ beta)
+    return pred if (np.isfinite(pred) and pred > 0) else None
 
 
 def recent_mean(points, t_fy, t_qn, k=4):
@@ -90,6 +131,7 @@ MODELS: dict[str, Callable] = {
     "seasonal_naive": seasonal_naive,
     "trend_seasonal": trend_seasonal,
     "log_trend_seasonal": log_trend_seasonal,
+    "weighted_trend_seasonal": weighted_trend_seasonal,
 }
 
 # Margins are mean-reverting/sticky, not trending — a linear trend overshoots. Use conservative
@@ -180,14 +222,14 @@ def guidance_model(db, ticker) -> Optional[dict]:
     filings-only models lag. Actuals come from gold.earnings (includes the derived Q4 so every
     guided quarter can be paired). Returns None if the company doesn't give parseable guidance.
     """
-    from sqlalchemy import create_engine, text
+    from sqlalchemy import text
 
     from src.analysis import guidance as gd
 
     hist = gd.guidance_history(ticker)
     if len(hist) < 3:
         return None
-    eng = create_engine(db)
+    eng = pit._engine(db)
     with eng.connect() as conn:
         rows = conn.execute(text(
             "SELECT quarter_end, revenue_usd FROM gold.earnings "
@@ -242,8 +284,9 @@ def forecast_next(db, ticker, components, regime="seasonal", min_train=6, use_gu
         if gm and gm["mape"] is not None:
             bt["guidance_beat"] = gm
             all_models = all_models + ["guidance_beat"]
-    # next target quarter = one after the latest known consolidated quarter
-    latest = pit.latest_series(db, ticker, "revenue")
+    # next target quarter = one after the latest known consolidated Q1-Q3 quarter (discrete Q4 is a
+    # deferred annual derivation; drop any mislabeled Q4 so the Q1->Q2->Q3->(next year)Q1 map holds)
+    latest = [p for p in pit.latest_series(db, ticker, "revenue") if p.quarter_num in (1, 2, 3)]
     if not latest:
         return {"ticker": ticker, "error": "no data"}
     last = latest[-1]
@@ -289,8 +332,8 @@ def forecast_next(db, ticker, components, regime="seasonal", min_train=6, use_gu
 
 def _beat_pairs(db, ticker, guid):
     """[(given_date, guided_revenue, next_quarter_actual, beat)] — for the guidance-beat model."""
-    from sqlalchemy import create_engine, text
-    eng = create_engine(db)
+    from sqlalchemy import text
+    eng = pit._engine(db)
     with eng.connect() as conn:
         rows = conn.execute(text(
             "SELECT quarter_end, revenue_usd FROM gold.earnings "
@@ -306,22 +349,105 @@ def _beat_pairs(db, ticker, guid):
     return out
 
 
-def _revenue_asof(db, ticker, as_of, method, guid=None, beat_pairs=None):
-    """Point-in-time next-quarter revenue forecast by the ticker's method."""
+def realized_backtest(db, ticker, components, method, guid=None, beats=None) -> list:
+    """The SINGLE SOURCE OF TRUTH for "what we forecast vs what happened" — the point-in-time
+    forecasts we would actually have logged and graded, per reported quarter.
+
+    For each reported quarter (gold.earnings, non-derived, Q1-Q3), forecast it as-of the day before
+    its 10-Q using the ticker's routed method, and pair to the reported actual. Both the coverage
+    scorecard and the live-ledger backfill read this, so the two can never disagree. Leakage-safe:
+    the as-of is strictly before the quarter's own filing; the guidance/beat inputs are resolved
+    point-in-time inside `_revenue_asof`.
+
+    Returns [{fy, q, quarter_end, report_date, forecast, actual, ape}], oldest-first.
+    """
+    from sqlalchemy import text
+
+    ticker = ticker.upper()
+    if method == "guidance" and guid is None:
+        from src.analysis import guidance as gd
+        guid = gd.guidance_history(ticker)
+        beats = _beat_pairs(db, ticker, guid)
+    model = best_seasonal_model(db, ticker, components) if method != "guidance" else None
+    reports = pit.quarter_report_dates(db, ticker)
+    with pit._engine(db).connect() as conn:
+        qrows = conn.execute(text(
+            "SELECT fiscal_year, fiscal_period, quarter_end, revenue_usd FROM gold.earnings "
+            "WHERE ticker=:t AND revenue_usd IS NOT NULL AND NOT is_derived ORDER BY quarter_end"
+        ), {"t": ticker}).fetchall()
+    out = []
+    for fy, fp, qe, act in qrows:
+        if not str(fp).startswith("Q"):
+            continue
+        q = int(str(fp)[1])
+        qe_d = qe.date() if hasattr(qe, "date") else qe
+        rd = reports.get(qe_d)
+        if not rd:
+            continue
+        rev = _revenue_asof(db, ticker, rd - timedelta(days=1), method, guid, beats,
+                            target_qend=qe_d, model=model, target_fy=fy, target_qn=q)
+        if rev is None:
+            continue
+        act = float(act)
+        out.append({"fy": fy, "q": q, "quarter_end": qe_d, "report_date": rd,
+                    "forecast": rev, "actual": act, "ape": abs(rev - act) / abs(act)})
+    return out
+
+
+def best_seasonal_model(db, ticker, components) -> Optional[str]:
+    """The lowest-MAPE filings-only model from the walk-forward backtest (what forecast_next would
+    pick for a seasonal ticker). Used to make the point-in-time backfill faithful to the live method."""
+    bt = backtest(db, ticker, components)
+    scored = [(bt[m]["mape"], m) for m in MODELS if bt[m].get("mape")]
+    return min(scored)[1] if scored else None
+
+
+def _revenue_asof(db, ticker, as_of, method, guid=None, beat_pairs=None, target_qend=None, model=None,
+                  target_fy=None, target_qn=None):
+    """Point-in-time next-quarter revenue forecast by the ticker's method.
+
+    `target_qend` (when known) pins guidance pairing to the quarter it guides: a quarter's forward
+    guidance is issued at the PRIOR earnings release, so the guidance for a quarter ending `target_qend`
+    is the latest one given strictly before `target_qend`. This is unambiguous and leakage-safe, and
+    avoids the trap that the earnings 8-K (carrying the NEXT quarter's guidance) is filed days before
+    the 10-Q — so an as-of cutoff on the 10-Q date would grab the wrong quarter's guidance. Without
+    `target_qend`, callers that cut off on the earnings date (e.g. eps_vs_consensus) use `as_of`.
+    """
     from src.analysis import guidance as gd
     if method == "guidance":
-        g = gd.guidance_asof(guid, as_of)
-        prior = [b for (d, _gv, _a, b) in beat_pairs if d < as_of]
+        if target_qend is not None:
+            cand = [g for g in guid if g.given_date < target_qend]
+            g = cand[-1] if cand else None
+        else:
+            g = gd.guidance_asof(guid, as_of)
+        # walk-forward: beat rate from guidance->actual pairs resolved before this guidance was issued
+        prior = [b for (d, _gv, _a, b) in beat_pairs if g and d < g.given_date]
         if g is None or len(prior) < 2:
             return None
         return g.guided_revenue * (1 + float(np.median(prior)))
-    pts = pit.series_asof(db, ticker, "revenue", as_of)
+    # scope is the Q1-Q3 10-Q quarters (discrete Q4 is the annual-minus-YTD derivation, deferred); a
+    # rare mislabeled Q4 (from a point-in-time FYE-month resolution) is dropped so the progression holds
+    pts = [p for p in pit.series_asof(db, ticker, "revenue", as_of) if p.quarter_num in (1, 2, 3)]
     if len(pts) < 6:
         return None
-    last = pts[-1]
-    t_qn = {1: 2, 2: 3, 3: 1}[last.quarter_num]
-    t_fy = last.fiscal_year + (1 if last.quarter_num == 3 else 0)
-    return log_trend_seasonal(pts, t_fy, t_qn) or trend_seasonal(pts, t_fy, t_qn)
+    # forecast the SPECIFIC target quarter when the caller knows it (the backfill does); otherwise
+    # the next quarter after the latest known point. Deriving the target from `last` is wrong when a
+    # point-in-time FYE quirk mislabels a quarter, so an explicit target is preferred.
+    if target_fy is not None and target_qn is not None:
+        t_fy, t_qn = target_fy, target_qn
+    else:
+        last = pts[-1]
+        t_qn = {1: 2, 2: 3, 3: 1}[last.quarter_num]
+        t_fy = last.fiscal_year + (1 if last.quarter_num == 3 else 0)
+    # faithful to the live method: use the model the backtest selected for this ticker (`model`).
+    # Without one, fall back to the median of the non-degenerate models (robust to any single model
+    # collapsing or over-extrapolating at a given as-of).
+    if model and model in MODELS:
+        out = MODELS[model](pts, t_fy, t_qn)
+        return out if (out is not None and np.isfinite(out) and out > 0) else None
+    cands = [m(pts, t_fy, t_qn) for m in (seasonal_naive, trend_seasonal, log_trend_seasonal)]
+    cands = [c for c in cands if c is not None and np.isfinite(c) and c > 0]
+    return float(np.median(cands)) if cands else None
 
 
 def eps_vs_consensus(db, ticker, method, min_prior_beats=2) -> dict:
@@ -333,15 +459,14 @@ def eps_vs_consensus(db, ticker, method, min_prior_beats=2) -> dict:
     """
     from datetime import timedelta
 
-    import yfinance as yf
-
     from src.analysis import guidance as gd
 
-    ed = yf.Ticker(ticker).get_earnings_dates(limit=14)
+    ed = yf_earnings_dates(ticker, 14)
     if ed is None:
         return {"n": 0}
     guid = gd.guidance_history(ticker) if method == "guidance" else None
     beat_pairs = _beat_pairs(db, ticker, guid) if method == "guidance" else None
+    model = best_seasonal_model(db, ticker, ["revenue"]) if method != "guidance" else None
 
     sh = pit.latest_series(db, ticker, "weighted_average_shares_diluted")
     cur_shares = sh[-1].value if sh else None
@@ -354,7 +479,7 @@ def eps_vs_consensus(db, ticker, method, min_prior_beats=2) -> dict:
         if reported is None or est is None or np.isnan(reported) or np.isnan(est):
             continue
         as_of = dt.date() - timedelta(days=1)
-        rev = _revenue_asof(db, ticker, as_of, method, guid, beat_pairs)
+        rev = _revenue_asof(db, ticker, as_of, method, guid, beat_pairs, model=model)
         if rev is None:
             continue
         nm_pts = _ratio_points(db, ticker, "net_income", as_of)

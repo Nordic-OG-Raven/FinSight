@@ -33,6 +33,9 @@ image = (
     .pip_install(
         "edgartools>=5.62.0", "yfinance>=0.2.40", "sqlalchemy>=2.0.0,<2.1",
         "psycopg2-binary>=2.9.0", "python-dotenv>=1.0.0", "dbt-postgres>=1.8,<1.10",
+        # guidance-extraction LLM net (dormant unless ANTHROPIC_API_KEY is in the secret; regex
+        # covers the current universe, so routine runs never call it)
+        "anthropic>=0.40",
     )
     # ship the repo code (ingestion, adapter, config, dbt project) into the image
     .add_local_dir(
