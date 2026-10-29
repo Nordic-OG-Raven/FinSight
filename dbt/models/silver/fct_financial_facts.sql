@@ -45,9 +45,13 @@ canonical_ranked as (
 -- instant can be tagged as the YEAR-END balance vs a quarter-end balance (10-Qs contribute the
 -- latter, and all of a year's quarter-end instants share that fiscal_year).
 fye as (
+    -- a TRUE annual period is ~1y AND ends in the company's fiscal-year-end month; this excludes
+    -- trailing-twelve-month (TTM/LTM) durations 10-Qs report (e.g. AMZN's 364-day period ending
+    -- in June), which are ~1y but aren't the fiscal year.
     select ticker, fiscal_year, max(period_end) as fye_date
     from canonical_ranked
     where period_type = 'duration' and period_days between 330 and 380
+      and extract(month from period_end)::int = fye_month
     group by ticker, fiscal_year
 )
 
@@ -78,9 +82,10 @@ select
     cr.statement_type,
     -- period grain: annual flows, single quarters, YTD rollups, fiscal-year-end vs quarter-end instants
     case
-        when cr.period_type = 'duration' and cr.period_days between 330 and 380 then 'annual'
+        when cr.period_type = 'duration' and cr.period_days between 330 and 380
+             and extract(month from cr.period_end)::int = cr.fye_month then 'annual'
         when cr.period_type = 'duration' and cr.period_days between 80 and 100 then 'quarter'
-        when cr.period_type = 'duration' then 'ytd_or_other'
+        when cr.period_type = 'duration' then 'ytd_or_other'  -- incl. TTM/LTM and YTD rollups
         when cr.period_type = 'instant' and cr.instant_date = fye.fye_date then 'instant'
         when cr.period_type = 'instant' then 'quarter_instant'
     end as period_grain,
