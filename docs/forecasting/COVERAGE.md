@@ -5,11 +5,11 @@ Auto-routed with `regime.classify`; revenue MAPE is a leakage-safe walk-forward 
 | Ticker | Route | Regime | Rev MAPE | Rev n | Our EPS | Consensus EPS | EPS n | Ledger |
 |--------|-------|--------|---------:|------:|--------:|--------------:|------:|:------:|
 | NVDA | guidance | growth | 1.2% | 3 | 4.5% ✅ | 4.8% | 3 | revenue+EPS |
-| AMZN | seasonal | seasonal | 3.9% | 14 |   n/a |   n/a | 0 | revenue |
+| AMZN | seasonal | seasonal | 4.5% | 17 |   n/a |   n/a | 0 | revenue |
 | AVGO | guidance | seasonal | 0.6% | 3 |   n/a |   n/a | 0 | revenue |
 | MSFT | seasonal | seasonal | 3.5% | 17 | 8.4% | 5.7% | 17 | revenue+EPS |
 | GOOGL | seasonal | seasonal | 6.1% | 17 |   n/a |   n/a | 0 | revenue |
-| AAPL | seasonal | seasonal | 8.7% | 16 |   n/a |   n/a | 0 | revenue |
+| AAPL | seasonal | seasonal | 9.0% | 17 |   n/a |   n/a | 0 | revenue |
 | JPM | seasonal | seasonal | 7.6% | 17 |   n/a |   n/a | 0 | revenue |
 
 **Logged live — revenue (7):** NVDA, AMZN, AVGO, MSFT, GOOGL, AAPL, JPM. **EPS (2):** NVDA, MSFT (logged only where the margin→EPS chain is competitive with consensus; elsewhere it is distorted by one-time items, acquisition amortization, FX, or bank accounting).

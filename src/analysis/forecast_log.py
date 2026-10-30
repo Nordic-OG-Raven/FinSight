@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from config import DATABASE_URL  # noqa: E402
 from src.analysis import forecasting_v2 as fv  # noqa: E402
 from src.analysis import pit  # noqa: E402
+from src.analysis import q4 as q4mod  # noqa: E402
 from src.analysis import regime as rg  # noqa: E402
 from src.ingestion.bronze import direct_dsn  # noqa: E402
 
@@ -164,6 +165,12 @@ def log_forecasts(db=DATABASE_URL, specs=None) -> None:
             if log_eps and r.get("eps_forecast") is not None:
                 rows.append((tk, fy, q, "eps", r["eps_forecast"], None, None,
                              "revenue->margin->eps", r["consensus_eps"]))
+            # the upcoming Q4 (only when the latest filed quarter is Q3, so Q4 is the next report)
+            nq4 = q4mod.forecast_next_q4(db, tk)
+            if nq4:
+                iv4 = nq4.get("interval_80")
+                rows.append((tk, nq4["target_fy"], 4, "revenue_q4", nq4["forecast"],
+                             iv4[0] if iv4 else None, iv4[1] if iv4 else None, nq4["model"], None))
             with conn.cursor() as cur:
                 execute_values(cur, """
                     INSERT INTO forecasts.forecast_log
@@ -221,11 +228,15 @@ def grade(db=DATABASE_URL) -> None:
             if hasattr(quarter_end, "date"):
                 quarter_end = quarter_end.date()
 
-            if metric == "revenue":
+            if metric in ("revenue", "revenue_q4"):
                 actual = rev_actual
-                if tk not in reports_cache:
-                    reports_cache[tk] = pit.quarter_report_dates(db, tk)
-                reported_at = reports_cache[tk].get(quarter_end)
+                if metric == "revenue_q4":
+                    # Q4 is reported in the annual 10-K; date it to that filing
+                    reported_at = q4mod.annual_report_dates(db, tk).get(quarter_end)
+                else:
+                    if tk not in reports_cache:
+                        reports_cache[tk] = pit.quarter_report_dates(db, tk)
+                    reported_at = reports_cache[tk].get(quarter_end)
             else:  # eps
                 actual, reported_at = _reported_eps(tk, quarter_end)
                 if actual is None:
@@ -303,7 +314,25 @@ def backfill(db=DATABASE_URL, specs=None) -> None:
                             (tk, fy, q, metric, fcast, mdl, cons, act, report_date, ape, cape))
                 conn.commit()
                 n += 1
-            print(f"  backfilled {tk}: {n} quarters")
+            # Q4 (the holiday/annual quarter the Q1-Q3 pipeline defers) — logged as a distinct metric
+            # so it never blends with the clean Q1-Q3 revenue accuracy. Leakage-safe YTD-ratio/seasonal.
+            q4bt = q4mod.q4_backtest(db, tk)
+            nq4 = 0
+            for h in q4bt["history"]:
+                with conn.cursor() as cur:
+                    cur.execute("""INSERT INTO forecasts.forecast_log
+                        (ticker,target_fiscal_year,target_quarter,metric,forecast,model,consensus,
+                         actual,actual_reported_at,our_ape,consensus_ape,graded_at)
+                        VALUES (%s,%s,4,'revenue_q4',%s,%s,NULL,%s,%s,%s,NULL,now())
+                        ON CONFLICT (ticker,target_fiscal_year,target_quarter,metric) DO UPDATE SET
+                         forecast=EXCLUDED.forecast, actual=EXCLUDED.actual,
+                         actual_reported_at=EXCLUDED.actual_reported_at, our_ape=EXCLUDED.our_ape,
+                         model=EXCLUDED.model, graded_at=now()""",
+                        (tk, h["fy"], h["forecast"], "backtest:" + (q4bt["best_model"] or "q4"),
+                         h["actual"], h["report_date"], h["ape"]))
+                conn.commit()
+                nq4 += 1
+            print(f"  backfilled {tk}: {n} quarters + {nq4} Q4")
     finally:
         conn.close()
 

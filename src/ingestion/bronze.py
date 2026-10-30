@@ -140,7 +140,7 @@ def _existing_accessions(conn, ticker: str) -> set:
 
 
 def ingest(tickers, annual: bool = True, quarters: int = 8, only_new: bool = False,
-           dsn: str | None = None) -> None:
+           annual_count: int = 1, dsn: str | None = None) -> None:
     dsn = dsn or direct_dsn()
     ex = EdgarToolsExtractor()
     conn = psycopg2.connect(dsn)
@@ -152,8 +152,10 @@ def ingest(tickers, annual: bool = True, quarters: int = 8, only_new: bool = Fal
             skip = _existing_accessions(conn, tk) if only_new else frozenset()
             results: list[ExtractionResult] = []
             if annual:
+                # annual_count>1 lands historical 10-Ks too — needed for a point-in-time Q4 series
+                # (Q4 = annual minus 9-month YTD, dated to its own original 10-K).
                 results.extend(ex.extract_filings(
-                    tk, forms=EdgarToolsExtractor._ANNUAL_FORMS, limit=1, skip_accessions=skip))
+                    tk, forms=EdgarToolsExtractor._ANNUAL_FORMS, limit=annual_count, skip_accessions=skip))
             if quarters:
                 results.extend(ex.extract_filings(
                     tk, forms=("10-Q",), limit=quarters, skip_accessions=skip))
@@ -177,6 +179,8 @@ if __name__ == "__main__":
     ap.add_argument("--quarters", type=int, default=8,
                     help="number of recent 10-Q filings to land per filer (0 to skip)")
     ap.add_argument("--no-annual", action="store_true", help="skip the latest annual filing")
+    ap.add_argument("--annual-count", type=int, default=1,
+                    help="number of annual (10-K) filings to land per filer (raise for Q4 history)")
     ap.add_argument("--only-new", action="store_true",
                     help="incremental: skip filings already landed in bronze")
     args = ap.parse_args()
@@ -185,4 +189,5 @@ if __name__ == "__main__":
         annual=not args.no_annual,
         quarters=args.quarters,
         only_new=args.only_new,
+        annual_count=args.annual_count,
     )
