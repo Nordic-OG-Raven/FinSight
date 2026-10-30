@@ -1,4 +1,7 @@
-{{ config(materialized='view') }}
+{{ config(
+    materialized='table',
+    post_hook="create index if not exists idx_cf_ticker_year on {{ this }} (ticker, fiscal_year)"
+) }}
 
 -- Annual serving mart: one row per (company, fiscal year, canonical line) in USD and native.
 -- Mirrors how src/analysis/ratios.load_metrics reads the warehouse (undimensioned core lines,
