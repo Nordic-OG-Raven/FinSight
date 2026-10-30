@@ -1,4 +1,4 @@
-{{ config(materialized='view') }}
+{{ config(materialized='table') }}
 
 -- Latest-year cross-company snapshot, revenue-sorted (USD) — reproduces /api/peers.
 

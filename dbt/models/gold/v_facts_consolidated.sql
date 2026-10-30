@@ -1,4 +1,7 @@
-{{ config(materialized='view') }}
+{{ config(
+    materialized='table',
+    post_hook="create index if not exists idx_vfc_ticker_year on {{ this }} (ticker, fiscal_year)"
+) }}
 
 -- Serving view reproducing the legacy public.v_facts_consolidated shape (consolidated facts
 -- only), sourced from the medallion. Consumed by the NP2SQL endpoint and as the canonical

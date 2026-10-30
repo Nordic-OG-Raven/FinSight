@@ -1,4 +1,7 @@
-{{ config(materialized='view') }}
+{{ config(
+    materialized='table',
+    post_hook="create index if not exists idx_ratios_ticker_year on {{ this }} (ticker, fiscal_year)"
+) }}
 
 -- Annual financial ratios in USD, a SQL port of src/analysis/ratios.compute_ratios so the
 -- serving layer is self-contained in the warehouse (the Python module can read this mart

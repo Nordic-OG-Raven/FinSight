@@ -1,4 +1,7 @@
-{{ config(materialized='view') }}
+{{ config(
+    materialized='table',
+    post_hook="create index if not exists idx_srq_ticker on {{ this }} (ticker, fiscal_year)"
+) }}
 
 -- Clean quarterly segment REVENUE (latest-vintage) for the forecasting layer.
 --
