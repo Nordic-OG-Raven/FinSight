@@ -1052,28 +1052,31 @@ def get_track_record():
         from sqlalchemy import create_engine, text
         engine = create_engine(DATABASE_URL)
         with engine.connect() as conn:
+            # Q4 is just another quarter (industry convention); fold revenue_q4 into revenue so
+            # the track record shows one all-quarter revenue accuracy, not a Q1-Q3 / Q4 split.
             rows = conn.execute(text("""
-                SELECT ticker, metric,
+                SELECT ticker,
+                       CASE WHEN metric IN ('revenue','revenue_q4') THEN 'revenue' ELSE metric END AS metric,
                        COUNT(*) FILTER (WHERE graded_at IS NOT NULL) AS n,
                        AVG(our_ape) FILTER (WHERE graded_at IS NOT NULL) AS our_mape,
                        AVG(consensus_ape) FILTER (WHERE graded_at IS NOT NULL
                                                   AND consensus_ape IS NOT NULL) AS cons_mape
                 FROM forecasts.forecast_log
-                GROUP BY ticker, metric
+                GROUP BY ticker, 2
                 HAVING COUNT(*) FILTER (WHERE graded_at IS NOT NULL) > 0
-                ORDER BY ticker, metric
+                ORDER BY ticker, 2
             """)).fetchall()
             pending = conn.execute(text("""
                 SELECT COUNT(*) FROM forecasts.forecast_log WHERE graded_at IS NULL
             """)).scalar()
             overall = conn.execute(text("""
-                SELECT metric,
+                SELECT CASE WHEN metric IN ('revenue','revenue_q4') THEN 'revenue' ELSE metric END AS metric,
                        AVG(our_ape) AS our_mape,
                        AVG(consensus_ape) FILTER (WHERE consensus_ape IS NOT NULL) AS cons_mape,
                        COUNT(*) AS n
                 FROM forecasts.forecast_log
                 WHERE graded_at IS NOT NULL
-                GROUP BY metric ORDER BY metric
+                GROUP BY 1 ORDER BY 1
             """)).fetchall()
         def pct(x):
             return round(float(x) * 100, 1) if x is not None else None
