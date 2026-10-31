@@ -26,6 +26,10 @@ AVGO = ('"In Q4 the momentum continues, and we expect AI semiconductor revenue t
         "follows: • Fourth quarter revenue guidance of approximately $34.8 billion; "
         "• Fourth quarter non-GAAP operating income guidance of approximately 66 percent of revenue.")
 
+META = ("Outlook Commentary We expect fourth quarter 2026 total revenue to be in the range of "
+        "$73-76 billion. Our guidance assumes foreign currency is an approximately 1% headwind to "
+        "year-over-year total revenue growth.")
+
 NO_GUIDANCE = ("The company declared a quarterly dividend of $0.65 per share. "
                "The board authorized an additional $10.0 billion share repurchase.")
 
@@ -49,6 +53,11 @@ def test_avgo_prefers_outlook_over_ceo_quote():
     val, _, src = gd.extract_revenue_guidance(AVGO, use_llm=False)
     assert _b(val) == 34.8                            # the $34.8B guidance, NOT the $21.7B AI quote
     assert "21.7" not in src
+
+
+def test_meta_expect_to_be_range():
+    val, method, _ = gd.extract_revenue_guidance(META, use_llm=False)
+    assert _b(val) == 74.5 and method == "regex"      # "We expect ... to be in the range of $73-76B"
 
 
 def test_no_revenue_guidance_returns_none():
