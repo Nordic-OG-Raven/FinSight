@@ -16,7 +16,7 @@ Two models, backtest-selected per ticker (like revenue):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 import numpy as np
 from sqlalchemy import text
@@ -33,6 +33,7 @@ class Q4Point:
     q4: float            # annual - YTD3
     ytd3: float          # Q1+Q2+Q3
     known_date: date     # original annual 10-K filing date (when Q4 became knowable)
+    quarter_end: date | None = None   # the fiscal-year-end date (Q4's period end)
 
 
 def annual_report_dates(db, ticker: str) -> dict:
@@ -81,7 +82,7 @@ def q4_history(db, ticker: str, as_of: date, fye_month: int | None = None) -> li
             continue
         fy, _ = pit._fy_and_quarter(pe, fye_month)
         if fy in ytd3 and ytd3[fy] > 0:
-            out.append(Q4Point(fy, annual - ytd3[fy], ytd3[fy], fd))
+            out.append(Q4Point(fy, annual - ytd3[fy], ytd3[fy], fd, quarter_end=pe))
     out.sort(key=lambda p: p.fiscal_year)
     return out
 
@@ -121,7 +122,7 @@ def q4_backtest(db, ticker: str) -> dict:
                 apes[m].append(abs(pred - tp.q4) / abs(tp.q4))
                 per_year[m].append({"fy": tp.fiscal_year, "q4": 4, "forecast": pred,
                                     "actual": tp.q4, "ape": abs(pred - tp.q4) / abs(tp.q4),
-                                    "report_date": tp.known_date})
+                                    "report_date": tp.known_date, "quarter_end": tp.quarter_end})
     mapes = {m: (float(np.mean(apes[m]) * 100) if apes[m] else None) for m in models}
     scored = [(v, m) for m, v in mapes.items() if v is not None]
     best = min(scored)[1] if scored else None
@@ -149,6 +150,7 @@ def forecast_next_q4(db, ticker: str) -> dict | None:
     resid = np.array([h["ape"] for h in bt["history"]])
     lo = pred * (1 - float(np.quantile(resid, 0.8))) if len(resid) >= 3 else None
     hi = pred * (1 + float(np.quantile(resid, 0.8))) if len(resid) >= 3 else None
+    tqe = (hist[-1].quarter_end + timedelta(days=364)) if (hist and hist[-1].quarter_end) else None
     return {"ticker": ticker, "target_fy": target_fy, "quarter": 4, "forecast": pred,
             "model": "q4_" + bt["best_model"], "mape": bt["best_mape"],
-            "interval_80": [lo, hi] if lo else None}
+            "interval_80": [lo, hi] if lo else None, "target_qend": tqe}

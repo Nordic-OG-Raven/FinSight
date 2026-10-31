@@ -1,16 +1,16 @@
 # FinSight — Forecasting Coverage Scorecard
 
-Auto-routed with `regime.classify`; revenue MAPE is a leakage-safe walk-forward backtest; EPS columns compare OUR next-quarter EPS vs analyst CONSENSUS over the same quarters (our EPS = point-in-time revenue x net-margin / current diluted shares).
+Auto-routed with `regime.classify`; revenue MAPE is a leakage-safe walk-forward backtest. The vs-consensus columns compare OUR error to the analyst CONSENSUS error over the same quarters (revenue consensus via MarketBeat ~2yr; EPS consensus via yfinance).
 
-| Ticker | Route | Regime | Rev MAPE | Rev n | Our EPS | Consensus EPS | EPS n | Ledger |
-|--------|-------|--------|---------:|------:|--------:|--------------:|------:|:------:|
-| NVDA | guidance | growth | 1.2% | 3 | 4.5% ✅ | 4.8% | 3 | revenue+EPS |
-| AMZN | seasonal | seasonal | 4.5% | 17 |   n/a |   n/a | 0 | revenue |
-| AVGO | guidance | seasonal | 0.6% | 3 |   n/a |   n/a | 0 | revenue |
-| MSFT | seasonal | seasonal | 3.5% | 17 | 8.4% | 5.7% | 17 | revenue+EPS |
-| GOOGL | seasonal | seasonal | 6.1% | 17 |   n/a |   n/a | 0 | revenue |
-| AAPL | seasonal | seasonal | 9.0% | 17 |   n/a |   n/a | 0 | revenue |
-| JPM | seasonal | seasonal | 7.6% | 17 |   n/a |   n/a | 0 | revenue |
+| Ticker | Route | Rev MAPE | us vs Rev cons | Our EPS | EPS cons | Ledger |
+|--------|-------|---------:|:--------------:|--------:|---------:|:------:|
+| NVDA | guidance | 1.2% (3) | 1.2% vs 4.0% ✅ (n=3) | 4.5% ✅ | 4.8% | revenue+EPS |
+| AMZN | seasonal | 4.5% (17) | 4.5% vs 1.8% (n=6) |   n/a |   n/a | revenue |
+| AVGO | guidance | 0.6% (3) | 0.6% vs 0.8% ✅ (n=3) |   n/a |   n/a | revenue |
+| MSFT | seasonal | 3.5% (17) | 3.5% vs 1.8% (n=6) | 8.4% | 5.7% | revenue+EPS |
+| GOOGL | seasonal | 6.1% (17) | 6.1% vs 1.9% (n=6) |   n/a |   n/a | revenue |
+| AAPL | seasonal | 9.0% (17) | 9.0% vs 2.2% (n=6) |   n/a |   n/a | revenue |
+| JPM | seasonal | 7.6% (17) | 7.6% vs 5.1% (n=5) |   n/a |   n/a | revenue |
 
 **Logged live — revenue (7):** NVDA, AMZN, AVGO, MSFT, GOOGL, AAPL, JPM. **EPS (2):** NVDA, MSFT (logged where the margin→EPS chain is credible; we beat consensus on NVDA and trail it on MSFT, shown either way; elsewhere EPS is distorted by one-time items, acquisition amortization, FX, or bank accounting).
 

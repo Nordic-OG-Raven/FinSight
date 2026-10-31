@@ -26,7 +26,7 @@ from src.analysis import regime  # noqa: E402
 
 def score(db, ticker: str) -> dict:
     r = regime.classify(db, ticker)
-    row = {"route": r, "rev_mape": None, "rev_n": 0,
+    row = {"route": r, "rev_mape": None, "rev_n": 0, "rev_cons_mape": None, "rev_cons_n": 0,
            "our_eps_mape": None, "cons_eps_mape": None, "eps_n": 0}
     # Accuracy is READ FROM THE LEDGER (the single source of truth, populated by the backfill), so
     # the scorecard and the track record report identical numbers. The scorecard adds the route and
@@ -34,7 +34,10 @@ def score(db, ticker: str) -> dict:
     try:
         with pit._engine(db).connect() as conn:
             rev = conn.execute(text(
-                "SELECT avg(our_ape), count(*) FROM forecasts.forecast_log WHERE ticker=:t "
+                "SELECT avg(our_ape), count(*), "
+                "avg(consensus_ape) FILTER (WHERE consensus_ape IS NOT NULL), "
+                "count(*) FILTER (WHERE consensus_ape IS NOT NULL) "
+                "FROM forecasts.forecast_log WHERE ticker=:t "
                 "AND metric='revenue' AND model LIKE 'backtest:%' AND our_ape IS NOT NULL"),
                 {"t": ticker}).fetchone()
             eps = conn.execute(text(
@@ -42,7 +45,9 @@ def score(db, ticker: str) -> dict:
                 "WHERE ticker=:t AND metric='eps' AND model LIKE 'backtest:%' AND our_ape IS NOT NULL"),
                 {"t": ticker}).fetchone()
         if rev and rev[0] is not None:
-            row.update(rev_mape=float(rev[0] * 100), rev_n=int(rev[1]))
+            row.update(rev_mape=float(rev[0] * 100), rev_n=int(rev[1]),
+                       rev_cons_mape=float(rev[2] * 100) if rev[2] is not None else None,
+                       rev_cons_n=int(rev[3]))
         if eps and eps[0] is not None:
             row.update(our_eps_mape=float(eps[0] * 100),
                        cons_eps_mape=float(eps[1] * 100) if eps[1] is not None else None,
@@ -65,23 +70,25 @@ def render(rows: dict) -> str:
     lines = [
         "# FinSight — Forecasting Coverage Scorecard",
         "",
-        "Auto-routed with `regime.classify`; revenue MAPE is a leakage-safe walk-forward backtest; "
-        "EPS columns compare OUR next-quarter EPS vs analyst CONSENSUS over the same quarters "
-        "(our EPS = point-in-time revenue x net-margin / current diluted shares).",
+        "Auto-routed with `regime.classify`; revenue MAPE is a leakage-safe walk-forward backtest. "
+        "The vs-consensus columns compare OUR error to the analyst CONSENSUS error over the same "
+        "quarters (revenue consensus via MarketBeat ~2yr; EPS consensus via yfinance).",
         "",
-        "| Ticker | Route | Regime | Rev MAPE | Rev n | Our EPS | Consensus EPS | EPS n | Ledger |",
-        "|--------|-------|--------|---------:|------:|--------:|--------------:|------:|:------:|",
+        "| Ticker | Route | Rev MAPE | us vs Rev cons | Our EPS | EPS cons | Ledger |",
+        "|--------|-------|---------:|:--------------:|--------:|---------:|:------:|",
     ]
     for tk, row in rows.items():
         r = row["route"]
-        win = ""
-        if isinstance(row["our_eps_mape"], (int, float)) and isinstance(row["cons_eps_mape"], (int, float)):
-            win = " ✅" if row["our_eps_mape"] <= row["cons_eps_mape"] else ""
+        ew = " ✅" if (isinstance(row["our_eps_mape"], (int, float)) and isinstance(row["cons_eps_mape"], (int, float))
+                       and row["our_eps_mape"] <= row["cons_eps_mape"]) else ""
+        rw = " ✅" if (isinstance(row["rev_mape"], (int, float)) and isinstance(row["rev_cons_mape"], (int, float))
+                       and row["rev_mape"] <= row["rev_cons_mape"]) else ""
+        rev_cons = (f"{_fmt(row['rev_mape'])} vs {_fmt(row['rev_cons_mape'])}{rw} (n={row['rev_cons_n']})"
+                    if row["rev_cons_mape"] is not None else "—")
         ledger = ("revenue+EPS" if row["logs_eps"] else "revenue") if row["in_ledger"] else "—"
         lines.append(
-            f"| {tk} | {r.method} | {r.regime} | {_fmt(row['rev_mape'])} | {row['rev_n']} | "
-            f"{_fmt(row['our_eps_mape'])}{win} | {_fmt(row['cons_eps_mape'])} | {row['eps_n']} | "
-            f"{ledger} |")
+            f"| {tk} | {r.method} | {_fmt(row['rev_mape'])} ({row['rev_n']}) | {rev_cons} | "
+            f"{_fmt(row['our_eps_mape'])}{ew} | {_fmt(row['cons_eps_mape'])} | {ledger} |")
     rev = [tk for tk, row in rows.items() if row["in_ledger"]]
     eps = [tk for tk, row in rows.items() if row["logs_eps"]]
     lines += ["",

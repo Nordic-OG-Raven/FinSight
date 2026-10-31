@@ -22,6 +22,7 @@ from psycopg2.extras import execute_values
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from config import DATABASE_URL  # noqa: E402
 from src.analysis import forecasting_v2 as fv  # noqa: E402
+from src.analysis import marketbeat as mb  # noqa: E402
 from src.analysis import pit  # noqa: E402
 from src.analysis import q4 as q4mod  # noqa: E402
 from src.analysis import regime as rg  # noqa: E402
@@ -138,14 +139,18 @@ def read_forecast(db=DATABASE_URL, ticker=None) -> dict:
             "pending": pending, "history": history, "accuracy": accuracy}
 
 
-def _revenue_consensus(ticker):
+def _revenue_consensus(db, ticker):
+    """Forward revenue consensus for the next Q1-Q3 quarter, from MarketBeat, aligned by the target
+    quarter's expected report window (approx = latest filed quarter-end + ~1 quarter). Aligning by
+    quarter-end (not 'the next estimate') avoids the yfinance mismatch where our bronze lags the market."""
     try:
-        re = fv.yf_revenue_estimate(ticker)
-        if re is not None and "0q" in re.index:
-            return float(re.loc["0q", "avg"])
+        rev = [p for p in pit.latest_series(db, ticker, "revenue") if p.quarter_num in (1, 2, 3)]
+        if not rev:
+            return None
+        approx_qend = rev[-1].period_end + timedelta(days=91)
+        return mb.revenue_consensus_for_quarter(ticker, approx_qend)
     except Exception:  # noqa: BLE001
-        pass
-    return None
+        return None
 
 
 def log_forecasts(db=DATABASE_URL, specs=None) -> None:
@@ -161,7 +166,7 @@ def log_forecasts(db=DATABASE_URL, specs=None) -> None:
             rev, iv = r["revenue"], r["revenue"].get("interval_80")
             rows = [
                 (tk, fy, q, "revenue", rev["forecast"], iv[0] if iv else None, iv[1] if iv else None,
-                 rev["best_model"], _revenue_consensus(tk)),
+                 rev["best_model"], _revenue_consensus(db, tk)),
             ]
             if log_eps and r.get("eps_forecast") is not None:
                 rows.append((tk, fy, q, "eps", r["eps_forecast"], None, None,
@@ -170,8 +175,9 @@ def log_forecasts(db=DATABASE_URL, specs=None) -> None:
             nq4 = q4mod.forecast_next_q4(db, tk)
             if nq4:
                 iv4 = nq4.get("interval_80")
+                cons4 = mb.revenue_consensus_for_quarter(tk, nq4["target_qend"]) if nq4.get("target_qend") else None
                 rows.append((tk, nq4["target_fy"], 4, "revenue_q4", nq4["forecast"],
-                             iv4[0] if iv4 else None, iv4[1] if iv4 else None, nq4["model"], None))
+                             iv4[0] if iv4 else None, iv4[1] if iv4 else None, nq4["model"], cons4))
             with conn.cursor() as cur:
                 execute_values(cur, """
                     INSERT INTO forecasts.forecast_log
@@ -292,7 +298,9 @@ def backfill(db=DATABASE_URL, specs=None) -> None:
             for item in rb:
                 fy, q, qe_d, report_date = item["fy"], item["q"], item["quarter_end"], item["report_date"]
                 rev_hat, rev_actual = item["forecast"], item["actual"]
-                writes = [("revenue", "backtest:" + method, rev_hat, None, rev_actual, item["ape"], None)]
+                cons = mb.revenue_consensus_for_quarter(tk, qe_d)
+                cape = abs(cons - rev_actual) / abs(rev_actual) if (cons and rev_actual) else None
+                writes = [("revenue", "backtest:" + method, rev_hat, cons, rev_actual, item["ape"], cape)]
                 if log_eps and cur_shares:
                     nm_pts = fv._ratio_points(db, tk, "net_income", report_date - timedelta(days=1))
                     if len(nm_pts) >= 4:
@@ -320,17 +328,19 @@ def backfill(db=DATABASE_URL, specs=None) -> None:
             q4bt = q4mod.q4_backtest(db, tk)
             nq4 = 0
             for h in q4bt["history"]:
+                q4cons = mb.revenue_consensus_for_quarter(tk, h["quarter_end"]) if h.get("quarter_end") else None
+                q4cape = abs(q4cons - h["actual"]) / abs(h["actual"]) if (q4cons and h["actual"]) else None
                 with conn.cursor() as cur:
                     cur.execute("""INSERT INTO forecasts.forecast_log
                         (ticker,target_fiscal_year,target_quarter,metric,forecast,model,consensus,
                          actual,actual_reported_at,our_ape,consensus_ape,graded_at)
-                        VALUES (%s,%s,4,'revenue_q4',%s,%s,NULL,%s,%s,%s,NULL,now())
+                        VALUES (%s,%s,4,'revenue_q4',%s,%s,%s,%s,%s,%s,%s,now())
                         ON CONFLICT (ticker,target_fiscal_year,target_quarter,metric) DO UPDATE SET
-                         forecast=EXCLUDED.forecast, actual=EXCLUDED.actual,
+                         forecast=EXCLUDED.forecast, actual=EXCLUDED.actual, consensus=EXCLUDED.consensus,
                          actual_reported_at=EXCLUDED.actual_reported_at, our_ape=EXCLUDED.our_ape,
-                         model=EXCLUDED.model, graded_at=now()""",
+                         consensus_ape=EXCLUDED.consensus_ape, model=EXCLUDED.model, graded_at=now()""",
                         (tk, h["fy"], h["forecast"], "backtest:" + (q4bt["best_model"] or "q4"),
-                         h["actual"], h["report_date"], h["ape"]))
+                         q4cons, h["actual"], h["report_date"], h["ape"], q4cape))
                 conn.commit()
                 nq4 += 1
             print(f"  backfilled {tk}: {n} quarters + {nq4} Q4")
