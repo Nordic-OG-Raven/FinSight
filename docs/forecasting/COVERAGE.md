@@ -12,6 +12,6 @@ Auto-routed with `regime.classify`; revenue MAPE is a leakage-safe walk-forward 
 | AAPL | seasonal | seasonal | 9.0% | 17 |   n/a |   n/a | 0 | revenue |
 | JPM | seasonal | seasonal | 7.6% | 17 |   n/a |   n/a | 0 | revenue |
 
-**Logged live — revenue (7):** NVDA, AMZN, AVGO, MSFT, GOOGL, AAPL, JPM. **EPS (2):** NVDA, MSFT (logged only where the margin→EPS chain is competitive with consensus; elsewhere it is distorted by one-time items, acquisition amortization, FX, or bank accounting).
+**Logged live — revenue (7):** NVDA, AMZN, AVGO, MSFT, GOOGL, AAPL, JPM. **EPS (2):** NVDA, MSFT (logged where the margin→EPS chain is credible; we beat consensus on NVDA and trail it on MSFT, shown either way; elsewhere EPS is distorted by one-time items, acquisition amortization, FX, or bank accounting).
 
 Every company is reported here honestly; the Ledger column shows what we commit to live. ✅ marks quarters where our EPS matched or beat consensus.
