@@ -25,7 +25,7 @@ Run once on demand:
 """
 import modal
 
-DEFAULT_TICKERS = "AAPL AVGO JPM NVO GOOGL MSFT AMZN NVDA"
+DEFAULT_TICKERS = "AAPL AVGO JPM NVO GOOGL MSFT AMZN NVDA META TSLA NFLX AMD ORCL CRM"
 
 # Image: ingestion deps (edgartools/yfinance) + dbt for the silver/gold transforms.
 image = (

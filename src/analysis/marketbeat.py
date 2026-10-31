@@ -27,7 +27,7 @@ _HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 # MarketBeat URLs are /stocks/<EXCHANGE>/<TICKER>/earnings/. Our set is NASDAQ except where noted.
-_EXCHANGE = {"JPM": "NYSE"}
+_EXCHANGE = {"JPM": "NYSE", "ORCL": "NYSE", "CRM": "NYSE"}
 
 
 def _money(s) -> float | None:

@@ -11,7 +11,13 @@ Auto-routed with `regime.classify`; revenue MAPE is a leakage-safe walk-forward 
 | GOOGL | seasonal | 6.1% (17) | 6.1% vs 1.9% (n=6) |   n/a |   n/a | revenue |
 | AAPL | seasonal | 9.0% (17) | 9.0% vs 2.2% (n=6) |   n/a |   n/a | revenue |
 | JPM | seasonal | 7.6% (17) | 7.6% vs 5.1% (n=5) |   n/a |   n/a | revenue |
+| META | seasonal | 8.9% (17) | 8.9% vs 2.7% (n=6) |   n/a |   n/a | revenue |
+| TSLA | seasonal | 14.0% (17) | 14.0% vs 7.0% (n=6) |   n/a |   n/a | revenue |
+| NFLX | seasonal | 4.5% (18) | 4.5% vs 0.3% (n=6) |   n/a |   n/a | revenue |
+| AMD | seasonal | 16.1% (17) | 16.1% vs 3.8% (n=5) |   n/a |   n/a | revenue |
+| ORCL | seasonal | 5.9% (16) | 5.9% vs 1.1% (n=6) |   n/a |   n/a | revenue |
+| CRM | seasonal | 2.6% (17) | 2.6% vs 0.6% (n=6) |   n/a |   n/a | revenue |
 
-**Logged live — revenue (7):** NVDA, AMZN, AVGO, MSFT, GOOGL, AAPL, JPM. **EPS (2):** NVDA, MSFT (logged where the margin→EPS chain is credible; we beat consensus on NVDA and trail it on MSFT, shown either way; elsewhere EPS is distorted by one-time items, acquisition amortization, FX, or bank accounting).
+**Logged live — revenue (13):** NVDA, AMZN, AVGO, MSFT, GOOGL, AAPL, JPM, META, TSLA, NFLX, AMD, ORCL, CRM. **EPS (2):** NVDA, MSFT (logged where the margin→EPS chain is credible; we beat consensus on NVDA and trail it on MSFT, shown either way; elsewhere EPS is distorted by one-time items, acquisition amortization, FX, or bank accounting).
 
 Every company is reported here honestly; the Ledger column shows what we commit to live. ✅ marks quarters where our EPS matched or beat consensus.

@@ -44,6 +44,13 @@ LEDGER = {
     "GOOGL": {"eps": False},   # revenue 6.1%, EPS chain weak (other income / FX swings)
     "JPM":   {"eps": False},   # revenue 8.0%, bank P&L does not fit revenue->margin->EPS
     "AAPL":  {"eps": False},   # revenue weaker historically (trend-inflection lag); report it honestly
+    # expansion set (2026-10-31) — revenue-only until each EPS chain is validated vs consensus
+    "META":  {"eps": False},
+    "TSLA":  {"eps": False},
+    "NFLX":  {"eps": False},
+    "AMD":   {"eps": False},
+    "ORCL":  {"eps": False},
+    "CRM":   {"eps": False},
 }
 _COMPONENTS = {"NVDA": ["segment:compute_and_networking", "segment:graphics"]}
 

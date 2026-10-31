@@ -102,7 +102,8 @@ def render(rows: dict) -> str:
 
 
 if __name__ == "__main__":
-    tickers = sys.argv[1:] or ["NVDA", "AMZN", "AVGO", "MSFT", "GOOGL", "AAPL", "JPM"]
+    tickers = sys.argv[1:] or ["NVDA", "AMZN", "AVGO", "MSFT", "GOOGL", "AAPL", "JPM",
+                               "META", "TSLA", "NFLX", "AMD", "ORCL", "CRM"]
     rows = {}
     for tk in tickers:
         print(f"scoring {tk} ...", flush=True)

@@ -27,7 +27,8 @@ from src.analysis import forecast_log  # noqa: E402
 import forecast_coverage  # noqa: E402
 import forecast_track_record  # noqa: E402
 
-TICKERS = ["NVDA", "AMZN", "AVGO", "MSFT", "GOOGL", "AAPL", "JPM"]
+TICKERS = ["NVDA", "AMZN", "AVGO", "MSFT", "GOOGL", "AAPL", "JPM",
+           "META", "TSLA", "NFLX", "AMD", "ORCL", "CRM"]
 
 
 def _clear_backtest_rows() -> int:
