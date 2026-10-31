@@ -1000,6 +1000,54 @@ def get_forecast(ticker):
         return jsonify({"error": "server_error", "message": str(e)}), 500
 
 
+@app.route('/api/track-record', methods=['GET'])
+def get_track_record():
+    """Cross-company forecast scorecard from the live ledger: per (ticker, metric) realized
+    accuracy (our MAPE vs analyst-consensus MAPE over graded quarters), plus per-metric overall
+    and the count of pending (logged-but-not-yet-reported) forecasts. Pure read."""
+    try:
+        from sqlalchemy import create_engine, text
+        engine = create_engine(DATABASE_URL)
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT ticker, metric,
+                       COUNT(*) FILTER (WHERE graded_at IS NOT NULL) AS n,
+                       AVG(our_ape) FILTER (WHERE graded_at IS NOT NULL) AS our_mape,
+                       AVG(consensus_ape) FILTER (WHERE graded_at IS NOT NULL
+                                                  AND consensus_ape IS NOT NULL) AS cons_mape
+                FROM forecasts.forecast_log
+                GROUP BY ticker, metric
+                HAVING COUNT(*) FILTER (WHERE graded_at IS NOT NULL) > 0
+                ORDER BY ticker, metric
+            """)).fetchall()
+            pending = conn.execute(text("""
+                SELECT COUNT(*) FROM forecasts.forecast_log WHERE graded_at IS NULL
+            """)).scalar()
+            overall = conn.execute(text("""
+                SELECT metric,
+                       AVG(our_ape) AS our_mape,
+                       AVG(consensus_ape) FILTER (WHERE consensus_ape IS NOT NULL) AS cons_mape,
+                       COUNT(*) AS n
+                FROM forecasts.forecast_log
+                WHERE graded_at IS NOT NULL
+                GROUP BY metric ORDER BY metric
+            """)).fetchall()
+        def pct(x):
+            return round(float(x) * 100, 1) if x is not None else None
+        scorecard = [{
+            "ticker": r[0], "metric": r[1], "n": r[2],
+            "our_mape": pct(r[3]), "consensus_mape": pct(r[4]),
+        } for r in rows]
+        return jsonify({
+            "pending_count": pending or 0,
+            "overall": [{"metric": o[0], "our_mape": pct(o[1]),
+                         "consensus_mape": pct(o[2]), "n": o[3]} for o in overall],
+            "scorecard": scorecard,
+        })
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": "server_error", "message": str(e)}), 500
+
+
 @app.route('/api/peers', methods=['GET'])
 def get_peers():
     """Latest-year peer comparison across all loaded companies: headline USD figures + key
