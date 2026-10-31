@@ -1060,7 +1060,9 @@ def get_track_record():
                        COUNT(*) FILTER (WHERE graded_at IS NOT NULL) AS n,
                        AVG(our_ape) FILTER (WHERE graded_at IS NOT NULL) AS our_mape,
                        AVG(consensus_ape) FILTER (WHERE graded_at IS NOT NULL
-                                                  AND consensus_ape IS NOT NULL) AS cons_mape
+                                                  AND consensus_ape IS NOT NULL) AS cons_mape,
+                       -- company-level tag: does this name ever give us an extractable $ guidance signal?
+                       BOOL_OR(model LIKE '%guid%') AS guided
                 FROM forecasts.forecast_log
                 GROUP BY ticker, 2
                 HAVING COUNT(*) FILTER (WHERE graded_at IS NOT NULL) > 0
@@ -1078,16 +1080,31 @@ def get_track_record():
                 WHERE graded_at IS NOT NULL
                 GROUP BY 1 ORDER BY 1
             """)).fetchall()
+            # Apples-to-apples cut: accuracy on just the forecasts where we had the SAME input the
+            # street has (an extractable company guidance signal). This is the fair comparison -
+            # consensus always has guidance; our gap to it is explained by whether we did too.
+            guided_overall = conn.execute(text("""
+                SELECT CASE WHEN metric IN ('revenue','revenue_q4') THEN 'revenue' ELSE metric END AS metric,
+                       AVG(our_ape) AS our_mape,
+                       AVG(consensus_ape) FILTER (WHERE consensus_ape IS NOT NULL) AS cons_mape,
+                       COUNT(*) AS n
+                FROM forecasts.forecast_log
+                WHERE graded_at IS NOT NULL AND model LIKE '%guid%'
+                GROUP BY 1 ORDER BY 1
+            """)).fetchall()
         def pct(x):
             return round(float(x) * 100, 1) if x is not None else None
         scorecard = [{
             "ticker": r[0], "metric": r[1], "n": r[2],
             "our_mape": pct(r[3]), "consensus_mape": pct(r[4]),
+            "guided": bool(r[5]),
         } for r in rows]
         return jsonify({
             "pending_count": pending or 0,
             "overall": [{"metric": o[0], "our_mape": pct(o[1]),
                          "consensus_mape": pct(o[2]), "n": o[3]} for o in overall],
+            "guided_overall": [{"metric": o[0], "our_mape": pct(o[1]),
+                                "consensus_mape": pct(o[2]), "n": o[3]} for o in guided_overall],
             "scorecard": scorecard,
         })
     except Exception as e:  # noqa: BLE001
