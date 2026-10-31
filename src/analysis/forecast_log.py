@@ -29,15 +29,16 @@ from src.ingestion.bronze import direct_dsn  # noqa: E402
 
 # Ledger universe. REVENUE is logged for every ticker here — it is our strongest, best-generalizing
 # output (leakage-safe backtest MAPE < 8% for all; see scripts/forecast_coverage.py). EPS is logged
-# ONLY where the revenue->margin->EPS chain is competitive with analyst consensus: AVGO/GOOGL/JPM
-# have reliable revenue forecasts but their EPS is distorted by acquisition amortization, other
-# income/FX, and bank accounting respectively, so we do not log an EPS number we know is weak.
+# where the revenue->margin->EPS chain is CREDIBLE (we beat consensus on NVDA, trail it on MSFT, and
+# report both honestly). AVGO/GOOGL/JPM/AMZN have reliable revenue forecasts but their EPS is distorted
+# by acquisition amortization, other income/FX, bank accounting, and lumpy one-time items respectively,
+# so we do not log an EPS number we know is broken.
 # Routes (guidance vs seasonal) are auto-detected per ticker by regime.classify; components are
 # overridden only where segment roll-up has been validated to help (NVDA).
 LEDGER = {
     "NVDA":  {"eps": True},    # revenue 1.2%, EPS 4.5% vs consensus 4.8% (we edge it)
     "AMZN":  {"eps": False},   # revenue 3.9%, but EPS chain broken by lumpy one-time items (83% vs 52%)
-    "MSFT":  {"eps": True},    # revenue 3.6%, EPS 8.9% vs consensus 5.7% (we trail but it's close+honest)
+    "MSFT":  {"eps": True},    # revenue 3.6%, EPS 8.4% vs consensus 5.7% (we TRAIL consensus; credible chain, logged honestly)
     "AVGO":  {"eps": False},   # revenue 0.6%, EPS chain broken by acquisition amortization
     "GOOGL": {"eps": False},   # revenue 6.1%, EPS chain weak (other income / FX swings)
     "JPM":   {"eps": False},   # revenue 8.0%, bank P&L does not fit revenue->margin->EPS

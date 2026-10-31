@@ -86,9 +86,9 @@ def render(rows: dict) -> str:
     eps = [tk for tk, row in rows.items() if row["logs_eps"]]
     lines += ["",
               f"**Logged live — revenue ({len(rev)}):** {', '.join(rev) or 'none'}. "
-              f"**EPS ({len(eps)}):** {', '.join(eps) or 'none'} (logged only where the margin→EPS "
-              f"chain is competitive with consensus; elsewhere it is distorted by one-time items, "
-              f"acquisition amortization, FX, or bank accounting).",
+              f"**EPS ({len(eps)}):** {', '.join(eps) or 'none'} (logged where the margin→EPS chain is "
+              f"credible; we beat consensus on NVDA and trail it on MSFT, shown either way; elsewhere "
+              f"EPS is distorted by one-time items, acquisition amortization, FX, or bank accounting).",
               "", "Every company is reported here honestly; the Ledger column shows what we commit to "
               "live. ✅ marks quarters where our EPS matched or beat consensus.", ""]
     return "\n".join(lines)
