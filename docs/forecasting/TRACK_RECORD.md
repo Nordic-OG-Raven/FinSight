@@ -10,20 +10,32 @@ seeded the ledger; new rows are logged live each week.*
 | --- | --- | --- | --- | --- |
 | AAPL | revenue | 9.0% | 2.2% | 17 |
 | AAPL | revenue_q4 | 16.3% | 0.6% | 5 |
+| AMD | revenue | 16.1% | 3.8% | 17 |
+| AMD | revenue_q4 | 17.0% | 3.9% | 4 |
 | AMZN | revenue | 4.5% | 1.8% | 17 |
 | AMZN | revenue_q4 | 5.8% | 0.7% | 5 |
 | AVGO | revenue | 0.6% | 0.8% | 3 |
 | AVGO | revenue_q4 | 3.4% | 1.6% | 5 |
+| CRM | revenue | 2.6% | 0.6% | 17 |
+| CRM | revenue_q4 | 3.2% | 0.2% | 5 |
 | GOOGL | revenue | 6.1% | 1.9% | 17 |
 | GOOGL | revenue_q4 | 13.7% | 1.2% | 5 |
 | JPM | revenue | 7.6% | 5.1% | 17 |
 | JPM | revenue_q4 | 4.2% | 1.2% | 5 |
+| META | revenue | 8.9% | 2.7% | 17 |
+| META | revenue_q4 | 15.2% | 2.8% | 5 |
 | MSFT | eps | 8.4% | 5.7% | 17 |
 | MSFT | revenue | 3.5% | 1.8% | 17 |
 | MSFT | revenue_q4 | 3.2% | 3.1% | 5 |
+| NFLX | revenue | 4.5% | 0.3% | 18 |
+| NFLX | revenue_q4 | 3.5% | 0.9% | 5 |
 | NVDA | eps | 4.5% | 4.8% | 3 |
 | NVDA | revenue | 1.2% | 4.0% | 3 |
 | NVDA | revenue_q4 | 18.0% | 3.4% | 5 |
+| ORCL | revenue | 5.9% | 1.1% | 16 |
+| ORCL | revenue_q4 | 1.8% | 1.2% | 5 |
+| TSLA | revenue | 14.0% | 7.0% | 17 |
+| TSLA | revenue_q4 | 29.1% | 3.1% | 3 |
 
 ## Pending (live, not yet reported)
 
@@ -32,15 +44,24 @@ seeded the ledger; new rows are logged live each week.*
 | MSFT | FY2027 Q2 | eps | 5.16 | 4.86 | — | — | — |
 | NVDA | FY2027 Q3 | eps | 2.86 | 2.47 | — | — | — |
 | AAPL | FY2027 Q1 | revenue | $145.2B [123, 166]B | $113.4B | — | — | — |
+| AMD | FY2026 Q3 | revenue | $9.8B [8, 13]B | $13.1B | — | — | — |
 | AMZN | FY2026 Q3 | revenue | $197.3B [177, 208]B | $202.2B | — | — | — |
 | AVGO | FY2027 Q1 | revenue | $35.1B [35, 35]B | — | — | — | — |
+| CRM | FY2027 Q3 | revenue | $11.4B [11, 12]B | — | — | — | — |
 | GOOGL | FY2027 Q1 | revenue | $121.1B [109, 139]B | — | — | — | — |
 | JPM | FY2026 Q3 | revenue | $51.0B [46, 60]B | $51.2B | — | — | — |
+| META | FY2027 Q1 | revenue | $63.2B [53, 71]B | — | — | — | — |
 | MSFT | FY2027 Q2 | revenue | $95.4B [89, 101]B | — | — | — | — |
+| NFLX | FY2027 Q1 | revenue | $14.1B [13, 15]B | — | — | — | — |
 | NVDA | FY2027 Q3 | revenue | $113.1B [113, 116]B | $108.8B | — | — | — |
+| ORCL | FY2027 Q2 | revenue | $18.9B [18, 21]B | — | — | — | — |
+| TSLA | FY2027 Q1 | revenue | $26.2B [20, 32]B | — | — | — | — |
 | AAPL | FY2026 Q4 | revenue_q4 | 116811300079.36 | 113400000000.00 | — | — | — |
 | AVGO | FY2026 Q4 | revenue_q4 | 26271327795.24 | — | — | — | — |
 | GOOGL | FY2026 Q4 | revenue_q4 | 128207021383.54 | — | — | — | — |
+| META | FY2026 Q4 | revenue_q4 | 72045491682.48 | — | — | — | — |
+| NFLX | FY2026 Q4 | revenue_q4 | 13428468769.40 | — | — | — | — |
+| TSLA | FY2026 Q4 | revenue_q4 | 30786423889.62 | — | — | — | — |
 
 ## Graded history
 
@@ -83,6 +104,23 @@ seeded the ledger; new rows are logged live each week.*
 | AAPL | FY2026 Q1 | revenue | $129.7B | $138.2B | $143.8B | 9.8% | 3.8% |
 | AAPL | FY2026 Q2 | revenue | $104.1B | $109.5B | $111.2B | 6.4% | 1.6% |
 | AAPL | FY2026 Q3 | revenue | $102.8B | $109.0B | $109.4B | 6.0% | 0.3% |
+| AMD | FY2021 Q1 | revenue | $2.5B | — | $3.4B | 27.8% | — |
+| AMD | FY2021 Q2 | revenue | $3.2B | — | $3.9B | 17.7% | — |
+| AMD | FY2021 Q3 | revenue | $4.0B | — | $4.3B | 8.1% | — |
+| AMD | FY2022 Q1 | revenue | $4.5B | — | $5.9B | 23.5% | — |
+| AMD | FY2022 Q2 | revenue | $5.2B | — | $6.5B | 20.1% | — |
+| AMD | FY2022 Q3 | revenue | $6.1B | — | $5.6B | 9.6% | — |
+| AMD | FY2023 Q1 | revenue | $6.9B | — | $5.4B | 28.4% | — |
+| AMD | FY2023 Q2 | revenue | $6.5B | — | $5.4B | 21.0% | — |
+| AMD | FY2023 Q3 | revenue | $6.4B | — | $5.8B | 9.6% | — |
+| AMD | FY2024 Q1 | revenue | $7.2B | — | $5.5B | 31.0% | — |
+| AMD | FY2024 Q2 | revenue | $7.0B | — | $5.8B | 19.3% | — |
+| AMD | FY2024 Q3 | revenue | $6.9B | — | $6.8B | 0.9% | — |
+| AMD | FY2025 Q1 | revenue | $7.3B | $7.1B | $7.4B | 2.2% | 4.5% |
+| AMD | FY2025 Q2 | revenue | $7.6B | $7.4B | $7.7B | 0.9% | 3.6% |
+| AMD | FY2025 Q3 | revenue | $7.9B | $8.8B | $9.2B | 14.8% | 5.3% |
+| AMD | FY2026 Q1 | revenue | $8.5B | $9.9B | $10.3B | 16.9% | 3.4% |
+| AMD | FY2026 Q2 | revenue | $9.1B | $11.3B | $11.5B | 21.5% | 2.0% |
 | AMZN | FY2021 Q1 | revenue | $101.1B | — | $108.5B | 6.9% | — |
 | AMZN | FY2021 Q2 | revenue | $114.8B | — | $113.1B | 1.5% | — |
 | AMZN | FY2021 Q3 | revenue | $121.1B | — | $110.8B | 9.3% | — |
@@ -103,6 +141,23 @@ seeded the ledger; new rows are logged live each week.*
 | AVGO | FY2026 Q1 | revenue | $19.5B | $19.1B | $19.3B | 1.1% | 1.1% |
 | AVGO | FY2026 Q2 | revenue | $22.2B | $22.1B | $22.2B | 0.3% | 0.3% |
 | AVGO | FY2026 Q3 | revenue | $29.7B | $29.2B | $29.6B | 0.4% | 1.2% |
+| CRM | FY2022 Q1 | revenue | $5.9B | — | $6.0B | 1.2% | — |
+| CRM | FY2022 Q2 | revenue | $6.2B | — | $6.3B | 2.1% | — |
+| CRM | FY2022 Q3 | revenue | $6.6B | — | $6.9B | 3.5% | — |
+| CRM | FY2023 Q1 | revenue | $7.2B | — | $7.4B | 3.1% | — |
+| CRM | FY2023 Q2 | revenue | $7.6B | — | $7.7B | 1.6% | — |
+| CRM | FY2023 Q3 | revenue | $8.1B | — | $7.8B | 3.0% | — |
+| CRM | FY2024 Q1 | revenue | $8.5B | — | $8.2B | 3.4% | — |
+| CRM | FY2024 Q2 | revenue | $8.8B | — | $8.6B | 1.8% | — |
+| CRM | FY2024 Q3 | revenue | $9.0B | — | $8.7B | 3.4% | — |
+| CRM | FY2025 Q1 | revenue | $9.4B | — | $9.1B | 3.0% | — |
+| CRM | FY2025 Q2 | revenue | $9.7B | — | $9.3B | 3.7% | — |
+| CRM | FY2025 Q3 | revenue | $9.8B | $9.3B | $9.4B | 4.0% | 1.0% |
+| CRM | FY2026 Q1 | revenue | $10.2B | $9.7B | $9.8B | 3.5% | 0.9% |
+| CRM | FY2026 Q2 | revenue | $10.4B | $10.1B | $10.2B | 1.3% | 0.9% |
+| CRM | FY2026 Q3 | revenue | $10.5B | $10.3B | $10.3B | 2.6% | 0.1% |
+| CRM | FY2027 Q1 | revenue | $10.9B | $11.1B | $11.1B | 2.2% | 0.7% |
+| CRM | FY2027 Q2 | revenue | $11.3B | $11.3B | $11.3B | 0.7% | 0.1% |
 | GOOGL | FY2021 Q2 | revenue | $48.6B | — | $61.9B | 21.4% | — |
 | GOOGL | FY2021 Q3 | revenue | $61.1B | — | $65.1B | 6.2% | — |
 | GOOGL | FY2022 Q1 | revenue | $68.5B | — | $68.0B | 0.7% | — |
@@ -137,6 +192,23 @@ seeded the ledger; new rows are logged live each week.*
 | JPM | FY2025 Q3 | revenue | $45.8B | $44.4B | $46.4B | 1.4% | 4.3% |
 | JPM | FY2026 Q1 | revenue | $48.7B | $48.3B | $49.8B | 2.2% | 3.1% |
 | JPM | FY2026 Q2 | revenue | $51.3B | $50.7B | $57.3B | 10.5% | 11.6% |
+| META | FY2021 Q2 | revenue | $25.0B | — | $29.1B | 13.9% | — |
+| META | FY2021 Q3 | revenue | $29.6B | — | $29.0B | 1.9% | — |
+| META | FY2022 Q1 | revenue | $32.5B | — | $27.9B | 16.5% | — |
+| META | FY2022 Q2 | revenue | $34.4B | — | $28.8B | 19.5% | — |
+| META | FY2022 Q3 | revenue | $34.5B | — | $27.7B | 24.4% | — |
+| META | FY2023 Q1 | revenue | $34.5B | — | $28.6B | 20.4% | — |
+| META | FY2023 Q2 | revenue | $35.0B | — | $32.0B | 9.3% | — |
+| META | FY2023 Q3 | revenue | $35.4B | — | $34.1B | 3.8% | — |
+| META | FY2024 Q1 | revenue | $37.0B | — | $36.5B | 1.4% | — |
+| META | FY2024 Q2 | revenue | $39.3B | — | $39.1B | 0.7% | — |
+| META | FY2024 Q3 | revenue | $40.9B | — | $40.6B | 0.9% | — |
+| META | FY2025 Q1 | revenue | $43.1B | $41.5B | $42.3B | 1.8% | 2.0% |
+| META | FY2025 Q2 | revenue | $45.8B | $44.5B | $47.5B | 3.5% | 6.2% |
+| META | FY2025 Q3 | revenue | $48.0B | $49.3B | $51.2B | 6.2% | 3.7% |
+| META | FY2026 Q1 | revenue | $51.0B | $55.6B | $56.3B | 9.4% | 1.3% |
+| META | FY2026 Q2 | revenue | $55.7B | $60.2B | $60.8B | 8.3% | 1.0% |
+| META | FY2026 Q3 | revenue | $59.1B | $63.3B | $64.6B | 8.5% | 2.0% |
 | MSFT | FY2021 Q3 | revenue | $40.1B | — | $41.7B | 3.8% | — |
 | MSFT | FY2022 Q1 | revenue | $43.8B | — | $45.3B | 3.3% | — |
 | MSFT | FY2022 Q2 | revenue | $50.4B | — | $51.7B | 2.6% | — |
@@ -154,14 +226,69 @@ seeded the ledger; new rows are logged live each week.*
 | MSFT | FY2026 Q2 | revenue | $82.7B | $80.3B | $81.3B | 1.7% | 1.2% |
 | MSFT | FY2026 Q3 | revenue | $80.4B | $81.4B | $82.9B | 3.0% | 1.7% |
 | MSFT | FY2027 Q1 | revenue | $86.3B | $90.6B | $92.3B | 6.5% | 1.8% |
+| NFLX | FY2021 Q1 | revenue | $7.2B | — | $7.2B | 0.6% | — |
+| NFLX | FY2021 Q2 | revenue | $7.7B | — | $7.3B | 4.3% | — |
+| NFLX | FY2021 Q3 | revenue | $7.9B | — | $7.5B | 6.2% | — |
+| NFLX | FY2022 Q1 | revenue | $8.7B | — | $7.9B | 10.2% | — |
+| NFLX | FY2022 Q2 | revenue | $8.7B | — | $8.0B | 8.6% | — |
+| NFLX | FY2022 Q3 | revenue | $8.5B | — | $7.9B | 6.8% | — |
+| NFLX | FY2023 Q1 | revenue | $8.6B | — | $8.2B | 5.3% | — |
+| NFLX | FY2023 Q2 | revenue | $8.5B | — | $8.2B | 4.4% | — |
+| NFLX | FY2023 Q3 | revenue | $8.3B | — | $8.5B | 2.7% | — |
+| NFLX | FY2024 Q1 | revenue | $8.6B | — | $9.4B | 8.7% | — |
+| NFLX | FY2024 Q2 | revenue | $8.7B | — | $9.6B | 9.4% | — |
+| NFLX | FY2024 Q3 | revenue | $9.5B | — | $9.8B | 3.2% | — |
+| NFLX | FY2025 Q1 | revenue | $10.8B | $10.5B | $10.5B | 2.1% | 0.3% |
+| NFLX | FY2025 Q2 | revenue | $11.0B | $11.0B | $11.1B | 0.8% | 0.4% |
+| NFLX | FY2025 Q3 | revenue | $11.3B | $11.5B | $11.5B | 1.4% | 0.0% |
+| NFLX | FY2026 Q1 | revenue | $12.2B | $12.2B | $12.2B | 0.6% | 0.7% |
+| NFLX | FY2026 Q2 | revenue | $12.9B | $12.6B | $12.6B | 2.4% | 0.2% |
+| NFLX | FY2026 Q3 | revenue | $13.4B | $12.9B | $12.9B | 3.8% | 0.0% |
 | NVDA | FY2026 Q3 | revenue | $55.7B | $54.7B | $57.0B | 2.3% | 4.1% |
 | NVDA | FY2027 Q1 | revenue | $81.4B | $78.4B | $81.6B | 0.3% | 3.9% |
 | NVDA | FY2027 Q2 | revenue | $95.2B | $92.3B | $96.2B | 1.0% | 4.1% |
+| ORCL | FY2022 Q1 | revenue | $9.5B | — | $9.7B | 1.9% | — |
+| ORCL | FY2022 Q2 | revenue | $10.0B | — | $10.4B | 3.1% | — |
+| ORCL | FY2022 Q3 | revenue | $10.4B | — | $10.5B | 0.8% | — |
+| ORCL | FY2023 Q1 | revenue | $10.1B | — | $11.4B | 11.6% | — |
+| ORCL | FY2023 Q2 | revenue | $10.9B | — | $12.3B | 11.4% | — |
+| ORCL | FY2023 Q3 | revenue | $11.7B | — | $12.4B | 5.3% | — |
+| ORCL | FY2024 Q1 | revenue | $13.5B | — | $12.5B | 8.3% | — |
+| ORCL | FY2024 Q2 | revenue | $14.5B | — | $12.9B | 11.7% | — |
+| ORCL | FY2024 Q3 | revenue | $14.1B | — | $13.3B | 5.8% | — |
+| ORCL | FY2025 Q1 | revenue | $13.4B | — | $13.3B | 1.0% | — |
+| ORCL | FY2025 Q2 | revenue | $13.8B | $14.1B | $14.1B | 1.5% | 0.4% |
+| ORCL | FY2025 Q3 | revenue | $14.2B | $14.4B | $14.1B | 0.6% | 1.9% |
+| ORCL | FY2026 Q1 | revenue | $14.2B | $15.0B | $14.9B | 4.6% | 0.8% |
+| ORCL | FY2026 Q2 | revenue | $15.1B | $16.2B | $16.1B | 5.7% | 0.8% |
+| ORCL | FY2026 Q3 | revenue | $15.6B | $16.9B | $17.2B | 9.2% | 1.6% |
+| ORCL | FY2027 Q1 | revenue | $16.9B | $19.1B | $19.3B | 12.7% | 1.1% |
+| TSLA | FY2021 Q2 | revenue | $9.6B | — | $12.0B | 20.0% | — |
+| TSLA | FY2021 Q3 | revenue | $12.5B | — | $13.8B | 9.2% | — |
+| TSLA | FY2022 Q1 | revenue | $13.8B | — | $18.8B | 26.2% | — |
+| TSLA | FY2022 Q2 | revenue | $17.3B | — | $16.9B | 2.0% | — |
+| TSLA | FY2022 Q3 | revenue | $18.9B | — | $21.5B | 12.0% | — |
+| TSLA | FY2023 Q1 | revenue | $22.5B | — | $23.3B | 3.4% | — |
+| TSLA | FY2023 Q2 | revenue | $22.9B | — | $24.9B | 7.9% | — |
+| TSLA | FY2023 Q3 | revenue | $26.5B | — | $23.4B | 13.4% | — |
+| TSLA | FY2024 Q1 | revenue | $28.2B | — | $21.3B | 32.2% | — |
+| TSLA | FY2024 Q2 | revenue | $27.1B | — | $25.5B | 6.2% | — |
+| TSLA | FY2024 Q3 | revenue | $27.8B | — | $25.2B | 10.3% | — |
+| TSLA | FY2025 Q1 | revenue | $27.8B | $22.9B | $19.3B | 43.8% | 18.6% |
+| TSLA | FY2025 Q2 | revenue | $27.9B | $23.2B | $22.5B | 23.9% | 3.0% |
+| TSLA | FY2025 Q3 | revenue | $27.2B | $25.0B | $28.1B | 3.1% | 11.1% |
+| TSLA | FY2026 Q1 | revenue | $25.4B | $23.0B | $22.4B | 13.7% | 2.6% |
+| TSLA | FY2026 Q2 | revenue | $27.2B | $26.4B | $28.2B | 3.7% | 6.4% |
+| TSLA | FY2026 Q3 | revenue | $29.9B | $28.1B | $28.0B | 6.6% | 0.0% |
 | AAPL | FY2021 Q4 | revenue_q4 | 89661157316.28 | — | 83360000000.00 | 7.6% | — |
 | AAPL | FY2022 Q4 | revenue_q4 | 93795865139.62 | — | 90146000000.00 | 4.0% | — |
 | AAPL | FY2023 Q4 | revenue_q4 | 64096225271.30 | — | 171295000000.00 | 62.6% | — |
 | AAPL | FY2024 Q4 | revenue_q4 | 91305286463.92 | 94520000000.00 | 94930000000.00 | 3.8% | 0.4% |
 | AAPL | FY2025 Q4 | revenue_q4 | 98649259869.47 | 101650000000.00 | 102466000000.00 | 3.7% | 0.8% |
+| AMD | FY2022 Q4 | revenue_q4 | 8316736316.25 | — | 5599000000.00 | 48.5% | — |
+| AMD | FY2023 Q4 | revenue_q4 | 7246599433.21 | — | 6168000000.00 | 17.5% | — |
+| AMD | FY2024 Q4 | revenue_q4 | 7536259648.52 | 7530000000.00 | 7658000000.00 | 1.6% | 1.7% |
+| AMD | FY2025 Q4 | revenue_q4 | 10213187879.26 | 9650000000.00 | 10270000000.00 | 0.6% | 6.0% |
 | AMZN | FY2021 Q4 | revenue_q4 | 155368821047.47 | — | 137412000000.00 | 13.1% | — |
 | AMZN | FY2022 Q4 | revenue_q4 | 165187256508.79 | — | 149204000000.00 | 10.7% | — |
 | AMZN | FY2023 Q4 | revenue_q4 | 175333945691.81 | — | 169961000000.00 | 3.2% | — |
@@ -172,6 +299,11 @@ seeded the ledger; new rows are logged live each week.*
 | AVGO | FY2023 Q4 | revenue_q4 | 9780114202.70 | — | 9295000000.00 | 5.2% | — |
 | AVGO | FY2024 Q4 | revenue_q4 | 13803551270.96 | 14070000000.00 | 14054000000.00 | 1.8% | 0.1% |
 | AVGO | FY2025 Q4 | revenue_q4 | 16914243655.04 | 17460000000.00 | 18015000000.00 | 6.1% | 3.1% |
+| CRM | FY2022 Q4 | revenue_q4 | 7407349964.03 | — | 7326000000.00 | 1.1% | — |
+| CRM | FY2023 Q4 | revenue_q4 | 8779274131.27 | — | 8384000000.00 | 4.7% | — |
+| CRM | FY2024 Q4 | revenue_q4 | 9705223018.94 | — | 9287000000.00 | 4.5% | — |
+| CRM | FY2025 Q4 | revenue_q4 | 10515447619.05 | — | 9993000000.00 | 5.2% | — |
+| CRM | FY2026 Q4 | revenue_q4 | 11248693178.09 | 11180000000.00 | 11201000000.00 | 0.4% | 0.2% |
 | GOOGL | FY2021 Q4 | revenue_q4 | 39281947290.51 | — | 75325000000.00 | 47.9% | — |
 | GOOGL | FY2022 Q4 | revenue_q4 | 75861790437.78 | — | 76048000000.00 | 0.2% | — |
 | GOOGL | FY2023 Q4 | revenue_q4 | 76777939648.19 | — | 86310000000.00 | 11.0% | — |
@@ -182,13 +314,31 @@ seeded the ledger; new rows are logged live each week.*
 | JPM | FY2023 Q4 | revenue_q4 | 38440929137.16 | — | 38574000000.00 | 0.3% | — |
 | JPM | FY2024 Q4 | revenue_q4 | 43497969647.79 | 41900000000.00 | 42768000000.00 | 1.7% | 2.0% |
 | JPM | FY2025 Q4 | revenue_q4 | 43860239658.63 | 45980000000.00 | 45798000000.00 | 4.2% | 0.4% |
+| META | FY2021 Q4 | revenue_q4 | 21792113747.61 | — | 33671000000.00 | 35.3% | — |
+| META | FY2022 Q4 | revenue_q4 | 33263839959.32 | — | 32165000000.00 | 3.4% | — |
+| META | FY2023 Q4 | revenue_q4 | 30726358736.00 | — | 40112000000.00 | 23.4% | — |
+| META | FY2024 Q4 | revenue_q4 | 43216011434.96 | 46960000000.00 | 48386000000.00 | 10.7% | 2.9% |
+| META | FY2025 Q4 | revenue_q4 | 58038723451.25 | 58330000000.00 | 59894000000.00 | 3.1% | 2.6% |
 | MSFT | FY2022 Q4 | revenue_q4 | 55413360779.43 | — | 51865000000.00 | 6.8% | — |
 | MSFT | FY2023 Q4 | revenue_q4 | 57678947393.21 | — | 56189000000.00 | 2.7% | — |
 | MSFT | FY2024 Q4 | revenue_q4 | 65353708588.14 | — | 64727000000.00 | 1.0% | — |
 | MSFT | FY2025 Q4 | revenue_q4 | 74220150529.20 | 73790000000.00 | 76441000000.00 | 2.9% | 3.5% |
 | MSFT | FY2026 Q4 | revenue_q4 | 87611175782.52 | 87620000000.00 | 90007000000.00 | 2.7% | 2.7% |
+| NFLX | FY2021 Q4 | revenue_q4 | 8072818720.15 | — | 7709318000.00 | 4.7% | — |
+| NFLX | FY2022 Q4 | revenue_q4 | 8603885060.66 | — | 7852053000.00 | 9.6% | — |
+| NFLX | FY2023 Q4 | revenue_q4 | 8869339977.41 | — | 8832825000.00 | 0.4% | — |
+| NFLX | FY2024 Q4 | revenue_q4 | 10204027120.09 | 10140000000.00 | 10246513000.00 | 0.4% | 1.0% |
+| NFLX | FY2025 Q4 | revenue_q4 | 11782051613.13 | 11970000000.00 | 12050762000.00 | 2.2% | 0.7% |
 | NVDA | FY2022 Q4 | revenue_q4 | 7959377704.58 | — | 7643000000.00 | 4.1% | — |
 | NVDA | FY2023 Q4 | revenue_q4 | 8315104953.28 | — | 6051000000.00 | 37.4% | — |
 | NVDA | FY2024 Q4 | revenue_q4 | 15411547980.94 | — | 22103000000.00 | 30.3% | — |
 | NVDA | FY2025 Q4 | revenue_q4 | 36230696275.44 | 38160000000.00 | 39331000000.00 | 7.9% | 3.0% |
 | NVDA | FY2026 Q4 | revenue_q4 | 61049430641.45 | 65560000000.00 | 68127000000.00 | 10.4% | 3.8% |
+| ORCL | FY2022 Q4 | revenue_q4 | 11744750000.00 | — | 11839000000.00 | 0.8% | — |
+| ORCL | FY2023 Q4 | revenue_q4 | 13917811223.49 | — | 13836000000.00 | 0.6% | — |
+| ORCL | FY2024 Q4 | revenue_q4 | 14843190140.85 | — | 14287000000.00 | 3.9% | — |
+| ORCL | FY2025 Q4 | revenue_q4 | 15911236752.93 | 15580000000.00 | 15903000000.00 | 0.1% | 2.0% |
+| ORCL | FY2026 Q4 | revenue_q4 | 18462288461.54 | 19100000000.00 | 19183000000.00 | 3.8% | 0.4% |
+| TSLA | FY2023 Q4 | revenue_q4 | 35142552459.56 | — | 25167000000.00 | 39.6% | — |
+| TSLA | FY2024 Q4 | revenue_q4 | 32980203996.58 | 27120000000.00 | 25707000000.00 | 28.3% | 5.5% |
+| TSLA | FY2025 Q4 | revenue_q4 | 29757463040.74 | 24750000000.00 | 24901000000.00 | 19.5% | 0.6% |
