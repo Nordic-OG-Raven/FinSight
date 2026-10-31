@@ -18,7 +18,6 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date
 from functools import lru_cache
-from math import ceil
 from pathlib import Path
 
 from sqlalchemy import create_engine, text
@@ -92,11 +91,19 @@ def _fye_month(conn, ticker: str, as_of: date) -> int:
 
 
 def _fy_and_quarter(period_end: date, fye_month: int) -> tuple[int, int]:
-    """Fiscal year (named by the year it ends in) + fiscal quarter number (1-4)."""
+    """Fiscal year (named by the year it ends in) + fiscal quarter number (1-4).
+
+    Quarter = how many 3-month steps the period_end sits before the fiscal-year-end month, ROUNDED
+    so a 52/53-week filer whose quarter-end drifts a few days into the next month (e.g. AAPL
+    fiscal-Q2 ending Apr 1, fiscal-Q3 ending Jul 1 in a 53-week year) still maps to the right
+    quarter. A plain month-bucket (ceil) mislabels those as the NEXT quarter, which silently
+    dropped a quarter from the YTD sum and corrupted the derived Q4. Matches the warehouse's
+    derivation exactly (validated to reproduce every correctly-labeled quarter).
+    """
     m = period_end.month
     fiscal_year = period_end.year + (1 if m > fye_month else 0)
-    months_into_fy = ((m - (fye_month + 1)) % 12) + 1   # 1..12 since fiscal-year start
-    quarter_num = ceil(months_into_fy / 3)
+    steps = ((fye_month - m + 12) % 12) / 3.0           # 0 at the fiscal-year-end, ~1 a quarter before
+    quarter_num = max(1, min(4, 4 - round(steps)))
     return fiscal_year, quarter_num
 
 
