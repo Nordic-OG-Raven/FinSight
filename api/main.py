@@ -1027,7 +1027,10 @@ def get_pipeline_stats():
                     "companies": one("SELECT count(DISTINCT ticker) FROM bronze.raw_filings"),
                 },
                 "silver": {"conformed_facts": served},
-                "gold": {"served_facts": served},
+                "gold": {
+                    "served_facts": served,
+                    "marts": one("SELECT count(*) FROM information_schema.tables WHERE table_schema = 'gold'"),
+                },
                 "intelligence": {
                     "forecasts": one("SELECT count(*) FROM forecasts.forecast_log"),
                     "graded": one("SELECT count(*) FROM forecasts.forecast_log WHERE graded_at IS NOT NULL"),
