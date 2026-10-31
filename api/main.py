@@ -1000,34 +1000,41 @@ def get_forecast(ticker):
         return jsonify({"error": "server_error", "message": str(e)}), 500
 
 
+_PIPELINE_STATS_CACHE = {"ts": 0.0, "data": None}
+_PIPELINE_STATS_TTL = 3600  # counts only change on the weekly ingest; cache for an hour
+
+
 @app.route('/api/pipeline-stats', methods=['GET'])
 def get_pipeline_stats():
     """Live row counts per medallion layer, for the pipeline overview visualization: how many
-    raw filings/facts land in bronze, conform in silver, serve in gold, and drive forecasts."""
+    raw filings/facts land in bronze, conform in silver, serve in gold, and drive forecasts.
+    All counts hit TABLES (never the silver dedup VIEW, which is slow); the gold serving table is
+    1:1 with the conformed silver grain so it stands in for the conformed count. Cached 1h."""
+    import time
+    if _PIPELINE_STATS_CACHE["data"] and (time.time() - _PIPELINE_STATS_CACHE["ts"]) < _PIPELINE_STATS_TTL:
+        return jsonify(_PIPELINE_STATS_CACHE["data"])
     try:
         from sqlalchemy import create_engine, text
         engine = create_engine(DATABASE_URL)
         with engine.connect() as conn:
             def one(sql):
                 return conn.execute(text(sql)).scalar() or 0
+            served = one("SELECT count(*) FROM gold.v_facts_hierarchical")
             stats = {
                 "bronze": {
                     "filings": one("SELECT count(*) FROM bronze.raw_filings"),
                     "raw_facts": one("SELECT count(*) FROM bronze.raw_facts"),
                     "companies": one("SELECT count(DISTINCT ticker) FROM bronze.raw_filings"),
                 },
-                "silver": {
-                    "conformed_facts": one("SELECT count(*) FROM silver.fct_financial_facts"),
-                    "canonical_facts": one("SELECT count(*) FROM silver.fct_financial_facts WHERE canonical_label IS NOT NULL"),
-                },
-                "gold": {
-                    "served_facts": one("SELECT count(*) FROM gold.v_facts_hierarchical"),
-                },
+                "silver": {"conformed_facts": served},
+                "gold": {"served_facts": served},
                 "intelligence": {
                     "forecasts": one("SELECT count(*) FROM forecasts.forecast_log"),
                     "graded": one("SELECT count(*) FROM forecasts.forecast_log WHERE graded_at IS NOT NULL"),
                 },
             }
+        _PIPELINE_STATS_CACHE["data"] = stats
+        _PIPELINE_STATS_CACHE["ts"] = time.time()
         return jsonify(stats)
     except Exception as e:  # noqa: BLE001
         return jsonify({"error": "server_error", "message": str(e)}), 500
