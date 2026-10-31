@@ -1000,6 +1000,39 @@ def get_forecast(ticker):
         return jsonify({"error": "server_error", "message": str(e)}), 500
 
 
+@app.route('/api/pipeline-stats', methods=['GET'])
+def get_pipeline_stats():
+    """Live row counts per medallion layer, for the pipeline overview visualization: how many
+    raw filings/facts land in bronze, conform in silver, serve in gold, and drive forecasts."""
+    try:
+        from sqlalchemy import create_engine, text
+        engine = create_engine(DATABASE_URL)
+        with engine.connect() as conn:
+            def one(sql):
+                return conn.execute(text(sql)).scalar() or 0
+            stats = {
+                "bronze": {
+                    "filings": one("SELECT count(*) FROM bronze.raw_filings"),
+                    "raw_facts": one("SELECT count(*) FROM bronze.raw_facts"),
+                    "companies": one("SELECT count(DISTINCT ticker) FROM bronze.raw_filings"),
+                },
+                "silver": {
+                    "conformed_facts": one("SELECT count(*) FROM silver.fct_financial_facts"),
+                    "canonical_facts": one("SELECT count(*) FROM silver.fct_financial_facts WHERE canonical_label IS NOT NULL"),
+                },
+                "gold": {
+                    "served_facts": one("SELECT count(*) FROM gold.v_facts_hierarchical"),
+                },
+                "intelligence": {
+                    "forecasts": one("SELECT count(*) FROM forecasts.forecast_log"),
+                    "graded": one("SELECT count(*) FROM forecasts.forecast_log WHERE graded_at IS NOT NULL"),
+                },
+            }
+        return jsonify(stats)
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": "server_error", "message": str(e)}), 500
+
+
 @app.route('/api/track-record', methods=['GET'])
 def get_track_record():
     """Cross-company forecast scorecard from the live ledger: per (ticker, metric) realized
