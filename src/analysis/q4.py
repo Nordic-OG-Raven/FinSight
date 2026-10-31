@@ -184,7 +184,7 @@ def q4_backtest(db, ticker: str) -> dict:
     with pit._engine(db).connect() as conn:
         fye_month = pit._fye_month(conn, ticker, date(2100, 1, 1))
     full = q4_history(db, ticker, date(2100, 1, 1), fye_month)
-    guid = gd.guidance_history(ticker, limit=GUIDE_LIMIT)
+    guid = gd.guidance_history(ticker, limit=GUIDE_LIMIT, earnings_only=True)
     beats = _beat_pairs(db, ticker, guid) if guid else []
     models = ("ytd_ratio", "seasonal_naive", "guide_quarter")
     apes = {m: [] for m in models}
@@ -241,7 +241,7 @@ def forecast_next_q4(db, ticker: str) -> dict | None:
     hist = q4_history(db, ticker, date(2100, 1, 1), fye_month)
     tqe = (hist[-1].quarter_end + timedelta(days=364)) if (hist and hist[-1].quarter_end) else None
     if best == "guide_quarter":
-        guid = gd.guidance_history(ticker, limit=GUIDE_LIMIT)
+        guid = gd.guidance_history(ticker, limit=GUIDE_LIMIT, earnings_only=True)
         beats = _beat_pairs(db, ticker, guid)
         pred = _guide_quarter_pred(guid, beats, date.today(), tqe, walk_forward=False)
     else:

@@ -198,21 +198,31 @@ def _llm_extract(snippet: str) -> tuple[float | None, str]:
 # public API
 # ---------------------------------------------------------------------------
 @lru_cache(maxsize=256)
-def guidance_history(ticker: str, limit: int = 24, use_llm: bool = True,
+def guidance_history(ticker: str, limit: int = 20, use_llm: bool = True,
+                     earnings_only: bool = False,
                      identity: str = "Jonas Haahr itsxidey@gmail.com") -> list[Guidance]:
-    """Forward revenue guidance from recent EARNINGS 8-Ks (SEC item 2.02), oldest-first, one per
-    release. Filtering to item 2.02 skips the many product / partnership / governance 8-Ks that
-    otherwise dilute the window and carry no quarterly guidance (the item code is in the filing index,
-    so the filter costs no extra fetch) — this is what lets AMD-style filers be found at all. `limit`
-    counts earnings releases (~limit/4 years). Cached: fetched from EDGAR repeatedly within a run
-    (routing, the guidance-beat model, scoring, backfill); filings are static. Read-only result."""
+    """Forward revenue guidance from recent earnings 8-Ks, oldest-first, one per release.
+
+    Default (the Q1-Q3 path): the latest `limit` 8-Ks. This is intentionally recency-weighted — for
+    hyper-growth names whose beat regime shifted (e.g. NVDA's 2022 crash vs the 2023+ AI boom),
+    deeper history makes the guidance-beat WORSE, so Q1-Q3 deliberately stays recent.
+
+    earnings_only=True (the Q4 path): scan a wide window and keep only item-2.02 EARNINGS 8-Ks
+    (skipping the many product/partnership/governance 8-Ks that dilute it and hide earnings entirely
+    for AMD-style filers). Q4 forecasting needs several years of guidance to pair with each Q4, so it
+    opts into the deeper, earnings-filtered history. The item code is in the filing index (no fetch).
+
+    Cached (fetched repeatedly within a run; filings are static). Read-only result."""
     edgar.set_identity(identity)
     company = edgar.Company(ticker)
-    earnings = [f for f in company.get_filings(form="8-K").latest(160)
-                if "2.02" in str(getattr(f, "items", "") or "")][:limit]
+    if earnings_only:
+        filings = [f for f in company.get_filings(form="8-K").latest(160)
+                   if "2.02" in str(getattr(f, "items", "") or "")][:limit]
+    else:
+        filings = list(company.get_filings(form="8-K").latest(limit))
     out: list[Guidance] = []
     seen_dates: set = set()
-    for filing in earnings:
+    for filing in filings:
         fdate = getattr(filing, "filing_date", None)
         if fdate in seen_dates:
             continue
