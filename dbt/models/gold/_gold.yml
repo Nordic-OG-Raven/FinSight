@@ -10,7 +10,12 @@ models:
     description: >
       Rich denormalized serving view: all facts (consolidated + dimensional) with dimension
       axis/member embedded (no join needed) and period_grain. Consumed by
-      /api/metrics, /api/data, /api/analyze, /api/financials.
+      /api/metrics, /api/data, /api/analyze, /api/financials. Carries accession (the source SEC
+      filing id) so any served number can be traced back to its filing (/api/lineage).
+    columns:
+      - name: accession
+        description: Source SEC filing accession (carried from silver fct_financial_facts).
+        tests: [not_null]
   - name: companies
     description: Company/filing metadata for /api/companies (one row per annual filing).
   - name: company_financials

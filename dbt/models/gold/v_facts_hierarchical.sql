@@ -15,6 +15,7 @@
 
 select
     f.ticker,
+    f.accession,  -- source SEC filing id; carried from silver so any served number traces to its filing
     f.concept                                         as concept_name,
     f.taxonomy,
     {{ normalized_label('f.concept', 'f.canonical_label') }} as normalized_label,

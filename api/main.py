@@ -24,6 +24,8 @@ from contextlib import contextmanager
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.utils.concept_label_mapping import get_humanized_label
+from src.utils.edgar_url import edgar_filing_url
+from src.provenance.layers import all_layers
 from config import DATABASE_URL, NP2SQL_DATABASE_URL, NP2SQL_QUERY_TIMEOUT, NP2SQL_MAX_ROWS
 
 app = Flask(__name__)
@@ -1007,6 +1009,246 @@ def get_peers():
         return jsonify({"as_of": "latest_filed", "currency": "USD",
                         "companies": peer_comparison(DATABASE_URL)})
     except Exception as e:
+        return jsonify({"error": "server_error", "message": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Data provenance / lineage (the transparency surface). All read-only. These let the UI
+# browse the raw bronze filings and trace any served number back to its source SEC filing.
+# ---------------------------------------------------------------------------
+
+@app.route('/api/filings/<ticker>', methods=['GET'])
+def get_filings(ticker):
+    """Bronze filings browser: every SEC filing ingested for a company, newest first, with a
+    raw-fact count and a direct EDGAR link. Reads bronze.raw_filings only."""
+    ticker = ticker.upper()
+    try:
+        from sqlalchemy import create_engine, text
+        engine = create_engine(DATABASE_URL)
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT rf.accession, rf.cik, rf.company_name, rf.form,
+                       rf.filing_date, rf.period_of_report,
+                       (SELECT COUNT(*) FROM bronze.raw_facts WHERE accession = rf.accession) AS fact_count
+                FROM bronze.raw_filings rf
+                WHERE rf.ticker = :t
+                ORDER BY rf.filing_date DESC NULLS LAST, rf.accession DESC
+            """), {"t": ticker}).fetchall()
+        if not rows:
+            return jsonify({"error": "not_found", "message": f"No filings for {ticker}"}), 404
+        filings = [{
+            "accession": r[0], "cik": r[1], "company_name": r[2], "form": r[3],
+            "filing_date": str(r[4]) if r[4] else None,
+            "period_of_report": str(r[5]) if r[5] else None,
+            "fact_count": r[6],
+            "edgar_url": edgar_filing_url(r[1], r[0]),
+        } for r in rows]
+        return jsonify({"ticker": ticker, "count": len(filings), "filings": filings})
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": "server_error", "message": str(e)}), 500
+
+
+@app.route('/api/raw-facts/<ticker>', methods=['GET'])
+def get_raw_facts(ticker):
+    """Bronze drill-down: the raw XBRL facts as ingested for one filing, exactly as filed
+    (native currency, raw concept, dimensions as JSON). Requires ?accession=."""
+    ticker = ticker.upper()
+    accession = request.args.get('accession')
+    if not accession:
+        return jsonify({"error": "bad_request", "message": "accession query param is required"}), 400
+    limit = min(int(request.args.get('limit', 500)), 5000)
+    try:
+        from sqlalchemy import create_engine, text
+        engine = create_engine(DATABASE_URL)
+        with engine.connect() as conn:
+            header = conn.execute(text("""
+                SELECT accession, cik, company_name, form, filing_date, period_of_report
+                FROM bronze.raw_filings WHERE accession = :a AND ticker = :t
+            """), {"a": accession, "t": ticker}).fetchone()
+            if not header:
+                return jsonify({"error": "not_found",
+                                "message": f"No filing {accession} for {ticker}"}), 404
+            rows = conn.execute(text("""
+                SELECT fact_id, concept, label, standard_label, value_numeric, value_text, unit,
+                       period_type, period_start, period_end, instant_date,
+                       fiscal_year, fiscal_period, statement_type, dimensions, is_dimensioned
+                FROM bronze.raw_facts
+                WHERE ticker = :t AND accession = :a
+                ORDER BY statement_type NULLS LAST, concept
+                LIMIT :lim
+            """), {"t": ticker, "a": accession, "lim": limit}).fetchall()
+        facts = [{
+            "fact_id": r[0], "concept": r[1], "label": r[2], "standard_label": r[3],
+            "value_numeric": float(r[4]) if r[4] is not None else None, "value_text": r[5],
+            "unit": r[6], "period_type": r[7],
+            "period_start": str(r[8]) if r[8] else None, "period_end": str(r[9]) if r[9] else None,
+            "instant_date": str(r[10]) if r[10] else None,
+            "fiscal_year": r[11], "fiscal_period": r[12], "statement_type": r[13],
+            "dimensions": r[14], "is_dimensioned": r[15],
+        } for r in rows]
+        return jsonify({
+            "ticker": ticker,
+            "filing": {
+                "accession": header[0], "cik": header[1], "company_name": header[2],
+                "form": header[3], "filing_date": str(header[4]) if header[4] else None,
+                "period_of_report": str(header[5]) if header[5] else None,
+                "edgar_url": edgar_filing_url(header[1], header[0]),
+            },
+            "count": len(facts), "truncated": len(facts) >= limit, "facts": facts,
+        })
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": "server_error", "message": str(e)}), 500
+
+
+@app.route('/api/canonical-facts/<ticker>', methods=['GET'])
+def get_canonical_facts(ticker):
+    """Silver view: the conformed fact grain, one row per economic fact (deduped to the latest
+    filing), with the canonical label resolved so synonymous concepts reconcile 1:1. Reads
+    silver.fct_financial_facts directly."""
+    ticker = ticker.upper()
+    limit = min(int(request.args.get('limit', 1000)), 5000)
+    try:
+        from sqlalchemy import create_engine, text
+        engine = create_engine(DATABASE_URL)
+        with engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT accession, concept, canonical_label, standard_label,
+                       value_usd, value_numeric, unit, fiscal_year, fiscal_period,
+                       period_type, statement_type
+                FROM silver.fct_financial_facts
+                WHERE ticker = :t AND is_dimensioned = false AND canonical_label IS NOT NULL
+                ORDER BY fiscal_year DESC NULLS LAST, canonical_label, fiscal_period
+                LIMIT :lim
+            """), {"t": ticker, "lim": limit}).fetchall()
+        if not rows:
+            return jsonify({"error": "not_found", "message": f"No canonical facts for {ticker}"}), 404
+        facts = [{
+            "accession": r[0], "concept": r[1], "canonical_label": r[2], "standard_label": r[3],
+            "value_usd": float(r[4]) if r[4] is not None else None,
+            "value_numeric": float(r[5]) if r[5] is not None else None,
+            "unit": r[6], "fiscal_year": r[7], "fiscal_period": r[8],
+            "period_type": r[9], "statement_type": r[10],
+        } for r in rows]
+        return jsonify({"ticker": ticker, "count": len(facts),
+                        "truncated": len(facts) >= limit, "facts": facts})
+    except Exception as e:  # noqa: BLE001
+        return jsonify({"error": "server_error", "message": str(e)}), 500
+
+
+@app.route('/api/lineage/layers', methods=['GET'])
+def get_lineage_layers():
+    """Plain-English explanation + a faithful code excerpt for each medallion layer
+    (bronze -> silver -> gold). Curated, read-only. See src/provenance/layers.py."""
+    return jsonify({"layers": all_layers()})
+
+
+@app.route('/api/lineage/<ticker>', methods=['GET'])
+def get_lineage(ticker):
+    """Trace one reported number back to its source SEC filing. Identify the fact either by
+    ?fact_id=<n> (from the raw-facts drill-down) or by ?concept=<xbrl concept>&fiscal_year=<y>
+    [&fiscal_period=<p>] (the identity the statements views carry). Returns the layered chain
+    gold -> silver -> bronze -> filing, plus the EDGAR url."""
+    ticker = ticker.upper()
+    fact_id = request.args.get('fact_id')
+    concept = request.args.get('concept')
+    fy = request.args.get('fiscal_year')
+    fp = request.args.get('fiscal_period')  # optional; None matches any
+    if not fact_id and not (concept and fy):
+        return jsonify({"error": "bad_request",
+                        "message": "provide fact_id, or concept + fiscal_year"}), 400
+    # The statements UI carries the concept as edgartools emits it ("us-gaap_Revenues" or
+    # "us-gaap:Revenues" or a bare local name); gold stores "taxonomy:LocalName". Match on the
+    # local part so the trace resolves regardless of the taxonomy-prefix separator.
+    local = concept.split(':')[-1].split('_')[-1] if concept else None
+    try:
+        from sqlalchemy import create_engine, text
+        engine = create_engine(DATABASE_URL)
+        with engine.connect() as conn:
+            # Anchor on a bronze fact if a fact_id was given; otherwise on the gold serving row.
+            gold = None
+            if fact_id:
+                bf = conn.execute(text("""
+                    SELECT accession, concept, value_numeric, unit, fiscal_year, fiscal_period
+                    FROM bronze.raw_facts WHERE fact_id = :fid AND ticker = :t
+                """), {"fid": int(fact_id), "t": ticker}).fetchone()
+                if not bf:
+                    return jsonify({"error": "not_found",
+                                    "message": f"No fact {fact_id} for {ticker}"}), 404
+                accession, concept = bf[0], bf[1]
+                bronze_value, bronze_unit = bf[2], bf[3]
+            else:
+                try:
+                    gold = conn.execute(text("""
+                        SELECT ticker, concept_name, normalized_label, standard_label, preferred_label,
+                               statement_type, fiscal_year, fiscal_period, period_label,
+                               value_numeric, value_usd, unit_measure, is_dimensioned, accession
+                        FROM gold.v_facts_hierarchical
+                        WHERE ticker = :t AND fiscal_year = :fy
+                          AND (concept_name = :c OR split_part(concept_name, ':', 2) = :local)
+                          AND (:fp IS NULL OR fiscal_period = :fp)
+                          AND is_dimensioned = false
+                        -- prefer the annual-report fact (what the statements view shows) over a
+                        -- same-year quarterly row; exact concept match wins over a local-name match
+                        ORDER BY (concept_name = :c) DESC,
+                                 (period_grain IN ('annual', 'instant')) DESC,
+                                 fiscal_year DESC
+                        LIMIT 1
+                    """), {"t": ticker, "c": concept, "local": local,
+                           "fy": int(fy), "fp": fp}).fetchone()
+                except Exception as col_err:  # noqa: BLE001
+                    msg = str(col_err).lower()
+                    if "accession" in msg and "column" in msg:
+                        return jsonify({"error": "warming_up",
+                                        "message": "lineage is being prepared; try again shortly"}), 503
+                    raise
+                if not gold:
+                    return jsonify({"error": "not_found",
+                                    "message": f"No {concept} for {ticker} {fy}"}), 404
+                accession = gold[13]
+                concept = gold[1]  # canonicalize to the gold concept_name (matches bronze format)
+                # the matching bronze fact (exact source) = same accession+concept, value matches gold
+                bronze_value, bronze_unit = gold[9], gold[11]
+                bf = conn.execute(text("""
+                    SELECT value_numeric, unit FROM bronze.raw_facts
+                    WHERE accession = :a AND concept = :c AND is_dimensioned = false
+                    ORDER BY (value_numeric = :v) DESC NULLS LAST LIMIT 1
+                """), {"a": accession, "c": concept, "v": gold[9]}).fetchone()
+                if bf:
+                    bronze_value, bronze_unit = bf[0], bf[1]
+
+            filing = conn.execute(text("""
+                SELECT accession, cik, company_name, form, filing_date, period_of_report
+                FROM bronze.raw_filings WHERE accession = :a
+            """), {"a": accession}).fetchone()
+
+        resp = {
+            "ticker": ticker,
+            "gold": None if gold is None else {
+                "normalized_label": gold[2], "standard_label": gold[3], "preferred_label": gold[4],
+                "statement_type": gold[5], "fiscal_year": gold[6], "fiscal_period": gold[7],
+                "period_label": gold[8],
+                "value_numeric": float(gold[9]) if gold[9] is not None else None,
+                "value_usd": float(gold[10]) if gold[10] is not None else None,
+                "unit": gold[11],
+            },
+            "silver": {
+                "note": "deduped to the latest filing vintage; canonical label resolved so "
+                        "synonymous concepts reconcile 1:1",
+            },
+            "bronze": {
+                "accession": accession, "concept": concept,
+                "value_numeric": float(bronze_value) if bronze_value is not None else None,
+                "unit": bronze_unit,
+            },
+            "filing": None if not filing else {
+                "accession": filing[0], "cik": filing[1], "company_name": filing[2],
+                "form": filing[3], "filing_date": str(filing[4]) if filing[4] else None,
+                "period_of_report": str(filing[5]) if filing[5] else None,
+            },
+            "edgar_url": edgar_filing_url(filing[1], filing[0]) if filing else None,
+        }
+        return jsonify(resp)
+    except Exception as e:  # noqa: BLE001
         return jsonify({"error": "server_error", "message": str(e)}), 500
 
 
