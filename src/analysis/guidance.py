@@ -42,7 +42,11 @@ _REV_CUE = re.compile(r"\b(net sales|net revenues?|total revenues?|revenues?)\b"
 # a clause must be GOVERNED by a guidance verb/noun — this is what separates real guidance
 # ("revenue is expected to be", "revenue guidance of") from narrative mentions of revenue
 # (e.g. a CEO quote "... AI revenue to accelerate to $21.7 billion").
-_GOV = re.compile(r"(expected to be|guidance|outlook|projected|we are guiding|to range)", re.I)
+# "revenue is expected to be", "we expect ... revenue to be", "revenue guidance of", "in the range
+# of" — a guidance verb/noun, allowing words between "expect" and "to be" (META: "We expect fourth
+# quarter total revenue to be in the range of $X-Y").
+_GOV = re.compile(r"(expected to be|expect\w*[^.]{0,60}to be|guidance|outlook|projected|"
+                  r"we are guiding|to range|range of)", re.I)
 # lines about something OTHER than total revenue, or about the wrong period
 _DISQUAL = re.compile(
     r"(operating expense|operating income|operating margin|gross margin|gross profit|"
@@ -65,7 +69,9 @@ _SINGLE = re.compile(rf"{_NUM}\s*{_U}", re.I)
 _SECTION = re.compile(
     r"(business outlook|financial outlook|\boutlook\b|guidance|outlook for the)", re.I)
 
-_PR_ATTACH_RE = re.compile(r"(pr\.htm|press|commentary|exhibit|ex-?99)", re.I)
+# the earnings press-release exhibit (EX-99.1). Names vary: "ex-99.1", "exhibit991", "pressrelease…",
+# and AMD-style "q22026991.htm" (quarter+year+991), so match the bare 99.1 numbering too.
+_PR_ATTACH_RE = re.compile(r"(pr\.htm|press|commentary|exhibit|ex-?99|99-?0?1\.htm)", re.I)
 
 _LLM_MODEL = os.getenv("GUIDANCE_LLM_MODEL", "claude-haiku-4-5-20251001")
 
@@ -192,17 +198,21 @@ def _llm_extract(snippet: str) -> tuple[float | None, str]:
 # public API
 # ---------------------------------------------------------------------------
 @lru_cache(maxsize=256)
-def guidance_history(ticker: str, limit: int = 20, use_llm: bool = True,
+def guidance_history(ticker: str, limit: int = 24, use_llm: bool = True,
                      identity: str = "Jonas Haahr itsxidey@gmail.com") -> list[Guidance]:
-    """Forward revenue guidance from recent earnings 8-Ks, oldest-first. One per earnings release.
-    Cached: it is fetched from EDGAR repeatedly (routing, the guidance-beat model, scoring, backfill)
-    for the same ticker within a run; filings are static, so caching returns the identical result
-    without re-hitting the network. Read-only result."""
+    """Forward revenue guidance from recent EARNINGS 8-Ks (SEC item 2.02), oldest-first, one per
+    release. Filtering to item 2.02 skips the many product / partnership / governance 8-Ks that
+    otherwise dilute the window and carry no quarterly guidance (the item code is in the filing index,
+    so the filter costs no extra fetch) — this is what lets AMD-style filers be found at all. `limit`
+    counts earnings releases (~limit/4 years). Cached: fetched from EDGAR repeatedly within a run
+    (routing, the guidance-beat model, scoring, backfill); filings are static. Read-only result."""
     edgar.set_identity(identity)
     company = edgar.Company(ticker)
+    earnings = [f for f in company.get_filings(form="8-K").latest(160)
+                if "2.02" in str(getattr(f, "items", "") or "")][:limit]
     out: list[Guidance] = []
     seen_dates: set = set()
-    for filing in list(company.get_filings(form="8-K").latest(limit)):
+    for filing in earnings:
         fdate = getattr(filing, "filing_date", None)
         if fdate in seen_dates:
             continue

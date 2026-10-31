@@ -8,10 +8,15 @@ Leakage-safe: Q4[fy] becomes knowable only when the fy annual 10-K is filed (~we
 so each Q4 point is dated to its ORIGINAL 10-K filing date (not the latest restated vintage), and a
 forecast for Q4[fy] uses only the fy's already-filed Q1-Q3 plus prior years' Q4s.
 
-Two models, backtest-selected per ticker (like revenue):
-  - ytd_ratio:     Q4[fy] = YTD3[fy] x median(prior Q4/YTD3 ratios) — anchors on the filed 9 months
-                   x a stable seasonal ratio. Best for most names (AMZN 5.8%, JPM 4.2%, MSFT 3.2%).
-  - seasonal_naive: Q4[fy] = Q4[fy-1] x (1 + median YoY) — better where Q4 is lumpy (GOOGL).
+Q4 is just another quarter to the companies that guide it: their Q3 earnings release guides the
+next quarter, which IS Q4, so the same guidance-beat model we use for Q1-Q3 applies. Three models,
+backtest-selected per ticker:
+  - guide_quarter: Q4[fy] = (the Q3-release guidance that targets Q4) x (1 + median historical beat).
+                   The strongest signal where the company guides (AAPL, NVDA, AMZN, AVGO); this is
+                   why Q4 should be EASY, not hard (9 months known + the company's own guide).
+  - ytd_ratio:     Q4[fy] = YTD3[fy] x median(prior Q4/YTD3 ratios) — filed 9 months x a seasonal
+                   ratio. Fallback where there is no parseable guidance.
+  - seasonal_naive: Q4[fy] = Q4[fy-1] x (1 + median YoY) — fallback where Q4 is lumpy (GOOGL).
 """
 from __future__ import annotations
 
@@ -22,9 +27,27 @@ import numpy as np
 from sqlalchemy import text
 
 from src.analysis import pit
+from src.analysis import guidance as gd
 from src.extraction.canonical_labels import CANONICAL
 
-MIN_PRIOR = 2   # need at least this many prior Q4s to form a ratio/seasonal estimate
+MIN_PRIOR = 2         # need at least this many prior Q4s to form a ratio/seasonal estimate
+MIN_GUIDE_PAIRS = 6   # min total guidance-beat pairs (ALL quarters) before guidance is "reliable" —
+                      # Q4 history is only ~5 years, so eligibility rests on the company's overall
+                      # guidance-beat track record, not on Q4-specific points.
+GUIDE_Q4_CAP = 12.0   # reject garbage-parsed Q4 guidance (e.g. a mis-grabbed number) by a MAPE cap
+GUIDE_LIMIT = 40      # earnings releases of guidance history to scan (~10yr; covers all our Q4s)
+
+
+def _guidance_overall_mape(beats: list) -> float | None:
+    """Walk-forward MAPE of the guidance-beat model over ALL guided quarters — the reliability signal
+    that justifies trusting guidance for Q4 (which has too few points to judge on its own)."""
+    if len(beats) < MIN_GUIDE_PAIRS:
+        return None
+    ap = []
+    for i in range(2, len(beats)):
+        b = float(np.median([p[3] for p in beats[:i]]))
+        ap.append(abs(beats[i][1] * (1 + b) - beats[i][2]) / beats[i][2])
+    return float(np.mean(ap) * 100) if ap else None
 
 
 @dataclass
@@ -101,33 +124,102 @@ def _forecast_from(hist: list[Q4Point], ytd3_target: float, model: str) -> float
     return last.q4 * (1 + (float(np.median(yoys)) if yoys else 0.0))
 
 
+def _beat_pairs(db, ticker: str, guid: list) -> list:
+    """(given_date, guided_revenue, next-quarter actual, beat). Pairs each guidance to the first
+    quarter to END after it; gold.earnings includes the derived Q4, so Q4 guidance pairs too."""
+    with pit._engine(db).connect() as conn:
+        rows = conn.execute(text(
+            "SELECT quarter_end, revenue_usd FROM gold.earnings "
+            "WHERE ticker=:t AND revenue_usd IS NOT NULL ORDER BY quarter_end"
+        ), {"t": ticker.upper()}).fetchall()
+    acts = [(r[0].date() if hasattr(r[0], "date") else r[0], float(r[1])) for r in rows]
+    out = []
+    for g in guid:
+        nxt = [v for qe, v in acts if qe > g.given_date]
+        if nxt:
+            a = min(nxt)
+            out.append((g.given_date, g.guided_revenue, a, a / g.guided_revenue - 1.0))
+    return out
+
+
+def _q3_asof(db, ticker: str, fye_month: int, fy: int) -> date | None:
+    """When we'd forecast Q4[fy]: the latest Q1-Q3[fy] 10-Q filing date (YTD3 complete, Q4 is next)."""
+    cands = []
+    for qend, fdate in pit.quarter_report_dates(db, ticker).items():
+        f, q = pit._fy_and_quarter(qend, fye_month)
+        if f == fy and q in (1, 2, 3):
+            cands.append(fdate if isinstance(fdate, date) else date.fromisoformat(str(fdate)[:10]))
+    return max(cands) if cands else None
+
+
+def _guide_quarter_pred(guid: list, beats: list, as_of: date, target_qend: date | None,
+                        walk_forward: bool = True) -> float | None:
+    """Q4 = (latest guidance issued on/before as_of) x (1 + median beat) — the same guidance-beat
+    model used for Q1-Q3, applied to the Q3-release guidance that targets Q4. Guarded so the guidance
+    actually targets Q4 (issued during the Q4 period), and leakage-safe (beats from before as_of)."""
+    if target_qend is None:
+        return None
+    g = gd.guidance_asof(guid, as_of)
+    if g is None:
+        return None
+    # Q4 guidance is issued at the Q3 earnings release, i.e. during the Q4 period (after Q3 ended,
+    # before the fiscal year ends). Reject an older guide that targets some other quarter.
+    if not (target_qend - timedelta(days=150) < g.given_date < target_qend):
+        return None
+    bt = [b[3] for b in beats if (b[0] < as_of if walk_forward else True)]
+    if len(bt) < 2:
+        return None
+    return g.guided_revenue * (1 + float(np.median(bt)))
+
+
 def q4_backtest(db, ticker: str) -> dict:
     """Walk-forward Q4 backtest; returns per-model MAPE + the per-year forecasts of the best model.
 
-    For each historical Q4[fy], forecast it using only Q4s whose annual report predates fy's annual
-    report (strict point-in-time), then compare to the realized Q4. Picks the lower-MAPE model.
+    For each historical Q4[fy], forecast it point-in-time (only data filed before) by three models
+    and compare to the realized Q4; pick the lower-MAPE model. guide_quarter (the company's own
+    Q3-release guidance x the historical beat) is the strongest where the company guides; ytd_ratio /
+    seasonal_naive are the filings-only fallback where it does not.
     """
     ticker = ticker.upper()
-    full = q4_history(db, ticker, date(2100, 1, 1))
-    models = ("ytd_ratio", "seasonal_naive")
+    with pit._engine(db).connect() as conn:
+        fye_month = pit._fye_month(conn, ticker, date(2100, 1, 1))
+    full = q4_history(db, ticker, date(2100, 1, 1), fye_month)
+    guid = gd.guidance_history(ticker, limit=GUIDE_LIMIT)
+    beats = _beat_pairs(db, ticker, guid) if guid else []
+    models = ("ytd_ratio", "seasonal_naive", "guide_quarter")
     apes = {m: [] for m in models}
     per_year = {m: [] for m in models}
     for i, tp in enumerate(full):
+        preds: dict = {}
         prior = [h for h in full[:i] if h.known_date < tp.known_date]
-        if len(prior) < MIN_PRIOR:
-            continue
+        if len(prior) >= MIN_PRIOR:
+            preds["ytd_ratio"] = _forecast_from(prior, tp.ytd3, "ytd_ratio")
+            preds["seasonal_naive"] = _forecast_from(prior, tp.ytd3, "seasonal_naive")
+        if guid:
+            as_of = _q3_asof(db, ticker, fye_month, tp.fiscal_year)
+            if as_of:
+                preds["guide_quarter"] = _guide_quarter_pred(guid, beats, as_of, tp.quarter_end)
         for m in models:
-            pred = _forecast_from(prior, tp.ytd3, m)
+            pred = preds.get(m)
             if pred is not None and pred > 0 and tp.q4:
-                apes[m].append(abs(pred - tp.q4) / abs(tp.q4))
+                ape = abs(pred - tp.q4) / abs(tp.q4)
+                apes[m].append(ape)
                 per_year[m].append({"fy": tp.fiscal_year, "q4": 4, "forecast": pred,
-                                    "actual": tp.q4, "ape": abs(pred - tp.q4) / abs(tp.q4),
+                                    "actual": tp.q4, "ape": ape,
                                     "report_date": tp.known_date, "quarter_end": tp.quarter_end})
     mapes = {m: (float(np.mean(apes[m]) * 100) if apes[m] else None) for m in models}
-    scored = [(v, m) for m, v in mapes.items() if v is not None]
+    counts = {m: len(apes[m]) for m in models}
+    # guide_quarter is eligible when the company's guidance-beat is reliable OVERALL (many guided
+    # quarters) and its Q4 points are sane (reject mis-parsed guidance via the cap). Q4-specific
+    # count stays small forever (only ~5 Q4s exist), so it can't be the gate.
+    gm_mape = _guidance_overall_mape(beats)
+    guide_eligible = (gm_mape is not None and counts["guide_quarter"] >= 1
+                      and mapes["guide_quarter"] is not None and mapes["guide_quarter"] < GUIDE_Q4_CAP)
+    scored = [(v, m) for m, v in mapes.items()
+              if v is not None and (m != "guide_quarter" or guide_eligible)]
     best = min(scored)[1] if scored else None
-    return {"ticker": ticker, "mapes": mapes, "best_model": best,
-            "best_mape": mapes.get(best), "history": per_year.get(best, [])}
+    return {"ticker": ticker, "mapes": mapes, "counts": counts, "guide_overall_mape": gm_mape,
+            "best_model": best, "best_mape": mapes.get(best), "history": per_year.get(best, [])}
 
 
 def forecast_next_q4(db, ticker: str) -> dict | None:
@@ -141,16 +233,24 @@ def forecast_next_q4(db, ticker: str) -> dict | None:
     target_fy = rev[-1].fiscal_year
     ytd3 = sum(p.value for p in rev if p.fiscal_year == target_fy and p.quarter_num in (1, 2, 3))
     bt = q4_backtest(db, ticker)
-    if not bt["best_model"]:
+    best = bt["best_model"]
+    if not best:
         return None
-    hist = q4_history(db, ticker, date(2100, 1, 1))
-    pred = _forecast_from(hist, ytd3, bt["best_model"])
+    with pit._engine(db).connect() as conn:
+        fye_month = pit._fye_month(conn, ticker, date(2100, 1, 1))
+    hist = q4_history(db, ticker, date(2100, 1, 1), fye_month)
+    tqe = (hist[-1].quarter_end + timedelta(days=364)) if (hist and hist[-1].quarter_end) else None
+    if best == "guide_quarter":
+        guid = gd.guidance_history(ticker, limit=GUIDE_LIMIT)
+        beats = _beat_pairs(db, ticker, guid)
+        pred = _guide_quarter_pred(guid, beats, date.today(), tqe, walk_forward=False)
+    else:
+        pred = _forecast_from(hist, ytd3, best)
     if pred is None or pred <= 0:
         return None
     resid = np.array([h["ape"] for h in bt["history"]])
     lo = pred * (1 - float(np.quantile(resid, 0.8))) if len(resid) >= 3 else None
     hi = pred * (1 + float(np.quantile(resid, 0.8))) if len(resid) >= 3 else None
-    tqe = (hist[-1].quarter_end + timedelta(days=364)) if (hist and hist[-1].quarter_end) else None
     return {"ticker": ticker, "target_fy": target_fy, "quarter": 4, "forecast": pred,
-            "model": "q4_" + bt["best_model"], "mape": bt["best_mape"],
+            "model": "q4_" + best, "mape": bt["best_mape"],
             "interval_80": [lo, hi] if lo else None, "target_qend": tqe}
