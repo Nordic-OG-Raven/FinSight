@@ -52,6 +52,28 @@ def test_validate_sql_safety():
     assert not validate_sql("DROP TABLE dim_companies")[0]
 
 
+def test_company_coverage_grounded():
+    """The entity dictionary tracks the warehouse's real 14-company coverage, not the retired list."""
+    from src.np2sql.np2sql_service import detect_companies_in_query
+    from src.np2sql.schema_metadata import COMPANIES, get_enumerations
+    assert {"TSLA", "META", "AMD", "NFLX", "ORCL"} <= set(COMPANIES)   # really covered now
+    assert not ({"PFE", "WMT", "KO", "LLY"} & set(COMPANIES))          # retired, had no data
+    assert detect_companies_in_query("How did Tesla do?") == ["TSLA"]
+    assert detect_companies_in_query("tell me about Pfizer") == []
+    assert detect_companies_in_query("show metadata for amazon") == ["AMZN"]  # 'meta' must not fire
+    fb = get_enumerations(None)   # no-DB fallback must be safe and complete
+    assert fb["source"] == "fallback" and len(fb["tickers"]) == len(COMPANIES)
+
+
+def test_prompt_block_grounded_and_clean():
+    """The LLM prompt advertises live coverage and no longer names the dropped star schema."""
+    from src.np2sql.schema_metadata import format_schema_for_llm, COMPANIES
+    enums = {"tickers": sorted(COMPANIES), "year_min": 2014, "year_max": 2027, "source": "live"}
+    s = format_schema_for_llm(META, enums)
+    assert "AVAILABLE COVERAGE" in s and "TSLA" in s
+    assert "fact_financial_metrics" not in s and "dimension_id" not in s
+
+
 @pytest.mark.skipif("CI" in os.environ, reason="needs local warehouse")
 def test_sample_queries_execute():
     """Every sample SQL in the schema context runs read-only against the warehouse."""

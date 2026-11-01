@@ -17,40 +17,20 @@ try:
 except ImportError:
     OpenAI = None
 
-from .schema_metadata import get_schema_metadata, format_schema_for_llm
+from .schema_metadata import get_schema_metadata, format_schema_for_llm, get_enumerations, COMPANIES
 
 
-# Company name mappings (from api/main.py)
-COMPANY_NAMES = {
-    "NVO": "Novo Nordisk",
-    "NVDA": "NVIDIA",
-    "AAPL": "Apple",
-    "GOOGL": "Alphabet",
-    "MSFT": "Microsoft",
-    "JNJ": "Johnson & Johnson",
-    "PFE": "Pfizer",
-    "LLY": "Eli Lilly",
-    "MRNA": "Moderna",
-    "SNY": "Sanofi",
-    "KO": "Coca-Cola",
-    "AMZN": "Amazon",
-    "ASML": "ASML",
-    "BAC": "Bank of America",
-    "CAT": "Caterpillar",
-    "JPM": "JPMorgan Chase",
-    "WMT": "Walmart",
-}
+# Display names + detection aliases come from the curated entity dictionary (COMPANIES), which is
+# grounded in the warehouse's real coverage — not a hardcoded list that drifts out of date.
+COMPANY_NAMES = {ticker: info["name"] for ticker, info in COMPANIES.items()}
 
-# Reverse mapping: company name -> ticker
-COMPANY_NAME_TO_TICKER = {}
-for ticker, name in COMPANY_NAMES.items():
-    COMPANY_NAME_TO_TICKER[name.lower()] = ticker
-    COMPANY_NAME_TO_TICKER[ticker.lower()] = ticker
-    # Add variations
-    if "&" in name:
-        COMPANY_NAME_TO_TICKER[name.replace("&", "and").lower()] = ticker
-    if " " in name:
-        COMPANY_NAME_TO_TICKER[name.split()[0].lower()] = ticker  # First word
+# Reverse map: lowercase ticker / name / alias -> ticker, for detecting a company in free text.
+COMPANY_NAME_TO_TICKER: Dict[str, str] = {}
+for _ticker, _info in COMPANIES.items():
+    COMPANY_NAME_TO_TICKER[_ticker.lower()] = _ticker
+    COMPANY_NAME_TO_TICKER[_info["name"].lower()] = _ticker
+    for _alias in _info["aliases"]:
+        COMPANY_NAME_TO_TICKER[_alias.lower()] = _ticker
 
 
 # Allowed tables (whitelist). The medallion gold serving objects; the connection's search_path
@@ -119,29 +99,24 @@ def generate_sql(natural_language_query: str, schema_metadata: dict, database_ur
     if client is None:
         raise ValueError("No LLM API key configured. Set GROQ_API_KEY (preferred) or OPENAI_API_KEY.")
     
-    # Format schema for LLM
-    schema_text = format_schema_for_llm(schema_metadata)
-    
-    # Build system prompt
-    system_prompt = f"""You are a SQL expert for a financial data warehouse. Convert natural language questions into PostgreSQL SQL queries.
+    # Format schema for LLM, grounded in the warehouse's live coverage (companies + year range).
+    enumerations = get_enumerations(database_url)
+    schema_text = format_schema_for_llm(schema_metadata, enumerations)
+
+    # Build system prompt. The detailed rules live in the schema block above; here we keep only the
+    # output contract and the few reminders that most affect correctness.
+    system_prompt = f"""You are a careful SQL analyst for a financial data warehouse (PostgreSQL). Convert the user's question into ONE read-only SELECT query.
 
 {schema_text}
 
-CRITICAL RULES:
-1. Always use v_facts_consolidated view for consolidated queries (avoids duplicate segment data)
-2. Use normalized_label for filtering by metric type (e.g., 'revenue', 'net_income', 'total_assets')
-3. Use ticker for company filtering (e.g., ticker = 'AAPL' for Apple)
-4. Use fiscal_year for year filtering
-5. Use period_type = 'duration' for income statement and cash flow queries
-6. Use period_type = 'instant' for balance sheet queries
-7. Use proper JOINs when querying fact_financial_metrics directly
-8. Filter by dimension_id IS NULL when querying fact_financial_metrics for consolidated data
+GUIDANCE:
+- Use only the tables, columns, metric labels, companies and years described above. Never invent a column, metric, ticker or year.
+- Filter companies with ticker and metrics with the canonical labels; use value_usd for any cross-company comparison.
+- Prefer a mart (ratios, peers, earnings, company_quarterly, company_financials) when it already serves the figure; use v_facts_consolidated for anything else.
 
 OUTPUT FORMAT:
-- Return ONLY valid PostgreSQL SQL starting with SELECT
-- NO explanations, NO apologies, NO markdown code blocks
-- NO text before or after the SQL
-- If you cannot generate SQL, return: SELECT 1 WHERE 1=0"""
+- Return ONLY valid PostgreSQL starting with SELECT. No explanations, no markdown code blocks, no text before or after.
+- If the question cannot be answered from the schema above, return: SELECT 1 WHERE 1=0"""
 
     user_prompt = f"Convert this question to SQL: {natural_language_query}"
     
@@ -237,20 +212,17 @@ def detect_companies_in_query(query: str) -> List[str]:
         List of detected ticker symbols
     """
     query_lower = query.lower()
-    detected = []
-    
-    # Check for ticker symbols (uppercase)
-    for ticker in COMPANY_NAMES.keys():
-        if ticker.lower() in query_lower or ticker in query:
+    detected: List[str] = []
+
+    # Match each ticker/name/alias at a word boundary, so 'meta' fires on "Meta" but not
+    # "metadata", and short tickers ('amd','crm') don't match inside other words.
+    for term, ticker in COMPANY_NAME_TO_TICKER.items():
+        if ticker in detected:
+            continue
+        if re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", query_lower):
             detected.append(ticker)
-    
-    # Check for company names
-    for name, ticker in COMPANY_NAME_TO_TICKER.items():
-        if name in query_lower:
-            if ticker not in detected:
-                detected.append(ticker)
-    
-    return list(set(detected))  # Remove duplicates
+
+    return detected
 
 
 def execute_query(sql: str, database_url: str, timeout: int = 30, max_rows: int = 10000) -> Dict[str, Any]:

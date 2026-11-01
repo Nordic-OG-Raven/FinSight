@@ -37,25 +37,22 @@ MAX_DB_SIZE_MB = int(os.getenv('MAX_DB_SIZE_MB', 900))
 QUOTA_FILE = Path(__file__).parent / 'data' / 'quota.json'
 QUOTA_FILE.parent.mkdir(exist_ok=True)
 
-# Company name mapping (for display)
+# Company name mapping (for display). Matches the warehouse's real coverage.
 COMPANY_NAMES = {
-    "NVO": "Novo Nordisk",
-    "NVDA": "NVIDIA",
     "AAPL": "Apple",
-    "GOOGL": "Alphabet",
-    "MSFT": "Microsoft",
-    "JNJ": "Johnson & Johnson",
-    "PFE": "Pfizer",
-    "LLY": "Eli Lilly",
-    "MRNA": "Moderna",
-    "SNY": "Sanofi",
-    "KO": "Coca-Cola",
+    "AMD": "AMD",
     "AMZN": "Amazon",
-    "ASML": "ASML",
-    "BAC": "Bank of America",
-    "CAT": "Caterpillar",
+    "AVGO": "Broadcom",
+    "CRM": "Salesforce",
+    "GOOGL": "Alphabet",
     "JPM": "JPMorgan Chase",
-    "WMT": "Walmart",
+    "META": "Meta",
+    "MSFT": "Microsoft",
+    "NFLX": "Netflix",
+    "NVDA": "NVIDIA",
+    "NVO": "Novo Nordisk",
+    "ORCL": "Oracle",
+    "TSLA": "Tesla",
 }
 
 def get_preloaded_companies_from_db():
@@ -513,9 +510,9 @@ def natural_language_query():
         # Detect companies in query
         detected_companies = detect_companies_in_query(natural_query)
         
-        # Generate SQL
+        # Generate SQL (pass the DB url so the semantic layer can ground itself in live coverage)
         try:
-            sql = generate_sql(natural_query, schema_metadata)
+            sql = generate_sql(natural_query, schema_metadata, DATABASE_URL)
         except ValueError as e:
             return jsonify({
                 "error": f"I don't understand your question. {str(e)}",
