@@ -535,6 +535,7 @@ def natural_language_query():
             "columns": result["columns"],
             "row_count": result["row_count"],
             "sql": outcome["sql"],
+            "narration": outcome.get("narration"),
             "detected_companies": detected_companies,
             "execution_time": result["execution_time"],
             "attempts": outcome["attempts"],

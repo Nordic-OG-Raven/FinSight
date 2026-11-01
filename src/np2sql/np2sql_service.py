@@ -5,6 +5,7 @@ Core functions for converting natural language queries to SQL,
 validating SQL, detecting companies, executing queries, and detecting result types.
 """
 
+import json
 import os
 import re
 import time
@@ -322,9 +323,54 @@ def execute_query(sql: str, database_url: str, timeout: int = 30, max_rows: int 
         engine.dispose()
 
 
+def narrate_result(question: str, result: Dict[str, Any], sql: Optional[str] = None) -> Optional[str]:
+    """One or two plain-English sentences interpreting the REAL returned rows (it never invents).
+
+    A deliberately cheap second pass: it sees only the question and the result rows, NOT the schema
+    or the example library, so it costs a fraction of SQL generation. Returns None when there is
+    nothing to say or no LLM is configured. Narration is additive and must never block the answer.
+    """
+    client = get_openai_client()
+    if client is None:
+        return None
+    data = result.get("data") or []
+    if not data:
+        return None
+
+    rows = data[:40]  # cap the context; a ranking or series rarely needs more to summarize
+    columns = result.get("columns") or list(rows[0].keys())
+    note = "" if len(data) <= len(rows) else f"\n(These are the first {len(rows)} of {result.get('row_count')} rows.)"
+
+    system_prompt = (
+        "You explain a financial-data query result to a business user in at most two plain sentences.\n"
+        "RULES:\n"
+        "- Use ONLY the numbers in the rows provided. Never introduce a figure, company, date, or fact that is not present.\n"
+        "- Lead with the direct answer. If the rows are a ranking or time series, state the standout point (the leader, the trend direction).\n"
+        "- Format money compactly from the raw value: 391035000000 -> $391.0B, 12300000 -> $12.3M, 2.86 -> $2.86. "
+        "Columns that are fractions (margins, growth, return_on_equity) are percentages: 0.25 -> 25%.\n"
+        "- No preamble, no 'based on the data', no advice or speculation. Two sentences maximum."
+    )
+    user_prompt = (
+        f"Question: {question}\n"
+        f"Columns: {columns}\n"
+        f"Rows (JSON): {json.dumps(rows, default=str)}{note}"
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=_default_model(),
+            messages=[{"role": "system", "content": system_prompt},
+                      {"role": "user", "content": user_prompt}],
+            temperature=0.2,
+            max_tokens=200,
+        )
+        return resp.choices[0].message.content.strip() or None
+    except Exception:
+        return None
+
+
 def answer_query(question: str, schema_metadata: dict, database_url: str, *,
                  timeout: int = 30, max_rows: int = 10000, max_attempts: int = 3,
-                 _generate=None, _execute=None) -> Dict[str, Any]:
+                 narrate: bool = True, _generate=None, _execute=None, _narrate=None) -> Dict[str, Any]:
     """Generate -> validate -> execute, with execution-guided self-correction.
 
     On a safety-check rejection or a database error, the failed SQL and the error are fed back to
@@ -353,13 +399,19 @@ def answer_query(question: str, schema_metadata: dict, database_url: str, *,
 
         try:
             result = ex(last_sql, database_url, timeout=timeout, max_rows=max_rows)
-            return {"success": True, "sql": last_sql, "result": result,
+            narration = None
+            if narrate:
+                try:
+                    narration = (_narrate or narrate_result)(question, result, last_sql)
+                except Exception:
+                    narration = None  # narration is additive; never let it break a good answer
+            return {"success": True, "sql": last_sql, "result": result, "narration": narration,
                     "attempts": attempt, "repairs": repairs, "error": None}
         except Exception as e:  # execution failed — feed the error back and retry
             prior = (last_sql, str(e))
             repairs.append({"sql": last_sql, "error": str(e)})
 
-    return {"success": False, "sql": last_sql, "result": None,
+    return {"success": False, "sql": last_sql, "result": None, "narration": None,
             "attempts": max_attempts, "repairs": repairs,
             "error": repairs[-1]["error"] if repairs else "Could not generate a valid query."}
 

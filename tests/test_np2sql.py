@@ -152,6 +152,38 @@ def test_answer_query_gives_up_after_max_attempts():
     out = answer_query("q", {}, "db", max_attempts=3,
                        _generate=lambda *a, **k: "SELECT bad FROM ratios", _execute=ex)
     assert not out["success"] and out["attempts"] == 3 and len(out["repairs"]) == 3 and out["error"]
+    assert out["narration"] is None
+
+
+def test_answer_query_attaches_narration():
+    from src.np2sql.np2sql_service import answer_query
+    out = answer_query("q", {}, "db",
+                       _generate=lambda *a, **k: "SELECT 1", _execute=lambda *a, **k: _ok_result(),
+                       _narrate=lambda question, result, sql: "It is 1.")
+    assert out["success"] and out["narration"] == "It is 1."
+
+
+def test_narration_failure_is_nonfatal():
+    def boom(*a, **k):
+        raise Exception("llm down")
+    from src.np2sql.np2sql_service import answer_query
+    out = answer_query("q", {}, "db",
+                       _generate=lambda *a, **k: "SELECT 1", _execute=lambda *a, **k: _ok_result(),
+                       _narrate=boom)
+    assert out["success"] and out["narration"] is None   # the answer still stands
+
+
+def test_narration_can_be_disabled():
+    from src.np2sql.np2sql_service import answer_query
+    out = answer_query("q", {}, "db", narrate=False,
+                       _generate=lambda *a, **k: "SELECT 1", _execute=lambda *a, **k: _ok_result(),
+                       _narrate=lambda *a, **k: "should not run")
+    assert out["success"] and out["narration"] is None
+
+
+def test_narrate_result_skips_when_no_rows():
+    from src.np2sql.np2sql_service import narrate_result
+    assert narrate_result("q", {"data": [], "columns": []}) is None
 
 
 @pytest.mark.skipif("CI" in os.environ, reason="needs local warehouse")
