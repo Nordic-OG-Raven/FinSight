@@ -104,3 +104,28 @@ quarters, scoped past each company's first quarter-bearing year to skip boundary
 **Root lesson:** validation was concentrated on raw-fact magnitudes + schema shape. The field that broke
 (the quarter label) and the operation that manufactured the bad number (the Q4 derivation) had NO checks.
 After any period/labeling change, re-check Q1–Q3 coverage AND that completed years reconcile to annual.
+
+## Neon storage / suspension (2026-11-01)
+
+**Symptom:** Neon emailed "compute at risk of suspension — project used 100% of its 1.07 GB (1 GiB)
+monthly storage allowance."
+
+**Cause:** steady-state data is only ~571 MB, but Neon counts change HISTORY (WAL) toward storage for
+`history_retention_seconds` (was 6h). Each full rebuild rewrites the ~300 MB of gold fact tables
+(`v_facts_hierarchical` 217 MB + `v_facts_consolidated` 95 MB); several ad-hoc rebuilds in one window
+stacked 6h of that history and transiently hit the 1 GiB ceiling. Not a steady-state data problem.
+
+**Fixes applied (both durable):**
+1. Lowered Neon `history_retention_seconds` 21600 → 3600 (1h) via the Neon API (the `neon` CLI stores a
+   token at `~/.config/neon/credentials.json`; `neon projects update` does NOT expose the flag, so PATCH
+   `/api/v2/projects/<id>` with `{"project":{"history_retention_seconds":3600}}`). The warehouse is
+   reproducible, so 1h PITR is plenty. This makes a single rebuild's WAL age out fast → peak stays under 1 GiB.
+2. Shrank gold by -95 MB: `gold.v_facts_consolidated` was a materialized TABLE duplicating
+   `fct_financial_facts WHERE is_dimensioned=false`. It is exactly the non-dimensioned rows of
+   `v_facts_hierarchical` (127,626 rows, identical values, verified), so it is now a VIEW over
+   v_facts_hierarchical. Stays fast via the existing partial index
+   `idx_vfh_ticker_year (ticker, fiscal_year) WHERE NOT is_dimensioned`. DB 571 → 476 MB; NP2SQL "Ask"
+   verified working (~0.1s).
+
+**Discipline:** don't stack manual rebuilds (weekly cron is fine). The Neon MCP configured here is
+read-only (can't change settings/branches) — settings go through the API/CLI token or the console.
