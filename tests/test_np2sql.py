@@ -65,6 +65,15 @@ def test_company_coverage_grounded():
     assert fb["source"] == "fallback" and len(fb["tickers"]) == len(COMPANIES)
 
 
+def test_execution_sql_handles_trailing_semicolon():
+    """A model-emitted trailing ';' must not break the appended row cap."""
+    from src.np2sql.np2sql_service import _prepare_execution_sql
+    assert _prepare_execution_sql("SELECT 1;", 100) == "SELECT 1 LIMIT 101"
+    assert _prepare_execution_sql("SELECT 1 ;  ", 100) == "SELECT 1 LIMIT 101"
+    assert _prepare_execution_sql("SELECT 1 LIMIT 5;", 100) == "SELECT 1 LIMIT 5"
+    assert _prepare_execution_sql("SELECT 1", 100) == "SELECT 1 LIMIT 101"
+
+
 def test_prompt_block_grounded_and_clean():
     """The LLM prompt advertises live coverage and no longer names the dropped star schema."""
     from src.np2sql.schema_metadata import format_schema_for_llm, COMPANIES

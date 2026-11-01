@@ -138,7 +138,9 @@ OUTPUT FORMAT:
         sql = re.sub(r'^```\s*', '', sql)
         sql = re.sub(r'\s*```\s*$', '', sql)
         sql = sql.strip()
-        
+        # Drop a trailing semicolon so the SQL we surface/execute is clean (models often add one).
+        sql = sql.rstrip().rstrip(';').rstrip()
+
         return sql
         
     except Exception as e:
@@ -225,6 +227,16 @@ def detect_companies_in_query(query: str) -> List[str]:
     return detected
 
 
+def _prepare_execution_sql(sql: str, max_rows: int) -> str:
+    """Normalize a single SELECT for execution: strip a trailing semicolon (so our row cap can be
+    appended without producing '... ; LIMIT n', a syntax error) and add a LIMIT guard if the
+    query has none."""
+    base_sql = sql.rstrip().rstrip(';').rstrip()
+    if "LIMIT" not in base_sql.upper():
+        base_sql = f"{base_sql} LIMIT {max_rows + 1}"
+    return base_sql
+
+
 def execute_query(sql: str, database_url: str, timeout: int = 30, max_rows: int = 10000) -> Dict[str, Any]:
     """
     Execute validated SQL query and return results.
@@ -253,11 +265,9 @@ def execute_query(sql: str, database_url: str, timeout: int = 30, max_rows: int 
 
     try:
         with engine.connect() as conn:
-            # Add LIMIT if not present and query might return many rows
-            sql_with_limit = sql
-            if "LIMIT" not in sql.upper():
-                sql_with_limit = f"{sql} LIMIT {max_rows + 1}"
-            
+            # Normalize trailing semicolon + add a row-cap guard (see _prepare_execution_sql)
+            sql_with_limit = _prepare_execution_sql(sql, max_rows)
+
             result = conn.execute(text(sql_with_limit))
             rows = result.fetchall()
             
