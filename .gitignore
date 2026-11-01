@@ -61,3 +61,7 @@ temp/
 # Documentation
 GOFUCKYOURSELF.md
 
+
+# local agent tooling (not project code)
+.claude/
+skills-lock.json

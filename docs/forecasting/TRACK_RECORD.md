@@ -1,6 +1,6 @@
 # FinSight — Live Forecast Track Record
 
-*Updated 2026-10-31. Every forecast is made **before** the print and frozen; actuals + consensus are
+*Updated 2026-11-01. Every forecast is made **before** the print and frozen; actuals + consensus are
 filled once the quarter reports. `backtest:*` rows are the historical point-in-time record that
 seeded the ledger; new rows are logged live each week.*
 
@@ -8,10 +8,10 @@ seeded the ledger; new rows are logged live each week.*
 
 | Ticker | Metric | Our MAPE | Consensus MAPE | Quarters |
 | --- | --- | --- | --- | --- |
-| AAPL | revenue | 9.0% | 2.2% | 17 |
-| AAPL | revenue_q4 | 16.3% | 0.6% | 5 |
-| AMD | revenue | 16.1% | 3.8% | 17 |
-| AMD | revenue_q4 | 6.9% | 3.9% | 5 |
+| AAPL | revenue | 8.5% | 2.2% | 18 |
+| AAPL | revenue_q4 | 4.7% | 0.6% | 5 |
+| AMD | revenue | 16.8% | 3.8% | 17 |
+| AMD | revenue_q4 | 6.4% | 3.9% | 5 |
 | AMZN | revenue | 4.5% | 1.8% | 17 |
 | AMZN | revenue_q4 | 1.1% | 0.7% | 6 |
 | AVGO | revenue | 0.6% | 0.8% | 3 |
@@ -23,7 +23,7 @@ seeded the ledger; new rows are logged live each week.*
 | JPM | revenue | 7.6% | 5.1% | 17 |
 | JPM | revenue_q4 | 4.2% | 1.2% | 5 |
 | META | revenue | 8.9% | 2.7% | 17 |
-| META | revenue_q4 | 5.4% | 2.8% | 4 |
+| META | revenue_q4 | 4.6% | 2.8% | 4 |
 | MSFT | eps | 8.4% | 5.7% | 17 |
 | MSFT | revenue | 3.5% | 1.8% | 17 |
 | MSFT | revenue_q4 | 3.2% | 3.1% | 5 |
@@ -43,7 +43,7 @@ seeded the ledger; new rows are logged live each week.*
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | MSFT | FY2027 Q2 | eps | 5.16 | 4.86 | — | — | — |
 | NVDA | FY2027 Q3 | eps | 2.86 | 2.47 | — | — | — |
-| AAPL | FY2027 Q1 | revenue | $145.2B [123, 166]B | $113.4B | — | — | — |
+| AAPL | FY2027 Q1 | revenue | $145.2B [124, 166]B | $113.4B | — | — | — |
 | AMD | FY2026 Q3 | revenue | $13.6B | $13.1B | — | — | — |
 | AMZN | FY2026 Q3 | revenue | $197.3B [177, 208]B | $202.2B | — | — | — |
 | AVGO | FY2027 Q1 | revenue | $35.1B [35, 35]B | — | — | — | — |
@@ -56,10 +56,10 @@ seeded the ledger; new rows are logged live each week.*
 | NVDA | FY2027 Q3 | revenue | $113.1B [113, 116]B | $108.8B | — | — | — |
 | ORCL | FY2027 Q2 | revenue | $18.9B [18, 21]B | — | — | — | — |
 | TSLA | FY2027 Q1 | revenue | $26.2B [20, 32]B | — | — | — | — |
-| AAPL | FY2026 Q4 | revenue_q4 | 116811300079.36 | 113400000000.00 | — | — | — |
+| AAPL | FY2026 Q4 | revenue_q4 | 112351092552.08 | 113400000000.00 | — | — | — |
 | AVGO | FY2026 Q4 | revenue_q4 | 35080471428.57 | — | — | — | — |
 | GOOGL | FY2026 Q4 | revenue_q4 | 128207021383.54 | — | — | — | — |
-| META | FY2026 Q4 | revenue_q4 | 76100724301.04 | — | — | — | — |
+| META | FY2026 Q4 | revenue_q4 | 76128983193.28 | — | — | — | — |
 | NFLX | FY2026 Q4 | revenue_q4 | 13428468769.40 | — | — | — | — |
 | TSLA | FY2026 Q4 | revenue_q4 | 30786423889.62 | — | — | — | — |
 
@@ -93,17 +93,18 @@ seeded the ledger; new rows are logged live each week.*
 | AAPL | FY2022 Q1 | revenue | $127.1B | — | $123.9B | 2.6% | — |
 | AAPL | FY2022 Q2 | revenue | $99.6B | — | $97.3B | 2.3% | — |
 | AAPL | FY2022 Q3 | revenue | $94.4B | — | $83.0B | 13.9% | — |
+| AAPL | FY2023 Q1 | revenue | $136.1B | — | $117.2B | 16.2% | — |
 | AAPL | FY2023 Q2 | revenue | $103.8B | — | $94.8B | 9.5% | — |
-| AAPL | FY2023 Q3 | revenue | $94.9B | — | $81.8B | 16.1% | — |
-| AAPL | FY2024 Q1 | revenue | $134.9B | — | $119.6B | 12.9% | — |
-| AAPL | FY2024 Q2 | revenue | $107.4B | — | $90.8B | 18.4% | — |
-| AAPL | FY2024 Q3 | revenue | $96.3B | — | $85.8B | 12.2% | — |
-| AAPL | FY2025 Q1 | revenue | $127.3B | $124.0B | $124.3B | 2.4% | 0.2% |
-| AAPL | FY2025 Q2 | revenue | $98.9B | $94.0B | $95.4B | 3.7% | 1.4% |
-| AAPL | FY2025 Q3 | revenue | $94.5B | $88.6B | $94.0B | 0.5% | 5.7% |
-| AAPL | FY2026 Q1 | revenue | $129.7B | $138.2B | $143.8B | 9.8% | 3.8% |
-| AAPL | FY2026 Q2 | revenue | $104.1B | $109.5B | $111.2B | 6.4% | 1.6% |
-| AAPL | FY2026 Q3 | revenue | $102.8B | $109.0B | $109.4B | 6.0% | 0.3% |
+| AAPL | FY2023 Q3 | revenue | $92.8B | — | $81.8B | 13.4% | — |
+| AAPL | FY2024 Q1 | revenue | $129.8B | — | $119.6B | 8.5% | — |
+| AAPL | FY2024 Q2 | revenue | $102.4B | — | $90.8B | 12.8% | — |
+| AAPL | FY2024 Q3 | revenue | $89.2B | — | $85.8B | 4.0% | — |
+| AAPL | FY2025 Q1 | revenue | $127.1B | $124.0B | $124.3B | 2.2% | 0.2% |
+| AAPL | FY2025 Q2 | revenue | $100.1B | $94.0B | $95.4B | 4.9% | 1.4% |
+| AAPL | FY2025 Q3 | revenue | $90.8B | $88.6B | $94.0B | 3.5% | 5.7% |
+| AAPL | FY2026 Q1 | revenue | $129.9B | $138.2B | $143.8B | 9.6% | 3.8% |
+| AAPL | FY2026 Q2 | revenue | $105.4B | $109.5B | $111.2B | 5.2% | 1.6% |
+| AAPL | FY2026 Q3 | revenue | $100.9B | $109.0B | $109.4B | 7.8% | 0.3% |
 | AMD | FY2021 Q1 | revenue | $2.5B | — | $3.4B | 27.8% | — |
 | AMD | FY2021 Q2 | revenue | $3.2B | — | $3.9B | 17.7% | — |
 | AMD | FY2021 Q3 | revenue | $4.0B | — | $4.3B | 8.1% | — |
@@ -111,16 +112,16 @@ seeded the ledger; new rows are logged live each week.*
 | AMD | FY2022 Q2 | revenue | $5.2B | — | $6.5B | 20.1% | — |
 | AMD | FY2022 Q3 | revenue | $6.1B | — | $5.6B | 9.6% | — |
 | AMD | FY2023 Q1 | revenue | $6.9B | — | $5.4B | 28.4% | — |
-| AMD | FY2023 Q2 | revenue | $6.5B | — | $5.4B | 21.0% | — |
-| AMD | FY2023 Q3 | revenue | $6.4B | — | $5.8B | 9.6% | — |
-| AMD | FY2024 Q1 | revenue | $7.2B | — | $5.5B | 31.0% | — |
-| AMD | FY2024 Q2 | revenue | $7.0B | — | $5.8B | 19.3% | — |
-| AMD | FY2024 Q3 | revenue | $6.9B | — | $6.8B | 0.9% | — |
-| AMD | FY2025 Q1 | revenue | $7.3B | $7.1B | $7.4B | 2.2% | 4.5% |
-| AMD | FY2025 Q2 | revenue | $7.6B | $7.4B | $7.7B | 0.9% | 3.6% |
-| AMD | FY2025 Q3 | revenue | $7.9B | $8.8B | $9.2B | 14.8% | 5.3% |
-| AMD | FY2026 Q1 | revenue | $8.5B | $9.9B | $10.3B | 16.9% | 3.4% |
-| AMD | FY2026 Q2 | revenue | $9.1B | $11.3B | $11.5B | 21.5% | 2.0% |
+| AMD | FY2023 Q2 | revenue | $6.9B | — | $5.4B | 28.0% | — |
+| AMD | FY2023 Q3 | revenue | $6.7B | — | $5.8B | 15.8% | — |
+| AMD | FY2024 Q1 | revenue | $7.1B | — | $5.5B | 29.3% | — |
+| AMD | FY2024 Q2 | revenue | $7.1B | — | $5.8B | 20.9% | — |
+| AMD | FY2024 Q3 | revenue | $7.1B | — | $6.8B | 3.6% | — |
+| AMD | FY2025 Q1 | revenue | $7.3B | $7.1B | $7.4B | 1.4% | 4.5% |
+| AMD | FY2025 Q2 | revenue | $7.7B | $7.4B | $7.7B | 0.3% | 3.6% |
+| AMD | FY2025 Q3 | revenue | $8.0B | $8.8B | $9.2B | 13.4% | 5.3% |
+| AMD | FY2026 Q1 | revenue | $8.5B | $9.9B | $10.3B | 16.7% | 3.4% |
+| AMD | FY2026 Q2 | revenue | $9.1B | $11.3B | $11.5B | 21.3% | 2.0% |
 | AMZN | FY2021 Q1 | revenue | $101.1B | — | $108.5B | 6.9% | — |
 | AMZN | FY2021 Q2 | revenue | $114.8B | — | $113.1B | 1.5% | — |
 | AMZN | FY2021 Q3 | revenue | $121.1B | — | $110.8B | 9.3% | — |
@@ -282,14 +283,14 @@ seeded the ledger; new rows are logged live each week.*
 | TSLA | FY2026 Q3 | revenue | $29.9B | $28.1B | $28.0B | 6.6% | 0.0% |
 | AAPL | FY2021 Q4 | revenue_q4 | 89661157316.28 | — | 83360000000.00 | 7.6% | — |
 | AAPL | FY2022 Q4 | revenue_q4 | 93795865139.62 | — | 90146000000.00 | 4.0% | — |
-| AAPL | FY2023 Q4 | revenue_q4 | 64096225271.30 | — | 171295000000.00 | 62.6% | — |
-| AAPL | FY2024 Q4 | revenue_q4 | 91305286463.92 | 94520000000.00 | 94930000000.00 | 3.8% | 0.4% |
-| AAPL | FY2025 Q4 | revenue_q4 | 98649259869.47 | 101650000000.00 | 102466000000.00 | 3.7% | 0.8% |
+| AAPL | FY2023 Q4 | revenue_q4 | 88827952892.96 | — | 89498000000.00 | 0.7% | — |
+| AAPL | FY2024 Q4 | revenue_q4 | 90204145486.36 | 94520000000.00 | 94930000000.00 | 5.0% | 0.4% |
+| AAPL | FY2025 Q4 | revenue_q4 | 96145963856.81 | 101650000000.00 | 102466000000.00 | 6.2% | 0.8% |
 | AMD | FY2020 Q4 | revenue_q4 | 2976666666.67 | — | 3244000000.00 | 8.2% | — |
-| AMD | FY2021 Q4 | revenue_q4 | 4498782894.74 | — | 4826000000.00 | 6.8% | — |
-| AMD | FY2023 Q4 | revenue_q4 | 6052555555.56 | — | 6168000000.00 | 1.9% | — |
-| AMD | FY2024 Q4 | revenue_q4 | 7441666666.67 | 7530000000.00 | 7658000000.00 | 2.8% | 1.7% |
-| AMD | FY2025 Q4 | revenue_q4 | 8762960526.32 | 9650000000.00 | 10270000000.00 | 14.7% | 6.0% |
+| AMD | FY2021 Q4 | revenue_q4 | 4532565789.47 | — | 4826000000.00 | 6.1% | — |
+| AMD | FY2023 Q4 | revenue_q4 | 6098350146.20 | — | 6168000000.00 | 1.1% | — |
+| AMD | FY2024 Q4 | revenue_q4 | 7497971491.23 | 7530000000.00 | 7658000000.00 | 2.1% | 1.7% |
+| AMD | FY2025 Q4 | revenue_q4 | 8779904791.46 | 9650000000.00 | 10270000000.00 | 14.5% | 6.0% |
 | AMZN | FY2020 Q4 | revenue_q4 | 124129701682.32 | — | 125555000000.00 | 1.1% | — |
 | AMZN | FY2021 Q4 | revenue_q4 | 140705921146.10 | — | 137412000000.00 | 2.4% | — |
 | AMZN | FY2022 Q4 | revenue_q4 | 148207874239.35 | — | 149204000000.00 | 0.7% | — |
@@ -318,9 +319,9 @@ seeded the ledger; new rows are logged live each week.*
 | JPM | FY2024 Q4 | revenue_q4 | 43497969647.79 | 41900000000.00 | 42768000000.00 | 1.7% | 2.0% |
 | JPM | FY2025 Q4 | revenue_q4 | 43860239658.63 | 45980000000.00 | 45798000000.00 | 4.2% | 0.4% |
 | META | FY2022 Q4 | revenue_q4 | 29864224137.93 | — | 32165000000.00 | 7.2% | — |
-| META | FY2023 Q4 | revenue_q4 | 37206556958.13 | — | 40112000000.00 | 7.2% | — |
-| META | FY2024 Q4 | revenue_q4 | 46025035714.29 | 46960000000.00 | 48386000000.00 | 4.9% | 2.9% |
-| META | FY2025 Q4 | revenue_q4 | 58479082568.81 | 58330000000.00 | 59894000000.00 | 2.4% | 2.6% |
+| META | FY2023 Q4 | revenue_q4 | 37859303571.43 | — | 40112000000.00 | 5.6% | — |
+| META | FY2024 Q4 | revenue_q4 | 46658407765.40 | 46960000000.00 | 48386000000.00 | 3.6% | 2.9% |
+| META | FY2025 Q4 | revenue_q4 | 58596365183.77 | 58330000000.00 | 59894000000.00 | 2.2% | 2.6% |
 | MSFT | FY2022 Q4 | revenue_q4 | 55413360779.43 | — | 51865000000.00 | 6.8% | — |
 | MSFT | FY2023 Q4 | revenue_q4 | 57678947393.21 | — | 56189000000.00 | 2.7% | — |
 | MSFT | FY2024 Q4 | revenue_q4 | 65353708588.14 | — | 64727000000.00 | 1.0% | — |
