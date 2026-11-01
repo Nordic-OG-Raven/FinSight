@@ -337,7 +337,7 @@ def narrate_result(question: str, result: Dict[str, Any], sql: Optional[str] = N
     if not data:
         return None
 
-    rows = data[:40]  # cap the context; a ranking or series rarely needs more to summarize
+    rows = data[:12]  # the top few are enough to summarize a ranking/series; keeps the call small
     columns = result.get("columns") or list(rows[0].keys())
     note = "" if len(data) <= len(rows) else f"\n(These are the first {len(rows)} of {result.get('row_count')} rows.)"
 
@@ -345,7 +345,7 @@ def narrate_result(question: str, result: Dict[str, Any], sql: Optional[str] = N
         "You explain a financial-data query result to a business user in at most two plain sentences.\n"
         "RULES:\n"
         "- Use ONLY the numbers in the rows provided. Never introduce a figure, company, date, or fact that is not present.\n"
-        "- Lead with the direct answer. If the rows are a ranking or time series, state the standout point (the leader, the trend direction).\n"
+        "- Lead with the direct answer. For a ranking, name the leader (and maybe the runner-up). For a time series, give the first-to-last change and direction; do NOT list every period.\n"
         "- Format money compactly from the raw value: 391035000000 -> $391.0B, 12300000 -> $12.3M, 2.86 -> $2.86. "
         "Columns that are fractions (margins, growth, return_on_equity) are percentages: 0.25 -> 25%.\n"
         "- No preamble, no 'based on the data', no advice or speculation. Two sentences maximum."
@@ -361,7 +361,7 @@ def narrate_result(question: str, result: Dict[str, Any], sql: Optional[str] = N
             messages=[{"role": "system", "content": system_prompt},
                       {"role": "user", "content": user_prompt}],
             temperature=0.2,
-            max_tokens=200,
+            max_tokens=700,  # gpt-oss is a reasoning model; leave headroom beyond the visible 2 sentences
         )
         return resp.choices[0].message.content.strip() or None
     except Exception:
