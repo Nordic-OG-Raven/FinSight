@@ -21,9 +21,14 @@ def test_layers_payload(client):
     r = client.get('/api/lineage/layers')
     assert r.status_code == 200
     layers = r.get_json()["layers"]
-    assert [l["id"] for l in layers] == ["bronze", "silver", "gold"]
+    assert [l["id"] for l in layers] == ["bronze", "silver", "gold", "intelligence"]
     for l in layers:
         assert l["explanation"] and l["code"] and l["title"]
+        # each layer carries highlight markers, and every marker must appear verbatim in its code
+        # (the UI colours lines containing them) — guards against drift between code and highlights.
+        assert l["highlight"]
+        for sub in l["highlight"]:
+            assert sub in l["code"], f'{l["id"]}: highlight {sub!r} not in code'
 
 
 def test_lineage_requires_identity(client):
