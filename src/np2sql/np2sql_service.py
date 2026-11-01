@@ -18,6 +18,7 @@ except ImportError:
     OpenAI = None
 
 from .schema_metadata import get_schema_metadata, format_schema_for_llm, get_enumerations, COMPANIES
+from .example_queries import select_examples, format_examples
 
 
 # Display names + detection aliases come from the curated entity dictionary (COMPANIES), which is
@@ -80,7 +81,8 @@ def _default_model() -> str:
     return "openai/gpt-oss-120b" if os.getenv("GROQ_API_KEY") else "gpt-4o-mini"
 
 
-def generate_sql(natural_language_query: str, schema_metadata: dict, database_url: Optional[str] = None) -> str:
+def generate_sql(natural_language_query: str, schema_metadata: dict, database_url: Optional[str] = None,
+                 prior_attempt: Optional[Tuple[str, str]] = None) -> str:
     """
     Generate SQL from natural language query using OpenAI GPT-3.5.
     
@@ -99,15 +101,19 @@ def generate_sql(natural_language_query: str, schema_metadata: dict, database_ur
     if client is None:
         raise ValueError("No LLM API key configured. Set GROQ_API_KEY (preferred) or OPENAI_API_KEY.")
     
-    # Format schema for LLM, grounded in the warehouse's live coverage (companies + year range).
+    # Format schema for LLM, grounded in the warehouse's live coverage (companies + year range),
+    # plus the handful of example queries most relevant to THIS question (retrieved, not all of them).
     enumerations = get_enumerations(database_url)
     schema_text = format_schema_for_llm(schema_metadata, enumerations)
+    examples_block = format_examples(select_examples(natural_language_query))
 
     # Build system prompt. The detailed rules live in the schema block above; here we keep only the
     # output contract and the few reminders that most affect correctness.
     system_prompt = f"""You are a careful SQL analyst for a financial data warehouse (PostgreSQL). Convert the user's question into ONE read-only SELECT query.
 
 {schema_text}
+
+{examples_block}
 
 GUIDANCE:
 - Use only the tables, columns, metric labels, companies and years described above. Never invent a column, metric, ticker or year.
@@ -119,7 +125,14 @@ OUTPUT FORMAT:
 - If the question cannot be answered from the schema above, return: SELECT 1 WHERE 1=0"""
 
     user_prompt = f"Convert this question to SQL: {natural_language_query}"
-    
+    if prior_attempt:
+        failed_sql, error = prior_attempt
+        user_prompt += (
+            f"\n\nYour previous attempt failed and must be corrected.\n"
+            f"Previous SQL:\n{failed_sql}\n\nError:\n{error}\n\n"
+            f"Return a corrected single SELECT that fixes this error, using only real tables/columns above."
+        )
+
     try:
         response = client.chat.completions.create(
             model=_default_model(),
@@ -307,6 +320,48 @@ def execute_query(sql: str, database_url: str, timeout: int = 30, max_rows: int 
         raise Exception(f"Query execution failed: {str(e)}")
     finally:
         engine.dispose()
+
+
+def answer_query(question: str, schema_metadata: dict, database_url: str, *,
+                 timeout: int = 30, max_rows: int = 10000, max_attempts: int = 3,
+                 _generate=None, _execute=None) -> Dict[str, Any]:
+    """Generate -> validate -> execute, with execution-guided self-correction.
+
+    On a safety-check rejection or a database error, the failed SQL and the error are fed back to
+    the model and it tries again, up to max_attempts. Most first-try failures (a hallucinated column,
+    a stray trailing token, a wrong grain) fix themselves on the second pass.
+
+    Returns a dict: {success, sql, result, attempts, repairs, error}. `result` is the execute_query
+    payload on success (None otherwise); `repairs` lists each failed (sql, error) for transparency.
+    `_generate`/`_execute` are injection points for testing.
+    """
+    gen = _generate or generate_sql
+    ex = _execute or execute_query
+
+    repairs: List[Dict[str, str]] = []
+    prior: Optional[Tuple[str, str]] = None
+    last_sql: Optional[str] = None
+
+    for attempt in range(1, max_attempts + 1):
+        last_sql = gen(question, schema_metadata, database_url, prior_attempt=prior)
+
+        is_valid, verr = validate_sql(last_sql)
+        if not is_valid:
+            prior = (last_sql, f"Rejected by the SQL safety check: {verr}")
+            repairs.append({"sql": last_sql, "error": prior[1]})
+            continue
+
+        try:
+            result = ex(last_sql, database_url, timeout=timeout, max_rows=max_rows)
+            return {"success": True, "sql": last_sql, "result": result,
+                    "attempts": attempt, "repairs": repairs, "error": None}
+        except Exception as e:  # execution failed — feed the error back and retry
+            prior = (last_sql, str(e))
+            repairs.append({"sql": last_sql, "error": str(e)})
+
+    return {"success": False, "sql": last_sql, "result": None,
+            "attempts": max_attempts, "repairs": repairs,
+            "error": repairs[-1]["error"] if repairs else "Could not generate a valid query."}
 
 
 def detect_result_type(result: Dict[str, Any]) -> str:

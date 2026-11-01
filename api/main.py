@@ -497,69 +497,53 @@ def natural_language_query():
         # Import NP2SQL modules
         from src.np2sql.schema_metadata import get_schema_metadata
         from src.np2sql.np2sql_service import (
-            generate_sql,
-            validate_sql,
+            answer_query,
             detect_companies_in_query,
-            execute_query,
             detect_result_type,
         )
-        
-        # Load schema metadata (cache it in production)
+        from config import NP2SQL_QUERY_TIMEOUT, NP2SQL_MAX_ROWS
+
+        # Load schema metadata (cached) and detect companies for the response metadata.
         schema_metadata = get_schema_metadata()
-        
-        # Detect companies in query
         detected_companies = detect_companies_in_query(natural_query)
-        
-        # Generate SQL (pass the DB url so the semantic layer can ground itself in live coverage)
+
+        # Generate -> validate -> execute, with execution-guided self-correction (up to 3 attempts).
         try:
-            sql = generate_sql(natural_query, schema_metadata, DATABASE_URL)
+            outcome = answer_query(
+                natural_query, schema_metadata, DATABASE_URL,
+                timeout=NP2SQL_QUERY_TIMEOUT, max_rows=NP2SQL_MAX_ROWS,
+            )
         except ValueError as e:
+            # No LLM key / generation unavailable.
             return jsonify({
                 "error": f"I don't understand your question. {str(e)}",
                 "detected_companies": detected_companies,
             }), 400
-        
-        # Validate SQL
-        is_valid, error_message = validate_sql(sql)
-        if not is_valid:
+
+        if not outcome["success"]:
             return jsonify({
-                "error": f"Invalid query: {error_message}",
-                "sql": sql,
+                "error": f"Query execution failed: {outcome['error']}",
+                "sql": outcome["sql"],
                 "detected_companies": detected_companies,
+                "attempts": outcome["attempts"],
             }), 400
-        
-        # Execute query
-        try:
-            # Use NP2SQL database URL (read-only) if available, otherwise fall back to regular
-            from config import NP2SQL_DATABASE_URL, NP2SQL_QUERY_TIMEOUT, NP2SQL_MAX_ROWS
-            # Always use DATABASE_URL for now (NP2SQL_DATABASE_URL requires separate read-only user setup)
-            db_url = DATABASE_URL
-            result = execute_query(sql, db_url, timeout=NP2SQL_QUERY_TIMEOUT, max_rows=NP2SQL_MAX_ROWS)
-        except Exception as e:
-            return jsonify({
-                "error": f"Query execution failed: {str(e)}",
-                "sql": sql,
-                "detected_companies": detected_companies,
-            }), 500
-        
-        # Detect result type
-        result_type = detect_result_type(result)
-        
-        # Return success response
+
+        result = outcome["result"]
         response = {
-            "result_type": result_type,
+            "result_type": detect_result_type(result),
             "data": result["data"],
             "columns": result["columns"],
             "row_count": result["row_count"],
-            "sql": sql,
+            "sql": outcome["sql"],
             "detected_companies": detected_companies,
             "execution_time": result["execution_time"],
+            "attempts": outcome["attempts"],
             "error": None,
         }
-        
+
         if result.get("warning"):
             response["warning"] = result["warning"]
-        
+
         return jsonify(response)
         
     except Exception as e:

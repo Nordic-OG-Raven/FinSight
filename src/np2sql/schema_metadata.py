@@ -316,20 +316,11 @@ def get_schema_metadata() -> dict:
             "usage": f"normalized_label = '{label}'",
         }
 
-    sample_queries = [
-        {"question": "Show me Apple's revenue in 2024",
-         "sql": "SELECT value_usd FROM v_facts_consolidated WHERE ticker = 'AAPL' AND normalized_label = 'revenue' AND fiscal_year = 2024 AND period_grain = 'annual'"},
-        {"question": "Compare net income across all companies in 2024",
-         "sql": "SELECT ticker, value_usd FROM v_facts_consolidated WHERE normalized_label = 'net_income' AND fiscal_year = 2024 AND period_grain = 'annual' ORDER BY value_usd DESC"},
-        {"question": "What were Microsoft's total assets in 2024?",
-         "sql": "SELECT value_usd FROM v_facts_consolidated WHERE ticker = 'MSFT' AND normalized_label = 'total_assets' AND fiscal_year = 2024 AND period_grain = 'instant'"},
-        {"question": "Which company had the highest net margin in the latest year?",
-         "sql": "SELECT ticker, net_margin FROM peers ORDER BY net_margin DESC NULLS LAST LIMIT 1"},
-        {"question": "Show NVIDIA's quarterly revenue over time",
-         "sql": "SELECT fiscal_year, fiscal_period, revenue_usd FROM earnings WHERE ticker = 'NVDA' ORDER BY quarter_index"},
-        {"question": "Rank companies by revenue growth in 2024",
-         "sql": "SELECT ticker, revenue_growth FROM ratios WHERE fiscal_year = 2024 ORDER BY revenue_growth DESC NULLS LAST"},
-    ]
+    # Example queries live in example_queries.py (the versioned, execution-verified library).
+    # Imported lazily to avoid an import cycle (example_queries imports COMPANIES from this module).
+    # format_schema_for_llm no longer dumps all of them; generate_sql retrieves the relevant few.
+    from .example_queries import EXAMPLES
+    sample_queries = EXAMPLES
 
     company_mappings = {t: [info["name"], *[(a.title()) for a in info["aliases"]], t] for t, info in COMPANIES.items()}
 
@@ -402,17 +393,10 @@ def format_schema_for_llm(metadata: dict, enumerations: dict | None = None) -> s
         lines.append(f"  - {rel}")
     lines.append("")
 
-    # Rules.
+    # Rules. (Relevant example queries are injected separately, per-question, by generate_sql.)
     lines.append("## RULES")
     for rule in metadata["business_rules"]:
         lines.append(f"  - {rule}")
-    lines.append("")
-
-    # Example queries (teaching few-shot — the model still generates fresh SQL).
-    lines.append("## EXAMPLE QUERIES")
-    for i, sample in enumerate(metadata["sample_queries"], 1):
-        lines.append(f"{i}. Q: {sample['question']}")
-        lines.append(f"   SQL: {sample['sql']}")
     lines.append("")
 
     return "\n".join(lines)

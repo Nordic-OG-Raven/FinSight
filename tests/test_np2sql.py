@@ -83,6 +83,55 @@ def test_prompt_block_grounded_and_clean():
     assert "fact_financial_metrics" not in s and "dimension_id" not in s
 
 
+def test_example_selection_relevant_and_diverse():
+    """Retrieval keys on masked intent (not the company named) and keeps the set diverse."""
+    from src.np2sql.example_queries import select_examples
+    picks = select_examples("What was Oracle's operating margin in 2022?")
+    assert 1 <= len(picks) <= 3 and all("question" in p and "sql" in p for p in picks)
+    assert any(p["intent"] == "ratio" for p in picks)                 # company masked -> still a margin example
+    q = select_examples("show me the quarterly revenue for some company")
+    assert any(p["intent"] == "quarterly" for p in q)
+    broad = select_examples("compare and rank the companies by their growth")
+    assert len({p["intent"] for p in broad}) >= 2                     # not 3 near-duplicates
+
+
+def _ok_result():
+    return {"data": [{"n": 1}], "columns": ["n"], "row_count": 1, "execution_time": 0.0, "warning": None}
+
+
+def test_answer_query_self_corrects_on_execution_error():
+    """A first SQL that errors on execution is repaired on the second attempt."""
+    from src.np2sql.np2sql_service import answer_query
+    def gen(q, meta, db, prior_attempt=None):
+        return "SELECT nope FROM ratios" if prior_attempt is None else "SELECT 1"
+    def ex(sql, db, timeout=30, max_rows=10000):
+        if "nope" in sql:
+            raise Exception('column "nope" does not exist')
+        return _ok_result()
+    out = answer_query("q", {}, "db://x", _generate=gen, _execute=ex)
+    assert out["success"] and out["attempts"] == 2 and len(out["repairs"]) == 1
+
+
+def test_answer_query_repairs_safety_rejection():
+    """A first SQL rejected by the safety check is repaired, not returned as an error."""
+    from src.np2sql.np2sql_service import answer_query
+    seq = iter(["DROP TABLE x", "SELECT 1"])
+    def gen(q, meta, db, prior_attempt=None):
+        return next(seq)
+    out = answer_query("q", {}, "db", _generate=gen, _execute=lambda *a, **k: _ok_result())
+    assert out["success"] and out["attempts"] == 2
+    assert "safety" in out["repairs"][0]["error"].lower()
+
+
+def test_answer_query_gives_up_after_max_attempts():
+    from src.np2sql.np2sql_service import answer_query
+    def ex(sql, db, timeout=30, max_rows=10000):
+        raise Exception("boom")
+    out = answer_query("q", {}, "db", max_attempts=3,
+                       _generate=lambda *a, **k: "SELECT bad FROM ratios", _execute=ex)
+    assert not out["success"] and out["attempts"] == 3 and len(out["repairs"]) == 3 and out["error"]
+
+
 @pytest.mark.skipif("CI" in os.environ, reason="needs local warehouse")
 def test_sample_queries_execute():
     """Every sample SQL in the schema context runs read-only against the warehouse."""
