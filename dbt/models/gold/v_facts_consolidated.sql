@@ -1,31 +1,33 @@
-{{ config(
-    materialized='table',
-    post_hook="create index if not exists idx_vfc_ticker_year on {{ this }} (ticker, fiscal_year)"
-) }}
+{{ config(materialized='view') }}
 
--- Serving view reproducing the legacy public.v_facts_consolidated shape (consolidated facts
--- only), sourced from the medallion. Consumed by the NP2SQL endpoint and as the canonical
--- "one row per consolidated fact" surface.
+-- Consolidated (non-dimensioned) facts: the canonical "one row per consolidated fact" surface,
+-- consumed by the NP2SQL endpoint. This used to be a materialized TABLE duplicating ~95 MB of
+-- fct_financial_facts; it is now a lightweight VIEW over the already-materialized
+-- gold.v_facts_hierarchical, filtered to non-dimensioned rows. Row-for-row and value identical to
+-- the old table (verified). It stays fast because v_facts_hierarchical carries a partial index
+-- idx_vfh_ticker_year (ticker, fiscal_year) WHERE NOT is_dimensioned, which the NP2SQL lookups hit.
+-- (This is a filtered projection over an indexed table, NOT the per-row jsonb pattern that forced
+-- v_facts_hierarchical itself to be a table.)
 
 select
-    f.ticker,
-    f.concept                                         as concept_name,
-    f.taxonomy,
-    {{ normalized_label('f.concept', 'f.canonical_label') }} as normalized_label,
-    f.standard_label,
-    f.statement_type,
-    f.fiscal_year,
-    f.fiscal_period,
-    f.period_type,
-    f.period_grain,  -- 'annual'|'quarter'|'ytd_or_other'|'instant'(year-end)|'quarter_instant'
-    f.period_start                                    as start_date,
-    f.period_end                                      as end_date,
-    f.instant_date,
-    f.value_numeric,
-    f.value_usd,
-    f.value_text,
-    f.unit                                            as unit_measure,
-    f.form                                            as filing_type,
-    f.period_of_report                                as fiscal_year_end
-from {{ ref('fct_financial_facts') }} f
-where f.is_dimensioned = false
+    ticker,
+    concept_name,
+    taxonomy,
+    normalized_label,
+    standard_label,
+    statement_type,
+    fiscal_year,
+    fiscal_period,
+    period_type,
+    period_grain,
+    start_date,
+    end_date,
+    instant_date,
+    value_numeric,
+    value_usd,
+    value_text,
+    unit_measure,
+    filing_type,
+    fiscal_year_end
+from {{ ref('v_facts_hierarchical') }}
+where is_dimensioned = false
