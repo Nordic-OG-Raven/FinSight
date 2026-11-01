@@ -83,16 +83,38 @@ def test_prompt_block_grounded_and_clean():
     assert "fact_financial_metrics" not in s and "dimension_id" not in s
 
 
-def test_example_selection_relevant_and_diverse():
-    """Retrieval keys on masked intent (not the company named) and keeps the set diverse."""
-    from src.np2sql.example_queries import select_examples
-    picks = select_examples("What was Oracle's operating margin in 2022?")
-    assert 1 <= len(picks) <= 3 and all("question" in p and "sql" in p for p in picks)
-    assert any(p["intent"] == "ratio" for p in picks)                 # company masked -> still a margin example
-    q = select_examples("show me the quarterly revenue for some company")
-    assert any(p["intent"] == "quarterly" for p in q)
-    broad = select_examples("compare and rank the companies by their growth")
-    assert len({p["intent"] for p in broad}) >= 2                     # not 3 near-duplicates
+def test_lexical_selection_relevant_and_diverse():
+    """Fallback retrieval keys on masked intent (not the company named) and stays diverse.
+    Backend is pinned off so this is deterministic and never makes a network call in CI."""
+    from src.np2sql import example_queries as eq
+    orig = eq._get_backend
+    eq._get_backend = lambda: None
+    try:
+        picks = eq.select_examples("What was Oracle's operating margin in 2022?")
+        assert 1 <= len(picks) <= 3 and all("question" in p and "sql" in p for p in picks)
+        assert any(p["intent"] == "ratio" for p in picks)             # company masked -> still a margin example
+        assert any(p["intent"] == "quarterly"
+                   for p in eq.select_examples("show me the quarterly revenue for some company"))
+        # synonym layer: "over the years" must now reach the trend example (the gap embeddings would fix)
+        assert any(p["intent"] == "trend"
+                   for p in eq.select_examples("how did some company's revenue do over the years"))
+        broad = eq.select_examples("compare and rank the companies by their growth")
+        assert len({p["intent"] for p in broad}) >= 2                 # not 3 near-duplicates
+    finally:
+        eq._get_backend = orig
+
+
+def test_embedding_scores_drive_selection_with_diversity():
+    """When an embedding backend is available, its scores rank selection, still kept diverse."""
+    from src.np2sql import example_queries as eq
+    orig = eq._score_embedding
+    priority = {"rank": 0.95, "ratio": 0.90, "quarterly": 0.85}
+    eq._score_embedding = lambda q: [(priority.get(eq.EXAMPLES[i]["intent"], 0.1), i) for i in range(eq._N)]
+    try:
+        intents = [p["intent"] for p in eq.select_examples("anything", k=3)]
+        assert intents[0] == "rank" and len(set(intents)) == 3
+    finally:
+        eq._score_embedding = orig
 
 
 def _ok_result():
